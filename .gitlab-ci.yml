@@ -1,0 +1,32 @@
+stages:
+  - verify
+
+variables:
+  GOMODCACHE: "$CI_PROJECT_DIR/.cache/go/pkg/mod"
+  GOCACHE: "$CI_PROJECT_DIR/.cache/go-build"
+  POSTGRES_DB: picnic
+  POSTGRES_USER: picnic
+  POSTGRES_PASSWORD: picnic
+  DATABASE_URL: "postgres://picnic:picnic@db:5432/picnic?sslmode=disable"
+
+backend-verify:
+  stage: verify
+  image: golang:1.25.11
+  services:
+    - name: postgis/postgis:18-3.6
+      alias: db
+  cache:
+    key:
+      prefix: "go-${CI_JOB_IMAGE}"
+      files:
+        - go.sum
+    paths:
+      - .cache/go/pkg/mod/
+      - .cache/go-build/
+    policy: pull-push
+  script:
+    - go mod download
+    - go run ./cmd/migrate
+    - make test
+    - make lint
+    - make build

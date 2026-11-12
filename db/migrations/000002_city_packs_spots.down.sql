@@ -1,0 +1,4 @@
+DROP TABLE IF EXISTS spot_amenity;
+DROP TABLE IF EXISTS spot_source;
+DROP TABLE IF EXISTS spot;
+DROP TABLE IF EXISTS city_pack;

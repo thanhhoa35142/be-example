@@ -1,0 +1,711 @@
+openapi: 3.0.3
+info:
+  title: Pickhour API
+  version: "0.1.0"
+  description: |
+    Picnic-spot scoring API. Hourly 0-100 scores with explanations.
+
+    Conventions:
+    - Success responses (except `/v1/spots` bbox) are wrapped in `{ "data": ... }`.
+    - Errors are RFC 7807 `application/problem+json` with a stable `code`.
+    - All timestamps are RFC3339 UTC. Distances in meters. Coordinates `[lon, lat]`.
+servers:
+  - url: http://localhost:8080
+    description: local dev
+paths:
+  /healthz:
+    get:
+      summary: Liveness probe
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+  /readyz:
+    get:
+      summary: Readiness probe (checks DB)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+        "503":
+          description: Unavailable
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: unavailable }
+
+  /v1/spots:
+    get:
+      summary: Spots in viewport (GeoJSON FeatureCollection)
+      description: Returns raw GeoJSON — NOT wrapped in `data`.
+      parameters:
+        - name: bbox
+          in: query
+          required: true
+          schema: { type: string }
+          description: "west,south,east,north in WGS84 degrees; each axis <= 0.5"
+          example: "4.7,52.3,4.95,52.42"
+        - name: when
+          in: query
+          required: false
+          schema: { type: string, format: date-time }
+          description: Score hour; truncated to the hour; default now
+      responses:
+        "200":
+          description: GeoJSON FeatureCollection
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FeatureCollection" }
+        "400":
+          description: Invalid bbox
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+              examples:
+                tooLarge:
+                  value:
+                    type: about:blank
+                    code: bbox_too_large
+                    title: Bbox too large
+                    status: 400
+                    detail: zoom in or reduce the viewport
+                    instance: /v1/spots
+                    requestId: 3f6569db-3d46-41c5-a1dd-11335502dcce
+
+  /v1/spots/{id}:
+    get:
+      summary: Spot detail
+      parameters:
+        - $ref: "#/components/parameters/SpotId"
+      responses:
+        "200":
+          description: Spot detail
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: "#/components/schemas/SpotDetail" }
+        "301":
+          description: Spot merged — follow Location header
+          headers:
+            Location:
+              schema: { type: string }
+              description: "/v1/spots/{newId}"
+        "404":
+          description: Not found
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /v1/spots/{id}/forecast:
+    get:
+      summary: Hourly scores for the next 7 days (168 points)
+      parameters:
+        - $ref: "#/components/parameters/SpotId"
+      responses:
+        "200":
+          description: Forecast points
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/ForecastPoint" }
+        "404":
+          description: Not found
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /v1/recommendations:
+    get:
+      summary: Best spots around a point
+      parameters:
+        - name: lat
+          in: query
+          required: true
+          schema: { type: number, format: double, minimum: -90, maximum: 90 }
+        - name: lon
+          in: query
+          required: true
+          schema: { type: number, format: double, minimum: -180, maximum: 180 }
+        - name: radius
+          in: query
+          required: false
+          schema: { type: number, format: double, default: 5000, maximum: 50000 }
+          description: meters
+        - name: when
+          in: query
+          required: false
+          schema: { type: string, format: date-time }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 3, maximum: 50 }
+          description: Free tier default is 3
+      responses:
+        "200":
+          description: Ranked recommendations
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: "#/components/schemas/RecommendationList" }
+        "400":
+          description: Invalid query
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /v1/devices:
+    post:
+      summary: Register or refresh a device
+      description: id is client-generated UUID stored in Keychain.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeviceRegister" }
+      responses:
+        "200":
+          description: Registered
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      id: { type: string, format: uuid }
+        "400":
+          description: Invalid body
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "409":
+          description: apnsToken bound to another device
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /v1/devices/{id}:
+    delete:
+      summary: Soft-delete device (GDPR unlink)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "204": { description: Deleted }
+        "404":
+          description: Not found
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /v1/spots/{id}/reports:
+    post:
+      summary: Confirm a spot or report it wrong
+      description: One report per device/spot/type/day; duplicates return status=duplicate.
+      parameters:
+        - $ref: "#/components/parameters/SpotId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SpotReportRequest" }
+      responses:
+        "201":
+          description: Accepted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReportStatus" }
+        "200":
+          description: Duplicate (same day)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReportStatus" }
+        "404":
+          description: Device or spot not found
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /v1/spots/{id}/crowd-reports:
+    post:
+      summary: "Busy / moderate / quiet vote for current hour"
+      description: Call only when user is near the spot; proximity verified on-device. Server derives local dow/hour from device tz.
+      parameters:
+        - $ref: "#/components/parameters/SpotId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CrowdReportRequest" }
+      responses:
+        "201":
+          description: Accepted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReportStatus" }
+        "429":
+          description: Rate limited (30/device/24h)
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /v1/scores/feedback:
+    post:
+      summary: "Is this score right? verdict"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ScoreFeedbackRequest" }
+      responses:
+        "201":
+          description: Accepted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReportStatus" }
+
+  /v1/alerts:
+    get:
+      summary: List alert rules for a device
+      parameters:
+        - name: deviceId
+          in: query
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Alert rules
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/AlertRule" }
+    post:
+      summary: Create an alert rule (plan-limited)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AlertRuleRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/AlertRule" }
+        "403":
+          description: Free plan limit (1 rule)
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /v1/alerts/{id}:
+    put:
+      summary: Replace an alert rule
+      parameters:
+        - $ref: "#/components/parameters/SpotId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AlertRuleRequest" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/AlertRule" }
+        "404":
+          description: Not found
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+    delete:
+      summary: Delete an alert rule
+      parameters:
+        - $ref: "#/components/parameters/SpotId"
+        - name: deviceId
+          in: query
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "204": { description: Deleted }
+        "404":
+          description: Not found
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /v1/devices/{id}/entitlement:
+    get:
+      summary: Resolved plan for a device
+      parameters:
+        - $ref: "#/components/parameters/SpotId"
+      responses:
+        "200":
+          description: Entitlement
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Entitlement" }
+
+  /v1/entitlement/link:
+    post:
+      summary: Link a StoreKit signed transaction to a device
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [deviceId, signedTransaction]
+              properties:
+                deviceId: { type: string, format: uuid }
+                signedTransaction: { type: string }
+      responses:
+        "200":
+          description: Linked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      plan: { type: string, enum: [free, plus] }
+        "400":
+          description: Invalid JWS
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /v1/appstore/notifications:
+    post:
+      summary: App Store Server Notifications V2 webhook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [signedPayload]
+              properties:
+                signedPayload: { type: string }
+      responses:
+        "200":
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      status: { type: string, example: accepted }
+
+components:
+  parameters:
+    SpotId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  schemas:
+    Problem:
+      type: object
+      required: [type, code, title, status]
+      properties:
+        type: { type: string, example: "about:blank" }
+        code:
+          type: string
+          enum: [bad_request, invalid_id, invalid_bbox, bbox_too_large, invalid_when, invalid_query, invalid_body, invalid_report, not_found, merged_spot, conflict, rate_limited, plan_limit, internal_error]
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
+        requestId: { type: string, format: uuid }
+
+    Names:
+      type: object
+      additionalProperties: { type: string }
+      description: lang code -> localized name; fallback key "name"
+      example: { name: Vondelpark, en: Vondelpark, nl: Vondelpark }
+
+    ScoreSnapshot:
+      type: object
+      nullable: true
+      properties:
+        score: { type: integer, minimum: 0, maximum: 100 }
+        confidence: { type: integer, minimum: 1, maximum: 3 }
+        capReason: { type: string, nullable: true, enum: [rain, heat, cold, null] }
+        reasons:
+          type: array
+          maxItems: 3
+          items: { $ref: "#/components/schemas/Reason" }
+        computedAt: { type: string, format: date-time }
+
+    Reason:
+      type: object
+      required: [code]
+      description: >-
+        Machine-readable reason code; clients translate to localized strings.
+        Codes may grow — tolerate unknown values. Current catalog in docs/API.md
+        (source of truth: backend/internal/modules/scoring/scorer.go).
+      properties:
+        code:
+          type: string
+          example: weather.rain_risk
+        params:
+          type: object
+          additionalProperties: true
+          example: { temp: 21 }
+
+    SpotProperties:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [park, beach, site, table] }
+        name: { type: string, nullable: true }
+        names: { $ref: "#/components/schemas/Names" }
+        country: { type: string }
+        city: { type: string, nullable: true }
+        tz: { type: string, example: Europe/Amsterdam }
+        lastVerifiedAt: { type: string, format: date-time, nullable: true }
+        when: { type: string, format: date-time }
+        score: { $ref: "#/components/schemas/ScoreSnapshot" }
+
+    FeatureCollection:
+      type: object
+      required: [type, features]
+      properties:
+        type: { type: string, enum: [FeatureCollection] }
+        features:
+          type: array
+          items:
+            type: object
+            required: [type, geometry, properties]
+            properties:
+              type: { type: string, enum: [Feature] }
+              geometry:
+                type: object
+                properties:
+                  type: { type: string, enum: [Point] }
+                  coordinates:
+                    type: array
+                    items: { type: number, format: double }
+                    minItems: 2
+                    maxItems: 2
+                    description: "[lon, lat]"
+              properties: { $ref: "#/components/schemas/SpotProperties" }
+
+    Amenity:
+      type: object
+      properties:
+        type: { type: string, example: toilet }
+        distanceM: { type: integer }
+        source: { type: string, example: osm }
+
+    Source:
+      type: object
+      properties:
+        source: { type: string, example: osm }
+        sourceId: { type: string, example: "node/12345" }
+        version: { type: integer, nullable: true }
+        importedAt: { type: string, format: date-time }
+
+    SpotDetail:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [park, beach, site, table] }
+        name: { type: string, nullable: true }
+        names: { $ref: "#/components/schemas/Names" }
+        coordinates:
+          type: array
+          items: { type: number, format: double }
+          minItems: 2
+          maxItems: 2
+          description: "[lon, lat]"
+        area:
+          type: object
+          nullable: true
+          description: GeoJSON MultiPolygon
+        country: { type: string }
+        city: { type: string, nullable: true }
+        tz: { type: string }
+        lastVerifiedAt: { type: string, format: date-time, nullable: true }
+        amenities:
+          type: array
+          items: { $ref: "#/components/schemas/Amenity" }
+        sources:
+          type: array
+          items: { $ref: "#/components/schemas/Source" }
+
+    ForecastPoint:
+      type: object
+      required: [tsHour, score, components, reasons, confidence]
+      properties:
+        tsHour: { type: string, format: date-time }
+        score: { type: integer, minimum: 0, maximum: 100 }
+        components:
+          type: object
+          description: per-component 0-100; absent key = missing data
+          properties:
+            weather: { type: integer }
+            crowd: { type: integer }
+            amenity: { type: integer }
+            shade: { type: integer }
+            fresh: { type: integer }
+        capReason: { type: string, nullable: true }
+        reasons:
+          type: array
+          maxItems: 3
+          items: { $ref: "#/components/schemas/Reason" }
+        confidence: { type: integer, minimum: 1, maximum: 3 }
+
+    RecommendationItem:
+      allOf:
+        - $ref: "#/components/schemas/SpotDetail"
+        - type: object
+          properties:
+            distanceM: { type: number, format: double }
+            score: { $ref: "#/components/schemas/ScoreSnapshot" }
+
+    RecommendationList:
+      type: object
+      properties:
+        when: { type: string, format: date-time }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/RecommendationItem" }
+
+    DeviceRegister:
+      type: object
+      required: [id]
+      properties:
+        id: { type: string, format: uuid, description: client-generated, stored in Keychain }
+        apnsToken: { type: string, nullable: true }
+        apnsEnv: { type: string, enum: [sandbox, production], nullable: true }
+        locale: { type: string, nullable: true, example: en }
+        tz: { type: string, nullable: true, example: Europe/Amsterdam }
+        appVersion: { type: string, nullable: true }
+        prefs:
+          type: object
+          additionalProperties: true
+          example: { tempUnit: celsius, distUnit: km }
+
+    SpotReportRequest:
+      type: object
+      required: [deviceId, type]
+      properties:
+        deviceId: { type: string, format: uuid }
+        type: { type: string, enum: [confirm, missing, closed, issue] }
+        issueCode: { type: string, nullable: true }
+
+    CrowdReportRequest:
+      type: object
+      required: [deviceId, level]
+      properties:
+        deviceId: { type: string, format: uuid }
+        level: { type: integer, minimum: 1, maximum: 3, description: "1=quiet 2=moderate 3=busy" }
+
+    ScoreFeedbackRequest:
+      type: object
+      required: [deviceId, spotId, tsHour, verdict]
+      properties:
+        deviceId: { type: string, format: uuid }
+        spotId: { type: string, format: uuid }
+        tsHour: { type: string, format: date-time }
+        verdict: { type: integer, minimum: -1, maximum: 1, description: "-1 too low, 0 right, +1 too high" }
+
+    ReportStatus:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [status]
+          properties:
+            status: { type: string, enum: [accepted, duplicate] }
+
+    AlertRule:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        deviceId: { type: string, format: uuid }
+        spotId: { type: string, format: uuid, nullable: true }
+        h3Cell: { type: integer, format: int64, nullable: true }
+        radiusM: { type: integer, nullable: true }
+        minScore: { type: integer, minimum: 0, maximum: 100 }
+        daysMask: { type: integer, minimum: 1, maximum: 127, description: "bit i = weekday i (0=Sunday)" }
+        startLocal: { type: string, example: "08:00" }
+        endLocal: { type: string, example: "10:00" }
+        tz: { type: string, example: "Europe/Amsterdam" }
+        enabled: { type: boolean }
+
+    AlertRuleRequest:
+      type: object
+      required: [deviceId, minScore, daysMask, startLocal, endLocal, tz]
+      properties:
+        deviceId: { type: string, format: uuid }
+        spotId: { type: string, format: uuid, description: "exactly one of spotId or h3Cell+radiusM" }
+        h3Cell: { type: integer, format: int64 }
+        radiusM: { type: integer, maximum: 50000 }
+        minScore: { type: integer, minimum: 0, maximum: 100 }
+        daysMask: { type: integer, minimum: 1, maximum: 127 }
+        startLocal: { type: string, pattern: "^\\d{2}:\\d{2}$" }
+        endLocal: { type: string, pattern: "^\\d{2}:\\d{2}$" }
+        tz: { type: string }
+        enabled: { type: boolean }
+
+    Entitlement:
+      type: object
+      properties:
+        plan: { type: string, enum: [free, plus] }
+        productId: { type: string }
+        expiresAt: { type: string, format: date-time }
+        isTrial: { type: boolean }
+        autoRenew: { type: boolean }

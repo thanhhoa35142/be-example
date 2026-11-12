@@ -1,0 +1,25 @@
+services:
+  db:
+    image: postgis/postgis:18-3.6
+    container_name: picnic-postgres
+    environment:
+      POSTGRES_USER: picnic
+      POSTGRES_PASSWORD: picnic
+      POSTGRES_DB: picnic
+    ports:
+      - "127.0.0.1:4343:5432"
+    volumes:
+      - picnicdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U picnic -d picnic"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+    networks: [pickhour]
+
+volumes:
+  picnicdata:
+
+networks:
+  pickhour:
+    external: true

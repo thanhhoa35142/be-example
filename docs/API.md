@@ -1,0 +1,465 @@
+# Pickhour API — Client Contract (v1)
+
+Base URL: `https://api.pickhour.app` (dev: `http://localhost:8080`)
+
+All timestamps are **RFC3339 in UTC** (`2026-11-11T14:00:00Z`).
+All distances in **meters**, coordinates in **WGS84 decimal degrees**.
+`coordinates` arrays are **GeoJSON order: `[longitude, latitude]`**.
+
+---
+
+## Conventions
+
+### Success envelope
+
+Every non-GeoJSON success response is wrapped:
+
+```json
+{ "data": { ... } }
+```
+
+### Error envelope (RFC 7807 `application/problem+json`)
+
+```json
+{
+  "type": "about:blank",
+  "code": "not_found",
+  "title": "Spot not found",
+  "status": 404,
+  "detail": "optional human-readable detail",
+  "instance": "/v1/spots/{id}",
+  "requestId": "3f6569db-3d46-41c5-a1dd-11335502dcce"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `code` | **Machine-readable. Switch on this, never on `title`.** |
+| `requestId` | Server-generated (or echoes your `X-Request-ID` header). Show it in error UI / send to support. |
+| `detail` | Optional, may be shown to the user. |
+
+### Error codes
+
+| code | HTTP | Meaning |
+|---|---|---|
+| `bad_request` | 400 | Generic bad request |
+| `invalid_id` | 400 | Path/body ID is not a UUID |
+| `invalid_bbox` | 400 | `bbox` malformed or out of WGS84 bounds |
+| `bbox_too_large` | 400 | Viewport > ~0.5° — zoom in |
+| `invalid_when` | 400 | `when` is not RFC3339 |
+| `invalid_query` | 400 | lat/lon/radius/limit out of range |
+| `invalid_body` | 400 | JSON body malformed or missing fields |
+| `invalid_report` | 400 | report type/level/verdict out of domain |
+| `not_found` | 404 | spot or device does not exist |
+| `merged_spot` | 301 | spot merged — follow `Location` header |
+| `conflict` | 409 | e.g. `apnsToken` already bound to another device |
+| `rate_limited` | 429 | too many reports — retry later |
+| `internal_error` | 500 | unexpected — details only in server logs via `requestId` |
+
+### Request headers
+
+- `X-Request-ID: <uuid>` (optional) — sent for support correlation; echoed in responses.
+- `X-Client: pickhour-ios` — identifies the app; sent by the official client.
+- `X-Client-Version: <semver>+<build>` — app version, e.g. `0.1.0+3`.
+- `X-Client-OS: ios <version>` — OS version string.
+- `Content-Type: application/json` on POST/PUT/DELETE.
+
+---
+
+## Endpoints
+
+### `GET /healthz` / `GET /readyz`
+
+Liveness/readiness probes. No auth.
+
+```json
+{ "status": "ok" }
+```
+
+---
+
+### `GET /v1/spots?bbox=&when=`
+
+Spots inside a viewport with their score at a given hour.
+**Returns raw GeoJSON `FeatureCollection` (NOT wrapped in `data`)** — feed directly to a GeoJSON decoder / map layer.
+
+Query params:
+
+| param | required | format | notes |
+|---|---|---|---|
+| `bbox` | yes | `west,south,east,north` | WGS84 degrees; each axis ≤ 0.5° |
+| `when` | no | RFC3339 | score hour; truncated to the hour server-side; default = now |
+
+```json
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": { "type": "Point", "coordinates": [4.8686, 52.3579] },
+      "properties": {
+        "id": "01a1cad6-366a-7ab3-a298-6d9f9f28f665",
+        "kind": "park",
+        "name": "Vondelpark",
+        "names": { "name": "Vondelpark", "en": "Vondelpark", "nl": "Vondelpark", "de": "Vondelpark" },
+        "country": "NL",
+        "city": "Amsterdam",
+        "tz": "Europe/Amsterdam",
+        "lastVerifiedAt": "2026-11-11T13:39:58Z",
+        "when": "2026-11-11T14:00:00Z",
+        "score": {
+          "score": 62,
+          "confidence": 2,
+          "capReason": null,
+          "reasons": [
+            { "code": "weather.clear", "params": { "temp": 21 } },
+            { "code": "crowd.low" }
+          ],
+          "computedAt": "2026-11-11T13:00:00Z"
+        }
+      }
+    }
+  ]
+}
+```
+
+| property | type | notes |
+|---|---|---|
+| `kind` | string | `park` \| `beach` \| `site` \| `table` |
+| `names` | object | lang → name; pick by device locale, fallback `name` key |
+| `score` | object \| null | `null` when no score computed yet — still render the pin |
+| `score.score` | int 0–100 | overall picnic score |
+| `score.confidence` | int 1–3 | 3 = high; model-only crowd caps at 2 |
+| `score.capReason` | string \| null | e.g. `rain`, `heat`, `cold` when hard-capped |
+| `score.reasons` | array ≤3 | `{code, params?}` — **translate client-side** |
+
+---
+
+### `GET /v1/spots/{id}`
+
+Spot detail.
+
+```json
+{
+  "data": {
+    "id": "01a1cad6-366a-7ab3-a298-6d9f9f28f665",
+    "kind": "park",
+    "name": "Vondelpark",
+    "names": { "en": "Vondelpark", "nl": "Vondelpark" },
+    "coordinates": [4.8686, 52.3579],
+    "area": { "type": "MultiPolygon", "coordinates": [ ... ] },
+    "country": "NL",
+    "city": "Amsterdam",
+    "tz": "Europe/Amsterdam",
+    "lastVerifiedAt": "2026-11-11T13:39:58Z",
+    "amenities": [
+      { "type": "toilet", "distanceM": 120, "source": "osm" },
+      { "type": "parking", "distanceM": 300, "source": "osm" }
+    ],
+    "sources": [
+      { "source": "osm", "sourceId": "node/12345", "version": 1, "importedAt": "2026-11-11T13:39:58Z" }
+    ]
+  }
+}
+```
+
+| field | notes |
+|---|---|
+| `coordinates` | `[lon, lat]` — for MapKit use `CLLocationCoordinate2D(latitude: c[1], longitude: c[0])` |
+| `area` | optional GeoJSON MultiPolygon (park outline); absent for point spots |
+| `amenities[].type` | `toilet`, `parking`, `water`, `bbq`, `playground`, `dog_area`, ... |
+| `lastVerifiedAt` | show as "data verified …" in UI |
+
+Merged spot → `301` with `Location: /v1/spots/{newId}` — follow it.
+
+---
+
+### `GET /v1/spots/{id}/forecast`
+
+Hourly scores for the next **7 days** (168 points).
+
+```json
+{
+  "data": [
+    {
+      "tsHour": "2026-11-11T14:00:00Z",
+      "score": 0,
+      "components": { "weather": 32, "crowd": 44, "amenity": 37, "fresh": 100 },
+      "capReason": "rain",
+      "reasons": [
+        { "code": "cap.rain" },
+        { "code": "weather.cold", "params": { "temp": 2.8 } },
+        { "code": "crowd.moderate" }
+      ],
+      "confidence": 2
+    }
+  ]
+}
+```
+
+| field | notes |
+|---|---|
+| `components` | per-component 0–100; absent key = missing data (don't render as 0) |
+| `capReason` | `rain` \| `heat` \| `cold` — score was hard-capped |
+| `reasons` | max 3 codes; `params` optional numbers for interpolation |
+
+---
+
+### `GET /v1/recommendations?lat=&lon=&radius=&when=&limit=`
+
+Best spots around a point, ranked by score.
+
+| param | required | default | range |
+|---|---|---|---|
+| `lat`, `lon` | yes | — | WGS84 |
+| `radius` | no | 5000 | ≤ 50000 m |
+| `when` | no | now | RFC3339, quantized to hour |
+| `limit` | no | 3 (Free tier) | ≤ 50 |
+
+```json
+{
+  "data": {
+    "when": "2026-11-11T14:00:00Z",
+    "items": [
+      {
+        "id": "01a1cad6-366a-7ab3-a298-6d9f9f28f665",
+        "kind": "park",
+        "name": "Vondelpark",
+        "names": { "en": "Vondelpark" },
+        "coordinates": [4.8686, 52.3579],
+        "country": "NL",
+        "city": "Amsterdam",
+        "tz": "Europe/Amsterdam",
+        "lastVerifiedAt": "2026-11-11T13:39:58Z",
+        "distanceM": 1984.4,
+        "score": {
+          "score": 0,
+          "confidence": 2,
+          "capReason": "rain",
+          "reasons": [ { "code": "cap.rain" }, { "code": "weather.cold", "params": { "temp": 7.1 } }, { "code": "crowd.high" } ],
+          "computedAt": "2026-11-11T13:59:46Z"
+        }
+      }
+    ]
+  }
+}
+```
+
+Ordering: `score` DESC (nulls last) → `distanceM` ASC.
+
+---
+
+### `POST /v1/devices`
+
+Register or refresh a device. **`id` is generated client-side once (UUID) and stored in Keychain.**
+
+Request:
+
+```json
+{
+  "id": "3f6569db-3d46-41c5-a1dd-11335502dcce",
+  "apnsToken": "abc123...",
+  "apnsEnv": "sandbox",
+  "locale": "en",
+  "tz": "Europe/Amsterdam",
+  "appVersion": "0.1.0",
+  "prefs": { "tempUnit": "celsius", "distUnit": "km" }
+}
+```
+
+| field | required | notes |
+|---|---|---|
+| `id` | yes | UUID, stable per install |
+| `apnsToken` | no | send after APNs registration; `apnsEnv` = `sandbox`\|`production` |
+| `tz` | no | IANA name — used to derive local dow/hour for crowd reports |
+| `prefs` | no | free-form jsonb for user settings |
+
+Response `200`:
+
+```json
+{ "data": { "id": "3f6569db-3d46-41c5-a1dd-11335502dcce" } }
+```
+
+`409 conflict` if `apnsToken` is already bound to a different device ID.
+
+### `DELETE /v1/devices/{id}`
+
+Soft-delete (GDPR/CCPA unlink). `204` on success, `404` if unknown/already deleted.
+Until real auth exists, the device UUID acts as the capability token — keep it in Keychain.
+
+---
+
+### `POST /v1/spots/{id}/reports`
+
+Confirm a spot or report it wrong. One report per device/spot/type/**day** — resubmitting same day returns `duplicate` (not an error).
+
+Request:
+
+```json
+{ "deviceId": "3f65...", "type": "issue", "issueCode": "no_toilet" }
+```
+
+| field | values |
+|---|---|
+| `type` | `confirm` \| `missing` \| `closed` \| `issue` |
+| `issueCode` | optional free-text code, only meaningful with `issue` |
+
+Response `201` (or `200` when duplicate):
+
+```json
+{ "data": { "status": "accepted" } }
+{ "data": { "status": "duplicate" } }
+```
+
+---
+
+### `POST /v1/spots/{id}/crowd-reports`
+
+"Busy / moderate / quiet" vote for the **current** hour slot. Proximity is verified **on-device** — the app must only call this when the user is near the spot; the server never receives coordinates.
+
+Request:
+
+```json
+{ "deviceId": "3f65...", "level": 3 }
+```
+
+`level`: `1` = quiet, `2` = moderate, `3` = busy.
+
+Response `201`: `{ "data": { "status": "accepted" } }`
+`429 rate_limited` after 30 reports/device/24h.
+
+---
+
+### `POST /v1/scores/feedback`
+
+"Is this score right?" verdict on a spot+hour.
+
+```json
+{ "deviceId": "3f65...", "spotId": "01a1...", "tsHour": "2026-11-11T14:00:00Z", "verdict": 1 }
+```
+
+`verdict`: `-1` (too low) \| `0` (about right) \| `+1` (too high).
+
+Response `201`: `{ "data": { "status": "accepted" } }`
+
+---
+
+## Reason codes (translate client-side)
+
+Servers send codes + params; the app renders localized strings.
+
+| code | params | meaning |
+|---|---|---|
+| `cap.rain` / `cap.heat` / `cap.cold` | — | score hard-capped (emitted first when a cap applies) |
+| `weather.rain_risk` | `prob` (0–100) | rain expected |
+| `weather.hot` / `weather.cold` | `temp` (°C, 0.1) | extreme temperature |
+| `weather.clear` | `temp` (°C, 0.1) | clear skies |
+| `crowd.low` / `crowd.moderate` / `crowd.high` | — | busyness level |
+| `amenity.well_equipped` | — | good facilities nearby |
+| `fresh.recent` | — | data recently verified |
+
+Unknown codes may appear as the scorer evolves — clients should render a sensible fallback, not crash. Source of truth: `backend/internal/modules/scoring/scorer.go`.
+
+## Score components
+
+`weather` 40% · `crowd` 25% · `amenity` 20% · `shade` 10% · `fresh` 5% (weights renormalize when a component is missing). `shade` has no data source yet — expect it absent.
+
+---
+
+## Alerts
+
+Alert rules fire a push when the best score in an area meets `minScore` during a local-time window. Free plan: **1 rule**; Plus: unlimited. Windows may cross midnight (`startLocal` > `endLocal`). `daysMask` bit `i` = weekday `i` (0=Sunday … 6=Saturday); e.g. `127` = every day, `96` = Sat+Sun (`64+32`). Each (rule, window) delivers at most once.
+
+### `GET /v1/alerts?deviceId={uuid}`
+
+```json
+{"data":{"items":[{"id":"...","deviceId":"...","spotId":"...","h3Cell":null,"radiusM":null,"minScore":50,"daysMask":127,"startLocal":"08:00","endLocal":"10:00","tz":"Europe/Amsterdam","enabled":true}]}}
+```
+
+### `POST /v1/alerts` — create (201)
+
+```json
+{"deviceId":"...","spotId":"...","minScore":50,"daysMask":127,"startLocal":"08:00","endLocal":"10:00","tz":"Europe/Amsterdam"}
+```
+
+Area: exactly one of `spotId` **or** `h3Cell`+`radiusM` (meters, ≤50 km). Errors: `invalid_body` (bad shape/range), `plan_limit` (403, Free cap), `not_found` (unknown device).
+
+### `PUT /v1/alerts/{id}` / `DELETE /v1/alerts/{id}?deviceId=...`
+
+Same body as create (PUT replaces all fields). DELETE → `204`.
+
+### Push payload (APNs)
+
+When a rule fires, the notifier sends an APNs alert (`apns-push-type: alert`, priority 10, collapse-id = rule ID) to the device's `apnsToken` on `apnsEnv`. Request body:
+
+```json
+{
+  "aps": {"alert": {"title": "Good window for a picnic", "body": "Vondelpark scores 87 — perfect timing to head out."}, "sound": "default"},
+  "kind": "alert.window",
+  "spotId": "<uuid>",
+  "ruleId": "<uuid>",
+  "score": 87,
+  "windowStart": "2026-11-20T14:00:00Z"
+}
+```
+
+- `aps.alert.title`/`body` are localized server-side from `device.locale` (en/nl; fallback en).
+- Custom keys are top-level next to `aps` (APNs requirement) and surface in iOS `userInfo`.
+- The app routes taps on `kind == "alert.window"` + `spotId` to spot detail. Unknown `kind` values must be ignored.
+- Devices without `apnsToken` are skipped (delivery stays unrecorded, not a failure).
+- Credentials: `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_KEY` (.p8 PEM), optional `APNS_BUNDLE_ID`. Without them the worker logs payloads instead of sending.
+
+## Entitlement (Free / Plus)
+
+### `GET /v1/devices/{id}/entitlement`
+
+```json
+{"data":{"plan":"plus","productId":"com.pickhour.plus.yearly","expiresAt":"2027-11-11T00:00:00Z","isTrial":true,"autoRenew":true,"ownership":"purchased"}}
+```
+
+`plan` is `free` or `plus`; subscription fields are absent on Free. `ownership` is `purchased` or `family_shared` — the latter when Plus comes through Apple Family Sharing (the family member's StoreKit transaction carries `ownershipType: FAMILY_SHARED`; the app links it via `POST /v1/entitlement/link` like any other purchase).
+
+### `POST /v1/entitlement/link`
+
+Attach a StoreKit 2 `signedTransaction` (JWS) to a device:
+
+```json
+{"deviceId":"...","signedTransaction":"<jws>"}
+```
+
+→ `{"data":{"plan":"plus"}}`. Errors: `invalid_body` (malformed JWS), `not_found` (unknown device).
+
+### `POST /v1/appstore/notifications`
+
+App Store Server Notifications V2 webhook: `{"signedPayload":"<jws>"}` → `{"data":{"status":"accepted"}}`. The backend records every notification in `apple_notification` and upserts the embedded transaction.
+
+---
+
+## Admin (staff-only)
+
+All `/v1/admin/*` endpoints require `Authorization: Bearer $ADMIN_TOKEN`. When `ADMIN_TOKEN` is unset the whole surface returns 404. Never expose to the public app.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /v1/admin/overview` | Headline counts: spots, devices (24h active), pending reports, alert rules/deliveries, Plus devices |
+| `GET /v1/admin/freshness` | Newest `fetched_at`/`computed_at`/`updated_at` per pipeline stage — staleness alerting |
+| `GET /v1/admin/metrics` | Analytical counters: score distribution + histogram + cap rate (7d), feedback verdicts, report type/status (30d), crowd sources, subscription statuses, alert delivery outcomes |
+| `GET /v1/admin/jobs?limit=` | Recent `job_run` rows (status ok/failed/skipped, error) |
+| `GET /v1/admin/jobs/schedules` | Registered worker job intervals in seconds, including allowed bounds |
+| `PATCH /v1/admin/jobs/{job}/schedule` | Update a job interval: `{"intervalSeconds":3600}` |
+| `GET /v1/admin/reports?limit=` | Pending spot_report moderation queue |
+| `PATCH /v1/admin/reports/{id}` | `{"status":"accepted"|"rejected"}` |
+| `GET /v1/admin/scoring-config` | All scoring_config versions; `isActive` marks the effective one |
+| `POST /v1/admin/scoring-config` | New version `{weights, thresholds, activate}` — draft gets `active_from=9999`, activate=true goes live now |
+| `POST /v1/admin/scoring-config/{version}/activate` | Make a stored version effective |
+
+Workers write `job_run` automatically (start → ok/failed/skipped).
+Job schedules are stored in the database; running workers reload changes within 30 seconds. Jobs still run once at worker startup. Allowed interval ranges: `weather.refresh` 900–3600s, `crowd.refresh` 3600–2592000s, `crowd.aggregate` 60–86400s, `scoring.recompute` 300–21600s, and `alerts.evaluate` 60–3600s.
+
+### `POST /v1/events` — product analytics batch
+
+```json
+{"deviceId":"...","events":[{"name":"app_open"},{"name":"paywall_view","props":{"source":"forecast_day3"}}]}
+```
+
+→ `202 {"data":{"status":"accepted","count":3}}`. Rules: `name` must match `[a-z][a-z0-9_]{0,63}`; batch 1–100 events; **no location in props**; 5000 events/device/day cap → `rate_limited`. Admin đọc qua `GET /v1/admin/events?days=` (byName/byDay).

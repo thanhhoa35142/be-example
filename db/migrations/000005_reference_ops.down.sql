@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS job_run;
+DROP TABLE IF EXISTS holiday;
