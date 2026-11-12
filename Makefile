@@ -28,6 +28,12 @@ run: ## Run the API server
 worker: ## Run the background worker
 	go run ./cmd/worker
 
+mcp: ## Run the MCP server (Streamable HTTP on :8081/mcp)
+	go run ./cmd/mcp
+
+keyctl: ## Build the API-key CLI
+	go build -o bin/keyctl ./cmd/keyctl
+
 dev: db-up ## Hot-reload dev mode (requires air)
 	air
 

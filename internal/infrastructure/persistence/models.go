@@ -32,6 +32,28 @@ type AlertRule struct {
 	Enabled    bool        `json:"enabled"`
 }
 
+type ApiKey struct {
+	ID           uuid.UUID          `json:"id"`
+	Name         string             `json:"name"`
+	Description  string             `json:"description"`
+	KeyPrefix    string             `json:"key_prefix"`
+	KeyHash      []byte             `json:"key_hash"`
+	RateLimitRps int32              `json:"rate_limit_rps"`
+	ExpiresAt    pgtype.Timestamptz `json:"expires_at"`
+	LastUsedAt   pgtype.Timestamptz `json:"last_used_at"`
+	RevokedAt    pgtype.Timestamptz `json:"revoked_at"`
+	CreatedAt    time.Time          `json:"created_at"`
+}
+
+type ApiKeyGrant struct {
+	ID        uuid.UUID `json:"id"`
+	ApiKeyID  uuid.UUID `json:"api_key_id"`
+	Effect    string    `json:"effect"`
+	Resource  string    `json:"resource"`
+	Action    string    `json:"action"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 type AppleNotification struct {
 	NotificationUuid      uuid.UUID          `json:"notification_uuid"`
 	Type                  string             `json:"type"`

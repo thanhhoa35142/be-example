@@ -463,3 +463,46 @@ Job schedules are stored in the database; running workers reload changes within 
 ```
 
 → `202 {"data":{"status":"accepted","count":3}}`. Rules: `name` must match `[a-z][a-z0-9_]{0,63}`; batch 1–100 events; **no location in props**; 5000 events/device/day cap → `rate_limited`. Admin đọc qua `GET /v1/admin/events?days=` (byName/byDay).
+
+## MCP server (agents)
+
+`cmd/mcp` exposes a read-only MCP server over **Streamable HTTP** at `POST /mcp` (default port `MCP_PORT`=8081). Clients authenticate with `Authorization: Bearer phk_...`.
+
+### API keys & scopes
+
+Keys live in `api_key` + `api_key_grant` tables. A grant is `(effect, resource, action)` where each field may be `*`; evaluation is **deny-wins**: any matching deny rejects, otherwise at least one matching allow is required. Secrets are `phk_` + 32 random bytes (base64url); only the SHA-256 hash and a display prefix are stored — the raw secret is shown once at creation.
+
+Manage keys with the staff CLI:
+
+```bash
+go run ./cmd/keyctl create --name "ops-agent" --grant spots:read --grant recommendations:read
+# prints the secret ONCE
+go run ./cmd/keyctl list
+keyctl revoke <id>
+keyctl grant add <id> spots:read     # allow grant
+keyctl grant rm  <id> spots:read
+```
+
+Key fields: `expires_at` (optional TTL), `revoked_at`, `last_used_at` (stamped async on each auth), `rate_limit_rps` (stored; enforcement planned).
+
+### Tools (resource:action required)
+
+| Tool | Scope | Description |
+|---|---|---|
+| `spots_in_bbox` | `spots:read` | Spots + score in a bbox (`west/south/east/north`, optional `when` RFC3339) |
+| `spot_get` | `spots:read` | Spot detail: names, amenities, sources |
+| `spot_forecast` | `spots:read` | Hourly 0–100 forecast, 7 days |
+| `recommend_spots` | `recommendations:read` | Ranked spots near lat/lon |
+
+Example client config (streamable HTTP + bearer):
+
+```json
+{
+  "mcpServers": {
+    "pickhour": {
+      "url": "https://mcp.pickhour.app/mcp",
+      "headers": { "Authorization": "Bearer phk_..." }
+    }
+  }
+}
+```

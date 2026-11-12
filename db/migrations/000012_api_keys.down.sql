@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS api_key_grant;
+DROP TABLE IF EXISTS api_key;
