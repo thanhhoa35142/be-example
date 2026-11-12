@@ -84,6 +84,16 @@ jobs:
       - name: Migrate
         run: go run ./cmd/migrate
 
+      - name: Verify dump path early (empty DB)
+        # Fails fast if pg_dump auth/connectivity is broken — cheaper than
+        # discovering it after a multi-hour ingest.
+        run: |
+          docker run --rm --network host -e PGPASSWORD=picnic \
+            postgis/postgis:18-3.6 \
+            pg_dump -h localhost -U picnic -d picnic -Fc -Z9 \
+            -f /tmp/probe.dump
+          ls -lh /tmp/probe.dump
+
       - name: Create city packs
         env:
           PGCONNECT_TIMEOUT: 10
@@ -145,6 +155,15 @@ jobs:
             echo "## Job runs"
             psql "$DATABASE_URL" -c "select job, status, started_at::timestamp(0), stats is not null has_stats from t_job_runs order by id desc limit 30"
           } | tee ingest-summary.md
+
+      - name: Upload ingest summary
+        # Lands before the dump step so results survive a dump failure.
+        uses: actions/upload-artifact@v4
+        with:
+          name: ingest-summary
+          path: ingest-summary.md
+          retention-days: 30
+          if-no-files-found: error
 
       - name: Dump database (excluding raw ingest layer)
         run: |
