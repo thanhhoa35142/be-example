@@ -107,11 +107,11 @@ type TableClusterMember struct {
 
 // TableCluster groups orphan tables that form one candidate picnic site.
 type TableCluster struct {
-	ID       int64 // DBSCAN cluster id (only unique within this run)
-	Members  []TableClusterMember
-	Lon      float64 // member centroid
-	Lat      float64
-	Size     int
+	ID      int64 // DBSCAN cluster id (only unique within this run)
+	Members []TableClusterMember
+	Lon     float64 // member centroid
+	Lat     float64
+	Size    int
 }
 
 // SourceLink is the provenance record for one (source, source_id).
@@ -272,9 +272,9 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 		if err := store.ClearRaw(ctx); err != nil {
 			return err
 		}
-		// Stage 1: stream → classify → raw layer.
+		// Stage 1: stream → classify → raw layer (inserted inline so the
+		// feature buffer never materializes in memory).
 		clf := s.classifier()
-		var rows []RawRow
 		for f, err := range snap.Features() {
 			if err != nil {
 				return fmt.Errorf("feature stream: %w", err)
@@ -292,18 +292,21 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 			case osm.RoleAmenity:
 			}
 			tagsJSON, _ := json.Marshal(f.Tags)
-			rows = append(rows, RawRow{
+			if err := store.InsertRaw(ctx, RawRow{
 				Source: f.Source, SourceID: f.SourceID, Version: f.Version,
 				Role: string(c.Role), Kind: c.Kind, Amenity: string(c.Amenity),
 				Quality: c.Quality, ExcludeReason: c.Exclude,
 				TagsJSON: tagsJSON, GeoJSON: f.GeoJSON,
 				ContentHash: contentHash(c, f), RunID: runID,
-			})
-		}
-		for _, r := range rows {
-			if err := store.InsertRaw(ctx, r); err != nil {
-				return fmt.Errorf("insert raw %s/%s: %w", r.Source, r.SourceID, err)
+			}); err != nil {
+				return fmt.Errorf("insert raw %s/%s: %w", f.Source, f.SourceID, err)
 			}
+		}
+		if pe, ok := snap.(interface{ ParseErrors() int }); ok && pe.ParseErrors() > 0 {
+			if st.ExcludedByReason == nil {
+				st.ExcludedByReason = map[string]int{}
+			}
+			st.ExcludedByReason["parse_error"] = pe.ParseErrors()
 		}
 
 		// Stage 2: load planner inputs.
@@ -489,9 +492,9 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 					st.SkippedCurated++
 				} else {
 					newStatus, reason := pol.NextStatus(osm.Evidence{
-						CurrentStatus:  osm.Status(sp.Status),
-						Quality:        quality,
-						Trusted:        true,
+						CurrentStatus: osm.Status(sp.Status),
+						Quality:       quality,
+						Trusted:       true,
 						SourceChanged: !viaFallback &&
 							(c.Version > oldVersion ||
 								(oldHash != "" && c.ContentHash != "" && c.ContentHash != oldHash)),

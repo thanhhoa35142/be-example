@@ -222,13 +222,18 @@ func intersectsPack(g json.RawMessage, b Bounds) bool {
 
 // osmiumSnapshot streams geojsonseq lines from the cached export file.
 type osmiumSnapshot struct {
-	asOf   time.Time
-	pack   Bounds
-	file   *os.File
-	reader *bufio.Reader
+	asOf        time.Time
+	pack        Bounds
+	file        *os.File
+	reader      *bufio.Reader
+	parseErrors int
 }
 
 func (s *osmiumSnapshot) AsOf() time.Time { return s.asOf }
+
+// ParseErrors reports geojsonseq lines that failed to decode — the caller
+// surfaces them in stats instead of silently dropping features.
+func (s *osmiumSnapshot) ParseErrors() int { return s.parseErrors }
 
 func (s *osmiumSnapshot) Close() error {
 	if s.file != nil {
@@ -246,8 +251,9 @@ func (s *osmiumSnapshot) Features() iter.Seq2[RawFeature, error] {
 				// geojsonseq prefixes every record with RS (0x1E).
 				raw = bytes.TrimLeft(raw, "\x1e\n\r ")
 				var feat osmiumFeature
-				if jerr := json.Unmarshal(raw, &feat); jerr == nil && feat.Geometry != nil &&
-					intersectsPack(feat.Geometry, s.pack) {
+				if jerr := json.Unmarshal(raw, &feat); jerr != nil {
+					s.parseErrors++
+				} else if feat.Geometry != nil && intersectsPack(feat.Geometry, s.pack) {
 					tags := map[string]string{}
 					for k, v := range feat.Properties {
 						if k == "created_by" {
