@@ -268,6 +268,51 @@ WHERE (created_at, id) > (cursor_ts, cursor_id)
 
 ---
 
+## 7b. Circuit breaker — khi nào cần, khi nào overkill
+
+Breaker là "cầu dao" bảo vệ caller khỏi downstream chập chờn: sau N lỗi
+liên tiếp thì **fail-fast** (trả lỗi ngay ~0ms) thay vì để mỗi request
+chờ timeout 10-30s — tránh retry storm làm service chết càng nặng, và
+mở đường cho fallback (cache cũ, data mặc định).
+
+State machine 3 trạng thái:
+
+```
+CLOSED ──N lỗi liên tiếp──► OPEN ──hết cooldown──► HALF_OPEN
+ ▲                                                  │
+ └──── request thử OK ──── request thử fail ────────┘
+```
+
+| State | Hành vi |
+|---|---|
+| CLOSED | Bình thường, đếm lỗi liên tiếp |
+| OPEN | Fail-fast ngay, không gọi downstream; trả lỗi tức thì |
+| HALF_OPEN | Cho đúng 1 request thử; OK → CLOSED, fail → OPEN lại |
+
+Go lib phổ biến: `sony/gobreaker`. Config cần: failure threshold,
+cooldown duration, và quyết định có fallback không.
+
+**Khi nào ĐÁNG dùng**: downstream nằm trong **request path** — user
+realtime chờ kết quả (vd API gọi payment/weather trực tiếp). Lúc đó
+mỗi request timeout 30s × N concurrent là tắc nghẽn thật.
+
+**Khi nào OVERKILL** (case Pickhour):
+
+- Worker gọi provider → batch job; provider chết thì job fail, tick
+  sau retry — **không ai phải chờ**
+- API/MCP chỉ đọc precomputed data → provider chết không ảnh hưởng user
+
+Thay breaker bằng thứ đơn giản hơn đã implement: per-cell `Failed++` +
+continue (một cell lỗi không sink job), job-level skip khi quota hết,
+retry backoff trong `httpx`. Chỉ thêm gobreaker nếu sau này API/MCP
+gọi provider trực tiếp trong request path (vd endpoint "thời tiết
+thực tế ngay bây giờ").
+
+Rule of thumb: **breaker bảo vệ latency của user-facing path** — không
+có user nào chờ thì chưa cần cầu dao.
+
+---
+
 ## 8. SwiftUI / iOS lessons (pickhour-app)
 
 App iOS viết trên máy Linux/WSL — **không có Xcode local**, build/test qua
