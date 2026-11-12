@@ -289,7 +289,8 @@ func (s *OsmiumSource) Open(ctx context.Context, p Pack) (Snapshot, error) {
 	base := strings.TrimSuffix(filepath.Base(pbf), ".osm.pbf")
 	fv := filterVersion()
 	filtered, err := s.ensureArtifact(ctx, base+".f"+fv+".filtered.osm.pbf", pbf, func(out, in string) []string {
-		args := []string{"tags-filter", "-o", out, "--overwrite", in}
+		// -f pbf is required: the .tmp suffix hides the format from osmium.
+		args := []string{"tags-filter", "-f", "pbf", "-o", out, "--overwrite", in}
 		return append(args, filterExpressions...)
 	})
 	if err != nil {
