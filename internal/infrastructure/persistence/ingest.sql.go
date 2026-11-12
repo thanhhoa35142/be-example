@@ -159,7 +159,7 @@ INSERT INTO t_spots (city_pack_id, kind, name, names, geom, area, country,
 VALUES ($1, $2, $3, $4::jsonb,
         ST_SetSRID(ST_MakePoint($5, $6), 4326)::geography,
         CASE WHEN $14::text IS NOT NULL
-             THEN ST_GeomFromGeoJSON($14) END,
+             THEN ST_Multi(ST_GeomFromGeoJSON($14)) END,
         $7, NULL, $8, $9, $10, $11, $12::jsonb, $13, now())
 RETURNING id
 `
@@ -298,7 +298,7 @@ SELECT source, source_id, kind, quality, version, tags, content_hash,
        ST_AsGeoJSON(geom) AS geojson,
        ST_X(ST_Centroid(geom)) AS lon,
        ST_Y(ST_Centroid(geom)) AS lat,
-       CASE WHEN ST_Dimension(geom) > 0 THEN ST_AsGeoJSON(geom) END AS polygon_geojson
+       CASE WHEN ST_Dimension(geom) >= 2 THEN ST_AsGeoJSON(geom) END AS polygon_geojson
 FROM t_ingest_features
 WHERE pack_id = $1 AND role = 'candidate'
 ORDER BY source_id
@@ -715,7 +715,7 @@ UPDATE t_spots SET
     name = $2, names = $3::jsonb, attrs = $4::jsonb,
     quality = $5, geom = ST_SetSRID(ST_MakePoint($6, $7), 4326)::geography,
     area = CASE WHEN $8::text IS NOT NULL
-                THEN ST_GeomFromGeoJSON($8) ELSE area END,
+                THEN ST_Multi(ST_GeomFromGeoJSON($8)) ELSE area END,
     updated_at = now()
 WHERE id = $1
 `

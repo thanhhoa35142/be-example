@@ -286,3 +286,20 @@ boundary. Plus ~20 known real places as manual tuning checklist.
   15%, 2 runs, 180 d) — starting guesses to tune on the golden set.
 - `s_amenity`/`s_shade` consumption in scoring not yet reviewed — could
   change amenity `count` and shade deltas.
+
+## Implementation status (2026-11-12)
+
+- `ingest.Service.RunPack` + tx-scoped Store: implemented, verified idempotent
+  on Overpass (Amsterdam/RTM/Utrecht/Den Haag) and osmium (Andorra).
+- `osm.OverpassSource`: dev path, relations → centroid (v1 limitation).
+- `osm.OsmiumSource`: production path — `osmium tags-filter` (cached per
+  extract) + `osmium export -f geojsonseq -u type_id`; multipolygons
+  assembled by osmium; pack-bounds filtering in Go. Runs through a
+  configurable command prefix (`OSMIUM_CMD`) so it works inside docker.
+- `ingest.extract.refresh`: Geofabrik .pbf download + `.prev` rotation.
+- Worker: `ingest.osm`, `ingest.extract.refresh` jobs +
+  `-job/-pack/-dry-run` one-shot flags.
+- Known gaps: no spatial+name fallback matching, no orphan table
+  clustering, `run_id` NULL on raw rows, LineString candidates keep
+  point anchor only, `osmium extract` step not used yet (bbox filter
+  happens in Go — revisit for country-sized extracts).

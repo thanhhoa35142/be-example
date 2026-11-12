@@ -18,6 +18,9 @@ type Config struct {
 	RunMigrations     bool   // auto-run DB migrations on boot (default true)
 	OverpassURL       string // Overpass interpreter endpoint (ingest dev path)
 	IngestExtractDir  string // local dir for Geofabrik .pbf snapshots
+	IngestSource      string // "overpass" (default, dev) | "osmium" (prod path)
+	OsmiumPBF         string // path to the .osm.pbf extract for osmium source
+	OsmiumCmd         string // optional command prefix (e.g. docker wrapper), space-separated
 }
 
 func Load() (Config, error) {
@@ -31,6 +34,9 @@ func Load() (Config, error) {
 		RunMigrations:     getEnv("RUN_MIGRATIONS", "true") != "false",
 		OverpassURL:       getEnv("OVERPASS_URL", "https://overpass-api.de/api/interpreter"),
 		IngestExtractDir:  getEnv("INGEST_EXTRACT_DIR", "./data/extracts"),
+		IngestSource:      getEnv("INGEST_SOURCE", "overpass"),
+		OsmiumPBF:         os.Getenv("OSMIUM_PBF"),
+		OsmiumCmd:         os.Getenv("OSMIUM_CMD"),
 	}
 	if cfg.WeatherH3Res < 0 || cfg.WeatherH3Res > 15 {
 		return Config{}, fmt.Errorf("WEATHER_H3_RES must be 0-15, got %d", cfg.WeatherH3Res)

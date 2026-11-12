@@ -8,6 +8,7 @@ import (
 	"log"
 	"log/slog"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -102,14 +103,29 @@ func main() {
 		notifier.NewSender(logger, alertsRepo, apnsClient),
 	)
 
-	// Ingest: Overpass dev path today; the osmium adapter slots in behind
-	// the same osm.FeatureSource port later.
+	// Ingest: Overpass dev path by default; INGEST_SOURCE=osmium switches to
+	// the production .pbf pipeline behind the same osm.FeatureSource port.
 	ingestRepo := persistence.NewIngestRepo(pool)
+	var featureSource osm.FeatureSource = &osm.OverpassSource{
+		URL:    cfg.OverpassURL,
+		Client: httpx.NewClient(httpx.Policy{Name: "overpass", RatePerSec: 1, Burst: 2, Timeout: 300 * time.Second}),
+	}
+	if cfg.IngestSource == "osmium" {
+		if cfg.OsmiumPBF == "" {
+			log.Fatalf("INGEST_SOURCE=osmium requires OSMIUM_PBF")
+		}
+		var cmd []string
+		if cfg.OsmiumCmd != "" {
+			cmd = strings.Fields(cfg.OsmiumCmd)
+		}
+		featureSource = &osm.OsmiumSource{
+			PBFPath: cfg.OsmiumPBF,
+			WorkDir: cfg.IngestExtractDir,
+			Cmd:     cmd,
+		}
+	}
 	ingestSvc := &ingest.Service{
-		Src: &osm.OverpassSource{
-			URL:    cfg.OverpassURL,
-			Client: httpx.NewClient(httpx.Policy{Name: "overpass", RatePerSec: 1, Burst: 2, Timeout: 300 * time.Second}),
-		},
+		Src:            featureSource,
 		Store:          ingestRepo,
 		Clf:            osm.Classifier{Policy: osm.DefaultQualityPolicy},
 		Pol:            osm.DefaultPolicy,
