@@ -27,13 +27,13 @@ type jobScheduleLimit struct {
 }
 
 var jobScheduleLimits = map[string]jobScheduleLimit{
-	"weather.refresh":   {min: 15 * 60, max: 60 * 60},
-	"crowd.refresh":     {min: 60 * 60, max: 30 * 24 * 60 * 60},
-	"crowd.aggregate":   {min: 60, max: 24 * 60 * 60},
-	"scoring.recompute": {min: 5 * 60, max: 6 * 60 * 60},
-	"alerts.evaluate":   {min: 60, max: 60 * 60},
-	"retention.purge":   {min: 60 * 60, max: 30 * 24 * 60 * 60},
-	"ingest.osm":        {min: 60 * 60, max: 7 * 24 * 60 * 60},
+	"weather.refresh":        {min: 15 * 60, max: 60 * 60},
+	"crowd.refresh":          {min: 60 * 60, max: 30 * 24 * 60 * 60},
+	"crowd.aggregate":        {min: 60, max: 24 * 60 * 60},
+	"scoring.recompute":      {min: 5 * 60, max: 6 * 60 * 60},
+	"alerts.evaluate":        {min: 60, max: 60 * 60},
+	"retention.purge":        {min: 60 * 60, max: 30 * 24 * 60 * 60},
+	"ingest.osm":             {min: 60 * 60, max: 7 * 24 * 60 * 60},
 	"ingest.extract.refresh": {min: 24 * 60 * 60, max: 30 * 24 * 60 * 60},
 }
 
@@ -55,14 +55,14 @@ func (s *Service) AbandonJobRuns(ctx context.Context, job string) error {
 	return s.repo.AbandonJobRuns(ctx, job)
 }
 
-func (s *Service) RecordJobFinish(ctx context.Context, id int64, status string, rowsAffected *int, jobErr error) {
+func (s *Service) RecordJobFinish(ctx context.Context, id int64, status string, rowsAffected *int, jobErr error, stats []byte) {
 	var errText *string
 	if jobErr != nil {
 		msg := jobErr.Error()
 		errText = &msg
 	}
 	// best-effort: instrumentation must never fail the job itself
-	_ = s.repo.FinishJobRun(context.Background(), id, status, rowsAffected, errText)
+	_ = s.repo.FinishJobRun(context.Background(), id, status, rowsAffected, errText, stats)
 }
 
 func (s *Service) Overview(ctx context.Context) (Overview, error) {

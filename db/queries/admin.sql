@@ -5,7 +5,7 @@ RETURNING id;
 
 -- name: FinishJobRun :exec
 UPDATE t_job_runs SET finished_at = now(), status = $2,
-       rows_affected = $3, error = $4
+       rows_affected = $3, error = $4, stats = $5
 WHERE id = $1;
 
 -- name: ListJobRuns :many

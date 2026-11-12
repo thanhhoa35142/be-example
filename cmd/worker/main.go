@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -47,6 +48,21 @@ type jobRunIDKey struct{}
 func jobRunID(ctx context.Context) int64 {
 	id, _ := ctx.Value(jobRunIDKey{}).(int64)
 	return id
+}
+
+// jobStatsKey carries a per-run stats accumulator so job functions can
+// persist structured stats into t_job_runs.stats at finish.
+type jobStatsKey struct{}
+
+type jobStatsBag struct {
+	m map[string]any
+}
+
+func (b *jobStatsBag) set(key string, v any) {
+	if b.m == nil {
+		b.m = map[string]any{}
+	}
+	b.m[key] = v
 }
 
 const jobSchedulePollInterval = 30 * time.Second
@@ -169,6 +185,12 @@ func main() {
 			st, err := ingestSvc.RunPack(ctx, packs[i], jobRunID(ctx), *dryRun)
 			if err != nil {
 				return fmt.Errorf("pack %s: %w", packs[i].Slug, err)
+			}
+			if bag, ok := ctx.Value(jobStatsKey{}).(*jobStatsBag); ok {
+				existing, _ := bag.m["packs"].([]any)
+				bag.set("packs", append(existing, map[string]any{
+					"pack": packs[i].Slug, "stats": st,
+				}))
 			}
 			logger.Info("ingest pack done", "pack", packs[i].Slug, "dry_run", *dryRun,
 				"features", st.FeaturesRead, "created", st.Created, "updated", st.Updated,
@@ -425,17 +447,23 @@ func executeJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, ad
 	if runID != 0 {
 		ctx = context.WithValue(ctx, jobRunIDKey{}, runID)
 	}
+	statsBag := &jobStatsBag{}
+	ctx = context.WithValue(ctx, jobStatsKey{}, statsBag)
 	jobErr := j.fn(ctx)
+	var statsJSON []byte
+	if len(statsBag.m) > 0 {
+		statsJSON, _ = json.Marshal(statsBag.m)
+	}
 	switch {
 	case jobErr == nil:
 		logger.Info("job ok", "job", j.name)
 		if runID != 0 {
-			adminSvc.RecordJobFinish(ctx, runID, "succeeded", nil, nil)
+			adminSvc.RecordJobFinish(ctx, runID, "succeeded", nil, nil, statsJSON)
 		}
 	default:
 		logger.Error("job failed", "job", j.name, "error", jobErr)
 		if runID != 0 {
-			adminSvc.RecordJobFinish(ctx, runID, "failed", nil, jobErr)
+			adminSvc.RecordJobFinish(ctx, runID, "failed", nil, jobErr, statsJSON)
 		}
 	}
 }

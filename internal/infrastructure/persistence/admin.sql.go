@@ -346,7 +346,7 @@ func (q *Queries) FeedbackVerdictCounts(ctx context.Context, arg FeedbackVerdict
 
 const finishJobRun = `-- name: FinishJobRun :exec
 UPDATE t_job_runs SET finished_at = now(), status = $2,
-       rows_affected = $3, error = $4
+       rows_affected = $3, error = $4, stats = $5
 WHERE id = $1
 `
 
@@ -355,6 +355,7 @@ type FinishJobRunParams struct {
 	Status       string      `json:"status"`
 	RowsAffected pgtype.Int4 `json:"rows_affected"`
 	Error        pgtype.Text `json:"error"`
+	Stats        []byte      `json:"stats"`
 }
 
 func (q *Queries) FinishJobRun(ctx context.Context, arg FinishJobRunParams) error {
@@ -363,6 +364,7 @@ func (q *Queries) FinishJobRun(ctx context.Context, arg FinishJobRunParams) erro
 		arg.Status,
 		arg.RowsAffected,
 		arg.Error,
+		arg.Stats,
 	)
 	return err
 }

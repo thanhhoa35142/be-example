@@ -29,7 +29,7 @@ func (r *AdminRepo) AbandonJobRuns(ctx context.Context, job string) error {
 	return r.q.AbandonJobRuns(ctx, job)
 }
 
-func (r *AdminRepo) FinishJobRun(ctx context.Context, id int64, status string, rowsAffected *int, errText *string) error {
+func (r *AdminRepo) FinishJobRun(ctx context.Context, id int64, status string, rowsAffected *int, errText *string, stats []byte) error {
 	var rows pgtype.Int4
 	if rowsAffected != nil {
 		rows = pgtype.Int4{Int32: int32(*rowsAffected), Valid: true}
@@ -39,6 +39,7 @@ func (r *AdminRepo) FinishJobRun(ctx context.Context, id int64, status string, r
 		Status:       status,
 		RowsAffected: rows,
 		Error:        textParam(errText),
+		Stats:        stats,
 	})
 }
 
