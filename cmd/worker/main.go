@@ -41,8 +41,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := persistence.RunMigrations(cfg.DatabaseURL); err != nil {
-		log.Fatalf("migrations: %v", err)
+	if cfg.RunMigrations {
+		if err := persistence.RunMigrations(cfg.DatabaseURL); err != nil {
+			log.Fatalf("migrations: %v", err)
+		}
 	}
 
 	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)

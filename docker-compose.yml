@@ -19,6 +19,19 @@ services:
       retries: 10
     networks: [pickhour]
 
+  migrate:
+    build: .
+    image: pickhour-backend:latest
+    container_name: picnic-migrate
+    command: ["/app/migrate"]
+    environment:
+      DATABASE_URL: postgres://picnic:picnic@db:5432/picnic?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    networks: [pickhour]
+
   api:
     build: .
     image: pickhour-backend:latest
@@ -26,12 +39,15 @@ services:
     command: ["/app/api"]
     environment:
       PORT: "8080"
+      RUN_MIGRATIONS: "false"
       DATABASE_URL: postgres://picnic:picnic@db:5432/picnic?sslmode=disable
     ports:
       - "127.0.0.1:8080:8080"
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
     networks: [pickhour]
 
@@ -41,10 +57,13 @@ services:
     container_name: picnic-worker
     command: ["/app/worker"]
     environment:
+      RUN_MIGRATIONS: "false"
       DATABASE_URL: postgres://picnic:picnic@db:5432/picnic?sslmode=disable
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
     networks: [pickhour]
 
@@ -55,12 +74,15 @@ services:
     command: ["/app/mcp"]
     environment:
       MCP_PORT: "8081"
+      RUN_MIGRATIONS: "false"
       DATABASE_URL: postgres://picnic:picnic@db:5432/picnic?sslmode=disable
     ports:
       - "127.0.0.1:8081:8081"
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
     networks: [pickhour]
 

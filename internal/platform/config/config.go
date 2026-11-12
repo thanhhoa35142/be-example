@@ -12,6 +12,7 @@ type Config struct {
 	Port            string
 	DatabaseURL     string
 	WeatherProvider string // "open-meteo" (default) | "weatherkit"
+	RunMigrations   bool   // auto-run DB migrations on boot (default true)
 }
 
 func Load() (Config, error) {
@@ -20,6 +21,7 @@ func Load() (Config, error) {
 		Port:            getEnv("PORT", "8080"),
 		DatabaseURL:     os.Getenv("DATABASE_URL"),
 		WeatherProvider: getEnv("WEATHER_PROVIDER", "open-meteo"),
+		RunMigrations:   getEnv("RUN_MIGRATIONS", "true") != "false",
 	}
 	if cfg.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("DATABASE_URL is required")
