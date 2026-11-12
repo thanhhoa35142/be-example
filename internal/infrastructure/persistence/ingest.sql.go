@@ -69,6 +69,79 @@ func (q *Queries) ClearPackAmenities(ctx context.Context, cityPackID uuid.UUID) 
 	return err
 }
 
+const clusterOrphanTables = `-- name: ClusterOrphanTables :many
+WITH orphan AS (
+    SELECT f.source, f.source_id, f.version,
+           ST_X(ST_Centroid(f.geom)) AS lon,
+           ST_Y(ST_Centroid(f.geom)) AS lat,
+           ST_Centroid(f.geom) AS geom
+    FROM t_ingest_features f
+    WHERE f.pack_id = $1 AND f.role = 'candidate' AND f.kind = 'table'
+      AND NOT EXISTS (
+          SELECT 1 FROM t_ingest_features p
+          WHERE p.pack_id = f.pack_id AND p.role = 'candidate'
+            AND p.kind IN ('park','beach')
+            AND ST_GeometryType(p.geom) IN ('ST_Polygon','ST_MultiPolygon')
+            AND ST_Contains(p.geom, ST_Centroid(f.geom))
+            AND NOT (p.source = f.source AND p.source_id = f.source_id))
+),
+clustered AS (
+    SELECT o.source, o.source_id, o.version, o.lon, o.lat, o.geom,
+           ST_ClusterDBSCAN(ST_Transform(o.geom, 3857), $2, $3) OVER () AS cluster_id
+    FROM orphan o
+)
+SELECT source, source_id, version, lon, lat, cluster_id
+FROM clustered
+WHERE cluster_id >= 0
+ORDER BY cluster_id, source_id
+`
+
+type ClusterOrphanTablesParams struct {
+	PackID            uuid.UUID   `json:"pack_id"`
+	StClusterdbscan   interface{} `json:"st_clusterdbscan"`
+	StClusterdbscan_2 interface{} `json:"st_clusterdbscan_2"`
+}
+
+type ClusterOrphanTablesRow struct {
+	Source    string      `json:"source"`
+	SourceID  string      `json:"source_id"`
+	Version   pgtype.Int4 `json:"version"`
+	Lon       interface{} `json:"lon"`
+	Lat       interface{} `json:"lat"`
+	ClusterID interface{} `json:"cluster_id"`
+}
+
+// Orphan table candidates (not absorbed into a park/beach polygon) clustered
+// via ST_ClusterDBSCAN in Web Mercator. $2 is eps already adjusted to
+// mercator meters by the caller (real meters / cos(latitude)); $3 is
+// minpoints. cluster_id < 0 noise rows are dropped.
+func (q *Queries) ClusterOrphanTables(ctx context.Context, arg ClusterOrphanTablesParams) ([]ClusterOrphanTablesRow, error) {
+	rows, err := q.db.Query(ctx, clusterOrphanTables, arg.PackID, arg.StClusterdbscan, arg.StClusterdbscan_2)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ClusterOrphanTablesRow{}
+	for rows.Next() {
+		var i ClusterOrphanTablesRow
+		if err := rows.Scan(
+			&i.Source,
+			&i.SourceID,
+			&i.Version,
+			&i.Lon,
+			&i.Lat,
+			&i.ClusterID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const countRecentSpotConfirms = `-- name: CountRecentSpotConfirms :one
 SELECT count(*) FROM t_spot_reports
 WHERE spot_id = $1 AND status = 'accepted'

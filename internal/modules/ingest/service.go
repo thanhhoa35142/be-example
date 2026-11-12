@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/google/uuid"
@@ -38,6 +39,7 @@ type Stats struct {
 	HiddenVanished   int            `json:"hidden_vanished"`
 	SkippedCurated   int            `json:"skipped_curated"`
 	AmenitiesLinked  int            `json:"amenities_linked"`
+	OrphanSites      int            `json:"orphan_sites"`
 	GuardTripped     bool           `json:"guard_tripped,omitempty"`
 }
 
@@ -87,6 +89,24 @@ type AmenityRow struct {
 	Lat     float64
 }
 
+// TableClusterMember is one orphan table inside a DBSCAN cluster.
+type TableClusterMember struct {
+	Source   string
+	SourceID string
+	Version  int
+	Lon      float64
+	Lat      float64
+}
+
+// TableCluster groups orphan tables that form one candidate picnic site.
+type TableCluster struct {
+	ID       int64 // DBSCAN cluster id (only unique within this run)
+	Members  []TableClusterMember
+	Lon      float64 // member centroid
+	Lat      float64
+	Size     int
+}
+
 // SpotRow mirrors ListPackSpots.
 type SpotRow struct {
 	ID           uuid.UUID
@@ -129,6 +149,10 @@ type Store interface {
 	InsertRaw(ctx context.Context, r RawRow) error
 	Candidates(ctx context.Context) ([]CandidateRow, error)
 	Absorbed(ctx context.Context) ([]AbsorbedRow, error)
+	// OrphanTableClusters returns DBSCAN clusters of table-kind candidates
+	// not absorbed into a park/beach. epsMerc is epsilon in Web Mercator
+	// meters (caller adjusts for latitude); minPts is minpoints.
+	OrphanTableClusters(ctx context.Context, epsMerc float64, minPts int) ([]TableCluster, error)
 	Amenities(ctx context.Context) ([]AmenityRow, error)
 	Spots(ctx context.Context) ([]SpotRow, error)
 	SpotBySource(ctx context.Context, source, sourceID string) (spotID uuid.UUID, version int, found bool, err error)
@@ -445,6 +469,114 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 				return err
 			}
 			st.Absorbed++
+		}
+
+		// Stage 2b: orphan table clusters → synthetic kind=site spots.
+		// DBSCAN runs in Web Mercator; eps is stretched by 1/cos(lat).
+		eps := pol.OrphanClusterEpsM
+		if eps <= 0 {
+			eps = osm.DefaultPolicy.OrphanClusterEpsM
+		}
+		centerLat := (pack.Bounds.South + pack.Bounds.North) / 2
+		cosLat := math.Cos(centerLat * math.Pi / 180)
+		if cosLat < 0.2 {
+			cosLat = 0.2 // polar packs: cap the mercator stretch
+		}
+		clusters, err := store.OrphanTableClusters(ctx, eps/cosLat, pol.MinTablesForSite)
+		if err != nil {
+			return err
+		}
+		for _, cl := range clusters {
+			if cl.Size < pol.MinTablesForSite {
+				continue
+			}
+			// Cluster evidence: table-count bonus on top of the tag score.
+			quality := qp.TableEvidence + 10*cl.Size
+			if quality > 100 {
+				quality = 100
+			}
+
+			// Re-find the spot via any member's provenance. Only kind=site
+			// spots are reused — a member still linked to a vanished park
+			// gets re-pointed to the new cluster spot below.
+			var spotID uuid.UUID
+			var sp SpotRow
+			found := false
+			for _, m := range cl.Members {
+				id, _, ok, err := store.SpotBySource(ctx, m.Source, m.SourceID)
+				if err != nil {
+					return err
+				}
+				if !ok {
+					continue
+				}
+				row, ok2 := spotRow[id]
+				if !ok2 || row.Kind != "site" {
+					continue
+				}
+				spotID, sp, found = id, row, true
+				break
+			}
+
+			ns := NewSpot{
+				Kind: "site", Lon: cl.Lon, Lat: cl.Lat,
+				NamesJSON: []byte("{}"), AttrsJSON: []byte("{}"),
+				Country: pack.Country, TZ: pack.TZ, Quality: quality,
+			}
+			if found {
+				ns.Status = sp.Status
+				ns.StatusReason = sp.StatusReason
+				if sp.Curated {
+					st.SkippedCurated++
+				} else {
+					newStatus, reason := pol.NextStatus(osm.Evidence{
+						CurrentStatus: osm.Status(sp.Status),
+						Quality:       quality, Trusted: true,
+					})
+					ns.Status = string(newStatus)
+					ns.StatusReason = reason
+				}
+				if err := store.UpdateSpot(ctx, spotID, ns); err != nil {
+					return err
+				}
+				if !sp.Curated && ns.Status != sp.Status {
+					if err := store.SetStatus(ctx, spotID, ns.Status, ns.StatusReason); err != nil {
+						return err
+					}
+					if ns.Status == string(osm.StatusActive) && sp.Status != string(osm.StatusActive) {
+						st.Activated++
+					}
+				}
+				st.Updated++
+			} else {
+				status, reason := pol.NewSpotStatus(osm.Evidence{
+					Quality: quality, Trusted: true,
+				})
+				if status == "" {
+					continue // below floor — members stay raw-only
+				}
+				ns.Status = string(status)
+				ns.StatusReason = reason
+				id, err := store.InsertSpot(ctx, ns)
+				if err != nil {
+					return fmt.Errorf("insert table-cluster spot: %w", err)
+				}
+				spotID = id
+				if status == osm.StatusActive {
+					st.Activated++
+				} else {
+					st.Pending++
+				}
+				st.Created++
+			}
+			st.OrphanSites++
+			// Every member table becomes a source of the cluster spot so
+			// sightings/missing-runs track each table independently.
+			for _, m := range cl.Members {
+				if err := store.UpsertSource(ctx, spotID, m.Source, m.SourceID, m.Version); err != nil {
+					return err
+				}
+			}
 		}
 
 		// Stage 3: sightings → missing runs → guarded closes.

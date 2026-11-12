@@ -19,6 +19,9 @@ type Policy struct {
 	MaxCloseFraction  float64 // abort run if closes exceed this share of active
 	ConfirmShieldDays int     // recent accepted confirm shields from close
 	MinTablesForSite  int     // orphan table cluster size that becomes a site
+	// OrphanClusterEpsM is the DBSCAN epsilon in meters: tables within this
+	// distance chain into one cluster.
+	OrphanClusterEpsM float64
 }
 
 // DefaultPolicy is the starting point; tune on the golden set.
@@ -29,6 +32,7 @@ var DefaultPolicy = Policy{
 	MaxCloseFraction:  0.15,
 	ConfirmShieldDays: 180,
 	MinTablesForSite:  3,
+	OrphanClusterEpsM: 80,
 }
 
 // Evidence is what the planner knows about an existing spot at plan time.

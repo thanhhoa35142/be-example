@@ -54,6 +54,36 @@ WHERE c.pack_id = $1 AND c.role = 'candidate'
   AND c.kind IN ('site','table')
   AND NOT (c.source = p.source AND c.source_id = p.source_id);
 
+-- name: ClusterOrphanTables :many
+-- Orphan table candidates (not absorbed into a park/beach polygon) clustered
+-- via ST_ClusterDBSCAN in Web Mercator. $2 is eps already adjusted to
+-- mercator meters by the caller (real meters / cos(latitude)); $3 is
+-- minpoints. cluster_id < 0 noise rows are dropped.
+WITH orphan AS (
+    SELECT f.source, f.source_id, f.version,
+           ST_X(ST_Centroid(f.geom)) AS lon,
+           ST_Y(ST_Centroid(f.geom)) AS lat,
+           ST_Centroid(f.geom) AS geom
+    FROM t_ingest_features f
+    WHERE f.pack_id = $1 AND f.role = 'candidate' AND f.kind = 'table'
+      AND NOT EXISTS (
+          SELECT 1 FROM t_ingest_features p
+          WHERE p.pack_id = f.pack_id AND p.role = 'candidate'
+            AND p.kind IN ('park','beach')
+            AND ST_GeometryType(p.geom) IN ('ST_Polygon','ST_MultiPolygon')
+            AND ST_Contains(p.geom, ST_Centroid(f.geom))
+            AND NOT (p.source = f.source AND p.source_id = f.source_id))
+),
+clustered AS (
+    SELECT o.*,
+           ST_ClusterDBSCAN(ST_Transform(o.geom, 3857), $2, $3) OVER () AS cluster_id
+    FROM orphan o
+)
+SELECT source, source_id, version, lon, lat, cluster_id
+FROM clustered
+WHERE cluster_id >= 0
+ORDER BY cluster_id, source_id;
+
 -- name: ListPackSpots :many
 SELECT id, status, quality, curated, merged_into, kind, name, names,
        attrs, country, tz, cell_id, status_reason,

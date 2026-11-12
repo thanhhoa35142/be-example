@@ -171,6 +171,49 @@ func (s *ingestStore) Absorbed(ctx context.Context) ([]ingest.AbsorbedRow, error
 	return out, nil
 }
 
+func (s *ingestStore) OrphanTableClusters(ctx context.Context, epsMerc float64, minPts int) ([]ingest.TableCluster, error) {
+	rows, err := s.q.ClusterOrphanTables(ctx, ClusterOrphanTablesParams{
+		PackID:            s.packID,
+		StClusterdbscan:   epsMerc,
+		StClusterdbscan_2: minPts,
+	})
+	if err != nil {
+		return nil, err
+	}
+	// Rows arrive ordered by cluster_id — group consecutive runs.
+	var out []ingest.TableCluster
+	for _, r := range rows {
+		cid := int64(f64(r.ClusterID))
+		m := ingest.TableClusterMember{
+			Source:   r.Source,
+			SourceID: r.SourceID,
+			Version:  int(r.Version.Int32),
+			Lon:      f64(r.Lon),
+			Lat:      f64(r.Lat),
+		}
+		if n := len(out); n > 0 && out[n-1].ID == cid {
+			c := &out[n-1]
+			c.Members = append(c.Members, m)
+			c.Lon += m.Lon
+			c.Lat += m.Lat
+			c.Size++
+			continue
+		}
+		out = append(out, ingest.TableCluster{
+			ID:      cid,
+			Members: []ingest.TableClusterMember{m},
+			Lon:     m.Lon,
+			Lat:     m.Lat,
+			Size:    1,
+		})
+	}
+	for i := range out {
+		out[i].Lon /= float64(out[i].Size)
+		out[i].Lat /= float64(out[i].Size)
+	}
+	return out, nil
+}
+
 func (s *ingestStore) Amenities(ctx context.Context) ([]ingest.AmenityRow, error) {
 	rows, err := s.q.ListAmenityFeatures(ctx, s.packID)
 	if err != nil {
