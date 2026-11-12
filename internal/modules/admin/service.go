@@ -205,7 +205,9 @@ func (s *Service) PendingReports(ctx context.Context, limit int, after *ReportCu
 	return Page[PendingReport]{Items: rows}, nil
 }
 
-// ModerateReport sets a spot_report status (accepted/rejected).
+// ModerateReport sets a spot_report status (accepted/rejected). Accepting
+// a 'closed' report also closes the spot with reason 'closed_by_report' —
+// the ingest planner then treats it as admin-only (no auto-reopen).
 func (s *Service) ModerateReport(ctx context.Context, id uuid.UUID, status string) error {
 	if status != "accepted" && status != "rejected" {
 		return ErrInvalidStatus
@@ -216,6 +218,16 @@ func (s *Service) ModerateReport(ctx context.Context, id uuid.UUID, status strin
 	}
 	if !ok {
 		return ErrReportNotFound
+	}
+	if status != "accepted" {
+		return nil
+	}
+	spotID, typ, err := s.repo.SpotReportTarget(ctx, id)
+	if err != nil {
+		return err
+	}
+	if typ == "closed" {
+		return s.repo.CloseSpotForReport(ctx, spotID)
 	}
 	return nil
 }

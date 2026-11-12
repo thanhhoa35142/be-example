@@ -202,6 +202,19 @@ func (r *AdminRepo) UpdateReportStatus(ctx context.Context, id uuid.UUID, status
 	return n > 0, err
 }
 
+func (r *AdminRepo) SpotReportTarget(ctx context.Context, id uuid.UUID) (uuid.UUID, string, error) {
+	row, err := r.q.GetSpotReportTarget(ctx, id)
+	if err != nil {
+		return uuid.Nil, "", err
+	}
+	return row.SpotID, row.Type, nil
+}
+
+func (r *AdminRepo) CloseSpotForReport(ctx context.Context, spotID uuid.UUID) error {
+	_, err := r.q.CloseSpotForReport(ctx, spotID)
+	return err
+}
+
 func uuidParamOpt(u *uuid.UUID) pgtype.UUID {
 	if u == nil {
 		return pgtype.UUID{}

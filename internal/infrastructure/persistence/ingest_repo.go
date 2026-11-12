@@ -316,6 +316,7 @@ func (s *ingestStore) SpotBySource(ctx context.Context, source, sourceID string)
 	}
 	return ingest.SourceLink{
 		SpotID:      row.SpotID,
+		PackID:      row.CityPackID,
 		Version:     int(row.Version.Int32),
 		Via:         row.Via,
 		ContentHash: strOf(row.ContentHash),

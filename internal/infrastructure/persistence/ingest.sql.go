@@ -162,8 +162,10 @@ func (q *Queries) CountRecentSpotConfirms(ctx context.Context, arg CountRecentSp
 }
 
 const findSpotBySource = `-- name: FindSpotBySource :one
-SELECT spot_id, version, via, content_hash FROM t_spot_sources
-WHERE source = $1 AND source_id = $2
+SELECT ss.spot_id, ss.version, ss.via, ss.content_hash, sp.city_pack_id
+FROM t_spot_sources ss
+JOIN t_spots sp ON sp.id = ss.spot_id
+WHERE ss.source = $1 AND ss.source_id = $2
 `
 
 type FindSpotBySourceParams struct {
@@ -176,8 +178,12 @@ type FindSpotBySourceRow struct {
 	Version     pgtype.Int4 `json:"version"`
 	Via         string      `json:"via"`
 	ContentHash pgtype.Text `json:"content_hash"`
+	CityPackID  uuid.UUID   `json:"city_pack_id"`
 }
 
+// Also returns the owning pack: OSM objects straddling pack boundaries are
+// claimed by whichever pack ingested them first; other packs must skip them
+// (the API serves spots by bbox, so one global spot covers both areas).
 func (q *Queries) FindSpotBySource(ctx context.Context, arg FindSpotBySourceParams) (FindSpotBySourceRow, error) {
 	row := q.db.QueryRow(ctx, findSpotBySource, arg.Source, arg.SourceID)
 	var i FindSpotBySourceRow
@@ -186,6 +192,7 @@ func (q *Queries) FindSpotBySource(ctx context.Context, arg FindSpotBySourcePara
 		&i.Version,
 		&i.Via,
 		&i.ContentHash,
+		&i.CityPackID,
 	)
 	return i, err
 }

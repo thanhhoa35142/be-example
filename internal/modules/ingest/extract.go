@@ -69,7 +69,8 @@ func download(ctx context.Context, client *http.Client, url, dest string) error 
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	n, err := io.Copy(f, resp.Body)
+	if err != nil {
 		f.Close()
 		os.Remove(tmp)
 		return err
@@ -77,6 +78,16 @@ func download(ctx context.Context, client *http.Client, url, dest string) error 
 	if err := f.Close(); err != nil {
 		os.Remove(tmp)
 		return err
+	}
+	// Reject truncated downloads: a partial .pbf would poison the osmium
+	// artifact cache (it only checks file mtime/size > 0).
+	if resp.ContentLength > 0 && n != resp.ContentLength {
+		os.Remove(tmp)
+		return fmt.Errorf("truncated download: got %d of %d bytes", n, resp.ContentLength)
+	}
+	if n == 0 {
+		os.Remove(tmp)
+		return fmt.Errorf("empty download")
 	}
 	// Keep the outgoing file as .prev before replacing (rename, not copy —
 	// extracts can be several GB).

@@ -95,6 +95,16 @@ LIMIT $1;
 -- name: UpdateSpotReportStatus :execrows
 UPDATE t_spot_reports SET status = $2 WHERE id = $1;
 
+-- name: GetSpotReportTarget :one
+SELECT spot_id, type FROM t_spot_reports WHERE id = $1;
+
+-- name: CloseSpotForReport :execrows
+-- Report-driven close: only active/pending spots move; the ingest planner
+-- treats status_reason 'closed_by_report' as admin-only (no auto-reopen).
+UPDATE t_spots SET status = 'closed', status_reason = 'closed_by_report',
+                  updated_at = now()
+WHERE id = $1 AND status IN ('active','pending');
+
 -- name: ListScoringConfigs :many
 SELECT version, weights, thresholds, active_from
 FROM t_scoring_configs

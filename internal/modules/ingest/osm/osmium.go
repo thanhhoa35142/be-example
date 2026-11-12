@@ -11,6 +11,7 @@ import (
 	"iter"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -32,9 +33,13 @@ import (
 // Commands run through Cmd so the binary can be a plain "osmium" or a
 // wrapper (e.g. docker run … osmium) in environments without osmium-tool.
 type OsmiumSource struct {
-	// PBFPath is the local .osm.pbf extract.
+	// PBFPath pins a single .osm.pbf extract (dev override). When empty,
+	// each pack resolves its own extract as
+	// <WorkDir>/<basename(pack.OSMExtract)>.osm.pbf — e.g.
+	// "europe/netherlands-latest" → "netherlands-latest.osm.pbf".
 	PBFPath string
-	// WorkDir holds cached artifacts; defaults to PBFPath dir.
+	// WorkDir holds the .pbf extracts and cached artifacts; required when
+	// PBFPath is empty, otherwise defaults to PBFPath dir.
 	WorkDir string
 	// Cmd prefixes every osmium invocation and must include the binary
 	// name as its last element (default ["osmium"]).
@@ -75,11 +80,26 @@ func (s *OsmiumSource) workDir() string {
 	if s.WorkDir != "" {
 		return s.WorkDir
 	}
-	return filepath.Dir(s.PBFPath)
+	if s.PBFPath != "" {
+		return filepath.Dir(s.PBFPath)
+	}
+	return "."
 }
 
-func (s *OsmiumSource) base() string {
-	return strings.TrimSuffix(filepath.Base(s.PBFPath), ".osm.pbf")
+// pbfFor resolves the extract file for a pack: the explicit PBFPath when
+// set, otherwise <WorkDir>/<basename(OSMExtract)>.osm.pbf.
+func (s *OsmiumSource) pbfFor(p Pack) (string, error) {
+	if s.PBFPath != "" {
+		return s.PBFPath, nil
+	}
+	if p.OSMExtract == "" {
+		return "", fmt.Errorf("pack %s has no osm_extract", p.Slug)
+	}
+	pbf := filepath.Join(s.workDir(), path.Base(p.OSMExtract)+".osm.pbf")
+	if _, err := os.Stat(pbf); err != nil {
+		return "", fmt.Errorf("extract %q not found at %s (set OSMIUM_PBF or download it)", p.OSMExtract, pbf)
+	}
+	return pbf, nil
 }
 
 // relPath converts an absolute path inside workDir to a relative one so it
@@ -256,8 +276,13 @@ func (s *osmiumSnapshot) Features() iter.Seq2[RawFeature, error] {
 // Open ensures the filtered pbf + geojsonseq export exist, then returns a
 // snapshot streaming the export file for this pack's bounds.
 func (s *OsmiumSource) Open(ctx context.Context, p Pack) (Snapshot, error) {
+	pbf, err := s.pbfFor(p)
+	if err != nil {
+		return nil, err
+	}
+	base := strings.TrimSuffix(filepath.Base(pbf), ".osm.pbf")
 	fv := filterVersion()
-	filtered, err := s.ensureArtifact(ctx, s.base()+".f"+fv+".filtered.osm.pbf", s.PBFPath, func(out, in string) []string {
+	filtered, err := s.ensureArtifact(ctx, base+".f"+fv+".filtered.osm.pbf", pbf, func(out, in string) []string {
 		args := []string{"tags-filter", "-o", out, "--overwrite", in}
 		return append(args, filterExpressions...)
 	})
@@ -265,7 +290,7 @@ func (s *OsmiumSource) Open(ctx context.Context, p Pack) (Snapshot, error) {
 		return nil, err
 	}
 
-	exportPath, err := s.ensureArtifact(ctx, s.base()+".f"+fv+".export.geojsonseq", filtered, func(out, in string) []string {
+	exportPath, err := s.ensureArtifact(ctx, base+".f"+fv+".export.geojsonseq", filtered, func(out, in string) []string {
 		// "polygon" covers Polygon and MultiPolygon; osmium rejects the
 		// multi* names in --geometry-types.
 		return []string{"export", "-f", "geojsonseq", "-u", "type_id",

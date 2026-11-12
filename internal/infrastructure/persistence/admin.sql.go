@@ -154,6 +154,22 @@ func (q *Queries) AlertDeliveryStatusCounts(ctx context.Context, arg AlertDelive
 	return items, nil
 }
 
+const closeSpotForReport = `-- name: CloseSpotForReport :execrows
+UPDATE t_spots SET status = 'closed', status_reason = 'closed_by_report',
+                  updated_at = now()
+WHERE id = $1 AND status IN ('active','pending')
+`
+
+// Report-driven close: only active/pending spots move; the ingest planner
+// treats status_reason 'closed_by_report' as admin-only (no auto-reopen).
+func (q *Queries) CloseSpotForReport(ctx context.Context, id uuid.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, closeSpotForReport, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const countActiveSpots = `-- name: CountActiveSpots :one
 SELECT count(*) FROM t_spots WHERE status = 'active'
 `
@@ -367,6 +383,22 @@ func (q *Queries) GetJobSchedule(ctx context.Context, job string) (TWorkerJobSch
 		&i.OffsetSeconds,
 		&i.UpdatedAt,
 	)
+	return i, err
+}
+
+const getSpotReportTarget = `-- name: GetSpotReportTarget :one
+SELECT spot_id, type FROM t_spot_reports WHERE id = $1
+`
+
+type GetSpotReportTargetRow struct {
+	SpotID uuid.UUID `json:"spot_id"`
+	Type   string    `json:"type"`
+}
+
+func (q *Queries) GetSpotReportTarget(ctx context.Context, id uuid.UUID) (GetSpotReportTargetRow, error) {
+	row := q.db.QueryRow(ctx, getSpotReportTarget, id)
+	var i GetSpotReportTargetRow
+	err := row.Scan(&i.SpotID, &i.Type)
 	return i, err
 }
 

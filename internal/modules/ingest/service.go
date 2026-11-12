@@ -46,6 +46,7 @@ type Stats struct {
 	FallbackMatched  int            `json:"fallback_matched"`
 	AmenitiesLinked  int            `json:"amenities_linked"`
 	OrphanSites      int            `json:"orphan_sites"`
+	ForeignOwned     int            `json:"foreign_owned"`
 	GuardTripped     bool           `json:"guard_tripped,omitempty"`
 }
 
@@ -116,6 +117,7 @@ type TableCluster struct {
 // SourceLink is the provenance record for one (source, source_id).
 type SourceLink struct {
 	SpotID      uuid.UUID
+	PackID      uuid.UUID // owning pack — differs on boundary straddlers
 	Version     int
 	Via         string // "primary" | "absorbed"
 	ContentHash string
@@ -399,6 +401,13 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 					link.Found = false
 				}
 			}
+			if link.Found && link.PackID != pack.ID {
+				// Boundary straddler already claimed by another pack —
+				// that pack owns its lifecycle; the API serves the spot
+				// by bbox so it is visible here anyway.
+				st.ForeignOwned++
+				continue
+			}
 			if link.Found {
 				spotID, found = link.SpotID, true
 				spotBySource[key] = link.SpotID
@@ -644,7 +653,17 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 			st.OrphanSites++
 			// Every member table becomes a source of the cluster spot so
 			// sightings/missing-runs track each table independently.
+			// Foreign-owned members (claimed by another pack) are skipped —
+			// UpsertSource's ON CONFLICT would otherwise steal the link.
 			for _, m := range cl.Members {
+				l, err := store.SpotBySource(ctx, m.Source, m.SourceID)
+				if err != nil {
+					return err
+				}
+				if l.Found && l.PackID != pack.ID {
+					st.ForeignOwned++
+					continue
+				}
 				if err := store.UpsertSource(ctx, spotID, m.Source, m.SourceID, m.Version, "primary", ""); err != nil {
 					return err
 				}

@@ -25,6 +25,11 @@ type Repository interface {
 	Freshness(ctx context.Context) (Freshness, error)
 	ListPendingReports(ctx context.Context, limit int, after *ReportCursor) ([]PendingReport, error)
 	UpdateReportStatus(ctx context.Context, id uuid.UUID, status string) (bool, error)
+	// SpotReportTarget returns the spot_id and type of a spot_report.
+	SpotReportTarget(ctx context.Context, id uuid.UUID) (spotID uuid.UUID, typ string, err error)
+	// CloseSpotForReport marks a spot closed with reason 'closed_by_report'
+	// (no-op unless the spot is active/pending).
+	CloseSpotForReport(ctx context.Context, spotID uuid.UUID) error
 
 	// Analytics
 	Metrics(ctx context.Context, f MetricsFilter) (Metrics, error)

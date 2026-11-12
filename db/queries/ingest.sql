@@ -37,8 +37,13 @@ FROM t_ingest_features
 WHERE pack_id = $1 AND role = 'amenity';
 
 -- name: FindSpotBySource :one
-SELECT spot_id, version, via, content_hash FROM t_spot_sources
-WHERE source = $1 AND source_id = $2;
+-- Also returns the owning pack: OSM objects straddling pack boundaries are
+-- claimed by whichever pack ingested them first; other packs must skip them
+-- (the API serves spots by bbox, so one global spot covers both areas).
+SELECT ss.spot_id, ss.version, ss.via, ss.content_hash, sp.city_pack_id
+FROM t_spot_sources ss
+JOIN t_spots sp ON sp.id = ss.spot_id
+WHERE ss.source = $1 AND ss.source_id = $2;
 
 -- name: ListAbsorbedCandidates :many
 -- Child candidates (site/table) whose centroid falls inside a park/beach

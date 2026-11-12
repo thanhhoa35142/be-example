@@ -124,9 +124,8 @@ func main() {
 		Client: httpx.NewClient(httpx.Policy{Name: "overpass", RatePerSec: 1, Burst: 2, Timeout: 300 * time.Second}),
 	}
 	if cfg.IngestSource == "osmium" {
-		if cfg.OsmiumPBF == "" {
-			log.Fatalf("INGEST_SOURCE=osmium requires OSMIUM_PBF")
-		}
+		// OSMIUM_PBF pins one extract (dev); otherwise each pack resolves
+		// <INGEST_EXTRACT_DIR>/<basename(osm_extract)>.osm.pbf itself.
 		var cmd []string
 		if cfg.OsmiumCmd != "" {
 			cmd = strings.Fields(cfg.OsmiumCmd)
