@@ -93,7 +93,7 @@ jobs:
           if [ "$FRANCE" = "true" ]; then
             EXTRA=",('paris','Paris','FR','Europe/Paris', ST_MakeEnvelope(2.20,48.75,2.50,49.00,4326),'beta','europe/france-latest','1970-01-01')"
           fi
-          psql "$DATABASE_URL" <<SQL
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<SQL
           insert into t_city_packs (slug,name,country,tz,boundary,status,osm_extract,last_import_at) values
            ('luxembourg','Luxembourg','LU','Europe/Luxembourg', ST_MakeEnvelope(5.70,49.40,6.55,50.20,4326),'beta','europe/luxembourg-latest','1970-01-01'),
            ('brussels','Brussels','BE','Europe/Brussels', ST_MakeEnvelope(4.25,50.75,4.50,50.95,4326),'beta','europe/belgium-latest','1970-01-01'),
@@ -103,8 +103,11 @@ jobs:
            ('denhaag','The Hague','NL','Europe/Amsterdam', ST_MakeEnvelope(4.20,52.00,4.45,52.12,4326),'beta','europe/netherlands-latest','1970-01-01'),
            ('vienna','Vienna','AT','Europe/Vienna', ST_MakeEnvelope(16.05,48.05,16.65,48.35,4326),'beta','europe/austria-latest','1970-01-01'),
            ('zurich','Zurich','CH','Europe/Zurich', ST_MakeEnvelope(8.35,47.30,8.65,47.48,4326),'beta','europe/switzerland-latest','1970-01-01')
-          \$EXTRA;
+          $EXTRA;
           SQL
+          COUNT=$(psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -tAc "select count(*) from t_city_packs where status in ('beta','live')")
+          echo "packs=$COUNT"
+          [ "$COUNT" -ge 8 ] || { echo "pack insert failed"; exit 1; }
 
       - name: Ingest packs
         env:
@@ -148,7 +151,7 @@ jobs:
           # t_ingest_features is the bulk raw layer (~400k geojson rows) and
           # is re-derivable by re-running ingest; excluding it keeps the
           # artifact small enough for the 500MB free storage quota.
-          docker run --rm --network host \
+          docker run --rm --network host -e PGPASSWORD=picnic \
             -v "$PWD:/out" postgis/postgis:18-3.6 \
             pg_dump -h localhost -U picnic -d picnic -Fc -Z9 \
             -T t_ingest_features -f /out/pickhour-cloud.dump
