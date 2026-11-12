@@ -1,3 +1,5 @@
+name: backend
+
 services:
   db:
     image: postgis/postgis:18-3.6
@@ -17,9 +19,53 @@ services:
       retries: 10
     networks: [pickhour]
 
+  api:
+    build: .
+    image: pickhour-backend:latest
+    container_name: picnic-api
+    command: ["/app/api"]
+    environment:
+      PORT: "8080"
+      DATABASE_URL: postgres://picnic:picnic@db:5432/picnic?sslmode=disable
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [pickhour]
+
+  worker:
+    build: .
+    image: pickhour-backend:latest
+    container_name: picnic-worker
+    command: ["/app/worker"]
+    environment:
+      DATABASE_URL: postgres://picnic:picnic@db:5432/picnic?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [pickhour]
+
+  mcp:
+    build: .
+    image: pickhour-backend:latest
+    container_name: picnic-mcp
+    command: ["/app/mcp"]
+    environment:
+      MCP_PORT: "8081"
+      DATABASE_URL: postgres://picnic:picnic@db:5432/picnic?sslmode=disable
+    ports:
+      - "127.0.0.1:8081:8081"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [pickhour]
+
 volumes:
   picnicdata:
 
 networks:
   pickhour:
-    external: true
