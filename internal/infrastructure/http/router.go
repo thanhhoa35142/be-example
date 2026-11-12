@@ -85,6 +85,11 @@ func NewRouter(pool *pgxpool.Pool, h Handlers) *gin.Engine {
 			admin.GET("/scoring-config", h.Admin.ScoringConfigs)
 			admin.POST("/scoring-config", h.Admin.CreateScoringConfig)
 			admin.POST("/scoring-config/:version/activate", h.Admin.ActivateScoringConfig)
+			admin.GET("/api-keys", h.Admin.APIKeys)
+			admin.POST("/api-keys", h.Admin.CreateAPIKey)
+			admin.POST("/api-keys/:id/revoke", h.Admin.RevokeAPIKey)
+			admin.POST("/api-keys/:id/grants", h.Admin.AddAPIKeyGrant)
+			admin.DELETE("/api-keys/:id/grants", h.Admin.RemoveAPIKeyGrant)
 		}
 	}
 

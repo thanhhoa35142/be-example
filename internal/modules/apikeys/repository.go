@@ -31,7 +31,7 @@ type Repository interface {
 
 // GrantSpec is grant input at creation time (no timestamps).
 type GrantSpec struct {
-	Effect   string
-	Resource string
-	Action   string
+	Effect   string `json:"effect"`
+	Resource string `json:"resource"`
+	Action   string `json:"action"`
 }

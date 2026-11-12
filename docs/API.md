@@ -449,6 +449,11 @@ All `/v1/admin/*` endpoints require `Authorization: Bearer $ADMIN_TOKEN`. When `
 | `PATCH /v1/admin/jobs/{job}/schedule` | Update a job interval: `{"intervalSeconds":3600}` |
 | `GET /v1/admin/reports?limit=&cursor=` | Pending spot_report moderation queue, keyset-paginated (`cursor` = `nextCursor`) |
 | `PATCH /v1/admin/reports/{id}` | `{"status":"accepted"|"rejected"}` |
+| `GET /v1/admin/api-keys` | All API keys with their grants (admin UI) |
+| `POST /v1/admin/api-keys` | Create key `{name, description?, expiresAt?, rateLimitRps?, grants:[{effect,resource,action}]}` → `201` + `secret` shown once |
+| `POST /v1/admin/api-keys/{id}/revoke` | Immediately invalidate a key |
+| `POST /v1/admin/api-keys/{id}/grants` | Add grant `{effect:"allow"|"deny", resource, action}` |
+| `DELETE /v1/admin/api-keys/{id}/grants` | Remove grant (same body) |
 | `GET /v1/admin/scoring-config` | All scoring_config versions; `isActive` marks the effective one |
 | `POST /v1/admin/scoring-config` | New version `{weights, thresholds, activate}` — draft gets `active_from=9999`, activate=true goes live now |
 | `POST /v1/admin/scoring-config/{version}/activate` | Make a stored version effective |

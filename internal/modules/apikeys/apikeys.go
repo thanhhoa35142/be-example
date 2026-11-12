@@ -49,6 +49,12 @@ type KeyGrant struct {
 	APIKeyID uuid.UUID `json:"apiKeyId"`
 }
 
+// KeyWithGrants is an ApiKey plus its grant list (admin list view).
+type KeyWithGrants struct {
+	ApiKey
+	Grants []Grant `json:"grants"`
+}
+
 // Auth is the resolved identity+policy attached to an authenticated request.
 type Auth struct {
 	Key    ApiKey

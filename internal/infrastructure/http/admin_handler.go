@@ -11,15 +11,17 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/thanhhoa35142/be-example/internal/modules/admin"
+	"github.com/thanhhoa35142/be-example/internal/modules/apikeys"
 	"github.com/thanhhoa35142/be-example/internal/platform/httpx"
 )
 
 type AdminHandler struct {
-	svc *admin.Service
+	svc  *admin.Service
+	keys *apikeys.Service
 }
 
-func NewAdminHandler(svc *admin.Service) *AdminHandler {
-	return &AdminHandler{svc: svc}
+func NewAdminHandler(svc *admin.Service, keys *apikeys.Service) *AdminHandler {
+	return &AdminHandler{svc: svc, keys: keys}
 }
 
 // GET /v1/admin/overview — headline counts.

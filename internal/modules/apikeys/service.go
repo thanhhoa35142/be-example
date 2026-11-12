@@ -145,6 +145,24 @@ func (s *Service) List(ctx context.Context) ([]ApiKey, error) {
 	return s.repo.ListKeys(ctx)
 }
 
+// ListWithGrants returns every key with its grants attached — the admin
+// list view. Key counts are small; per-key grant fetch is fine.
+func (s *Service) ListWithGrants(ctx context.Context) ([]KeyWithGrants, error) {
+	keys, err := s.repo.ListKeys(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]KeyWithGrants, 0, len(keys))
+	for _, k := range keys {
+		grants, err := s.repo.GrantsForKey(ctx, k.ID)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, KeyWithGrants{ApiKey: k, Grants: grants})
+	}
+	return out, nil
+}
+
 func (s *Service) Revoke(ctx context.Context, id uuid.UUID) error {
 	ok, err := s.repo.Revoke(ctx, id)
 	if err != nil {
