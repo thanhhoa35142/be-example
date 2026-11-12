@@ -47,6 +47,11 @@ func (s *Service) RecordJobStart(ctx context.Context, job string) (int64, error)
 	return s.repo.StartJobRun(ctx, job)
 }
 
+// AbandonJobRuns marks 'running' rows left behind by dead workers.
+func (s *Service) AbandonJobRuns(ctx context.Context, job string) error {
+	return s.repo.AbandonJobRuns(ctx, job)
+}
+
 func (s *Service) RecordJobFinish(ctx context.Context, id int64, status string, rowsAffected *int, jobErr error) {
 	var errText *string
 	if jobErr != nil {

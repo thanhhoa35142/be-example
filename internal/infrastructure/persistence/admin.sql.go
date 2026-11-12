@@ -13,8 +13,21 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const abandonJobRuns = `-- name: AbandonJobRuns :exec
+UPDATE t_job_runs
+SET status = 'abandoned', finished_at = now()
+WHERE job = $1 AND status = 'running'
+`
+
+// Called after a job wins its advisory lock: any 'running' rows for that job
+// are orphans from a dead worker and move to 'abandoned'.
+func (q *Queries) AbandonJobRuns(ctx context.Context, job string) error {
+	_, err := q.db.Exec(ctx, abandonJobRuns, job)
+	return err
+}
+
 const activateScoringConfig = `-- name: ActivateScoringConfig :execrows
-UPDATE scoring_config SET active_from = now() WHERE version = $1
+UPDATE t_scoring_configs SET active_from = now() WHERE version = $1
 `
 
 func (q *Queries) ActivateScoringConfig(ctx context.Context, version int16) (int64, error) {
@@ -27,7 +40,7 @@ func (q *Queries) ActivateScoringConfig(ctx context.Context, version int16) (int
 
 const adminEventDayCounts = `-- name: AdminEventDayCounts :many
 SELECT date_trunc('day', created_at)::timestamptz AS day, count(*) AS n
-FROM event
+FROM t_events
 WHERE created_at >= $1 AND created_at < $2
 GROUP BY day
 ORDER BY day DESC
@@ -65,7 +78,7 @@ func (q *Queries) AdminEventDayCounts(ctx context.Context, arg AdminEventDayCoun
 
 const adminEventNameCounts = `-- name: AdminEventNameCounts :many
 SELECT name, count(*) AS n
-FROM event
+FROM t_events
 WHERE created_at >= $1 AND created_at < $2
   AND ($3::text IS NULL OR name = $3)
 GROUP BY name
@@ -106,7 +119,7 @@ func (q *Queries) AdminEventNameCounts(ctx context.Context, arg AdminEventNameCo
 
 const alertDeliveryStatusCounts = `-- name: AlertDeliveryStatusCounts :many
 SELECT COALESCE(apns_status, -1) AS apns_status, count(*) AS n
-FROM alert_delivery
+FROM t_alert_deliveries
 WHERE sent_at >= $1 AND sent_at < $2
 GROUP BY apns_status ORDER BY apns_status
 `
@@ -142,7 +155,7 @@ func (q *Queries) AlertDeliveryStatusCounts(ctx context.Context, arg AlertDelive
 }
 
 const countActiveSpots = `-- name: CountActiveSpots :one
-SELECT count(*) FROM spot WHERE status = 'active'
+SELECT count(*) FROM t_spots WHERE status = 'active'
 `
 
 func (q *Queries) CountActiveSpots(ctx context.Context) (int64, error) {
@@ -153,7 +166,7 @@ func (q *Queries) CountActiveSpots(ctx context.Context) (int64, error) {
 }
 
 const countAlertDeliveriesToday = `-- name: CountAlertDeliveriesToday :one
-SELECT count(*) FROM alert_delivery WHERE sent_at > now() - interval '24 hours'
+SELECT count(*) FROM t_alert_deliveries WHERE sent_at > now() - interval '24 hours'
 `
 
 func (q *Queries) CountAlertDeliveriesToday(ctx context.Context) (int64, error) {
@@ -164,7 +177,7 @@ func (q *Queries) CountAlertDeliveriesToday(ctx context.Context) (int64, error) 
 }
 
 const countCrowdReportsToday = `-- name: CountCrowdReportsToday :one
-SELECT count(*) FROM crowd_report WHERE created_at > now() - interval '24 hours'
+SELECT count(*) FROM t_crowd_reports WHERE created_at > now() - interval '24 hours'
 `
 
 func (q *Queries) CountCrowdReportsToday(ctx context.Context) (int64, error) {
@@ -175,7 +188,7 @@ func (q *Queries) CountCrowdReportsToday(ctx context.Context) (int64, error) {
 }
 
 const countDevices = `-- name: CountDevices :one
-SELECT count(*) FROM device WHERE deleted_at IS NULL
+SELECT count(*) FROM t_devices WHERE deleted_at IS NULL
 `
 
 func (q *Queries) CountDevices(ctx context.Context) (int64, error) {
@@ -186,7 +199,7 @@ func (q *Queries) CountDevices(ctx context.Context) (int64, error) {
 }
 
 const countDevicesActive24h = `-- name: CountDevicesActive24h :one
-SELECT count(*) FROM device
+SELECT count(*) FROM t_devices
 WHERE deleted_at IS NULL AND last_seen_at > now() - interval '24 hours'
 `
 
@@ -198,7 +211,7 @@ func (q *Queries) CountDevicesActive24h(ctx context.Context) (int64, error) {
 }
 
 const countEnabledAlertRulesAdmin = `-- name: CountEnabledAlertRulesAdmin :one
-SELECT count(*) FROM alert_rule WHERE enabled
+SELECT count(*) FROM t_alert_rules WHERE enabled
 `
 
 func (q *Queries) CountEnabledAlertRulesAdmin(ctx context.Context) (int64, error) {
@@ -209,7 +222,7 @@ func (q *Queries) CountEnabledAlertRulesAdmin(ctx context.Context) (int64, error
 }
 
 const countPendingReports = `-- name: CountPendingReports :one
-SELECT count(*) FROM spot_report WHERE status = 'pending'
+SELECT count(*) FROM t_spot_reports WHERE status = 'pending'
 `
 
 func (q *Queries) CountPendingReports(ctx context.Context) (int64, error) {
@@ -221,8 +234,8 @@ func (q *Queries) CountPendingReports(ctx context.Context) (int64, error) {
 
 const countPlusDevices = `-- name: CountPlusDevices :one
 SELECT count(DISTINCT ds.device_id)
-FROM device_subscription ds
-JOIN subscription s ON s.original_transaction_id = ds.original_transaction_id
+FROM t_device_subscriptions ds
+JOIN t_subscriptions s ON s.original_transaction_id = ds.original_transaction_id
 WHERE s.status IN ('active', 'grace', 'billing_retry')
 `
 
@@ -234,7 +247,7 @@ func (q *Queries) CountPlusDevices(ctx context.Context) (int64, error) {
 }
 
 const countReportsToday = `-- name: CountReportsToday :one
-SELECT count(*) FROM spot_report WHERE created_at > now() - interval '24 hours'
+SELECT count(*) FROM t_spot_reports WHERE created_at > now() - interval '24 hours'
 `
 
 func (q *Queries) CountReportsToday(ctx context.Context) (int64, error) {
@@ -245,7 +258,7 @@ func (q *Queries) CountReportsToday(ctx context.Context) (int64, error) {
 }
 
 const countSpotsWithScore = `-- name: CountSpotsWithScore :one
-SELECT count(DISTINCT spot_id) FROM spot_score
+SELECT count(DISTINCT spot_id) FROM t_spot_scores
 WHERE ts_hour >= now() - interval '26 hours'
 `
 
@@ -260,7 +273,7 @@ const crowdSourceCounts = `-- name: CrowdSourceCounts :one
 SELECT count(*) FILTER (WHERE source = 'model') AS model,
        count(*) FILTER (WHERE source = 'community') AS community,
        count(*) FILTER (WHERE source = 'provider') AS provider
-FROM crowd_estimate
+FROM t_crowd_estimates
 `
 
 type CrowdSourceCountsRow struct {
@@ -278,7 +291,7 @@ func (q *Queries) CrowdSourceCounts(ctx context.Context) (CrowdSourceCountsRow, 
 
 const feedbackVerdictCounts = `-- name: FeedbackVerdictCounts :many
 SELECT verdict, count(*) AS n
-FROM score_feedback
+FROM t_score_feedbacks
 WHERE created_at >= $1 AND created_at < $2
   AND ($3::uuid IS NULL OR spot_id = $3)
 GROUP BY verdict ORDER BY verdict
@@ -316,7 +329,7 @@ func (q *Queries) FeedbackVerdictCounts(ctx context.Context, arg FeedbackVerdict
 }
 
 const finishJobRun = `-- name: FinishJobRun :exec
-UPDATE job_run SET finished_at = now(), status = $2,
+UPDATE t_job_runs SET finished_at = now(), status = $2,
        rows_affected = $3, error = $4
 WHERE id = $1
 `
@@ -339,20 +352,26 @@ func (q *Queries) FinishJobRun(ctx context.Context, arg FinishJobRunParams) erro
 }
 
 const getJobSchedule = `-- name: GetJobSchedule :one
-SELECT job, interval_seconds, updated_at
-FROM worker_job_schedule
+SELECT job, interval_seconds, enabled, offset_seconds, updated_at
+FROM t_worker_job_schedules
 WHERE job = $1
 `
 
-func (q *Queries) GetJobSchedule(ctx context.Context, job string) (WorkerJobSchedule, error) {
+func (q *Queries) GetJobSchedule(ctx context.Context, job string) (TWorkerJobSchedule, error) {
 	row := q.db.QueryRow(ctx, getJobSchedule, job)
-	var i WorkerJobSchedule
-	err := row.Scan(&i.Job, &i.IntervalSeconds, &i.UpdatedAt)
+	var i TWorkerJobSchedule
+	err := row.Scan(
+		&i.Job,
+		&i.IntervalSeconds,
+		&i.Enabled,
+		&i.OffsetSeconds,
+		&i.UpdatedAt,
+	)
 	return i, err
 }
 
 const insertScoringConfig = `-- name: InsertScoringConfig :exec
-INSERT INTO scoring_config (version, weights, thresholds, active_from)
+INSERT INTO t_scoring_configs (version, weights, thresholds, active_from)
 VALUES ($1, $2, $3, $4)
 `
 
@@ -375,7 +394,7 @@ func (q *Queries) InsertScoringConfig(ctx context.Context, arg InsertScoringConf
 
 const listJobRuns = `-- name: ListJobRuns :many
 SELECT id, job, started_at, finished_at, status, rows_affected, error
-FROM job_run
+FROM t_job_runs
 WHERE ($2::bigint IS NULL OR id < $2)
 ORDER BY id DESC
 LIMIT $1
@@ -425,21 +444,27 @@ func (q *Queries) ListJobRuns(ctx context.Context, arg ListJobRunsParams) ([]Lis
 }
 
 const listJobSchedules = `-- name: ListJobSchedules :many
-SELECT job, interval_seconds, updated_at
-FROM worker_job_schedule
+SELECT job, interval_seconds, enabled, offset_seconds, updated_at
+FROM t_worker_job_schedules
 ORDER BY job
 `
 
-func (q *Queries) ListJobSchedules(ctx context.Context) ([]WorkerJobSchedule, error) {
+func (q *Queries) ListJobSchedules(ctx context.Context) ([]TWorkerJobSchedule, error) {
 	rows, err := q.db.Query(ctx, listJobSchedules)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []WorkerJobSchedule{}
+	items := []TWorkerJobSchedule{}
 	for rows.Next() {
-		var i WorkerJobSchedule
-		if err := rows.Scan(&i.Job, &i.IntervalSeconds, &i.UpdatedAt); err != nil {
+		var i TWorkerJobSchedule
+		if err := rows.Scan(
+			&i.Job,
+			&i.IntervalSeconds,
+			&i.Enabled,
+			&i.OffsetSeconds,
+			&i.UpdatedAt,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -452,8 +477,8 @@ func (q *Queries) ListJobSchedules(ctx context.Context) ([]WorkerJobSchedule, er
 
 const listPendingSpotReports = `-- name: ListPendingSpotReports :many
 SELECT r.id, r.spot_id, s.name, r.type, r.issue_code, r.created_at
-FROM spot_report r
-JOIN spot s ON s.id = r.spot_id
+FROM t_spot_reports r
+JOIN t_spots s ON s.id = r.spot_id
 WHERE r.status = 'pending'
   AND ($2::timestamptz IS NULL
        OR (r.created_at, r.id) > ($2::timestamptz, $3::uuid))
@@ -505,19 +530,19 @@ func (q *Queries) ListPendingSpotReports(ctx context.Context, arg ListPendingSpo
 
 const listScoringConfigs = `-- name: ListScoringConfigs :many
 SELECT version, weights, thresholds, active_from
-FROM scoring_config
+FROM t_scoring_configs
 ORDER BY version DESC
 `
 
-func (q *Queries) ListScoringConfigs(ctx context.Context) ([]ScoringConfig, error) {
+func (q *Queries) ListScoringConfigs(ctx context.Context) ([]TScoringConfig, error) {
 	rows, err := q.db.Query(ctx, listScoringConfigs)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []ScoringConfig{}
+	items := []TScoringConfig{}
 	for rows.Next() {
-		var i ScoringConfig
+		var i TScoringConfig
 		if err := rows.Scan(
 			&i.Version,
 			&i.Weights,
@@ -535,7 +560,7 @@ func (q *Queries) ListScoringConfigs(ctx context.Context) ([]ScoringConfig, erro
 }
 
 const maxCrowdUpdatedAt = `-- name: MaxCrowdUpdatedAt :one
-SELECT COALESCE(max(updated_at), '1970-01-01'::timestamptz) FROM crowd_estimate
+SELECT COALESCE(max(updated_at), '1970-01-01'::timestamptz) FROM t_crowd_estimates
 `
 
 func (q *Queries) MaxCrowdUpdatedAt(ctx context.Context) (interface{}, error) {
@@ -546,7 +571,7 @@ func (q *Queries) MaxCrowdUpdatedAt(ctx context.Context) (interface{}, error) {
 }
 
 const maxScoreComputedAt = `-- name: MaxScoreComputedAt :one
-SELECT COALESCE(max(computed_at), '1970-01-01'::timestamptz) FROM spot_score
+SELECT COALESCE(max(computed_at), '1970-01-01'::timestamptz) FROM t_spot_scores
 `
 
 func (q *Queries) MaxScoreComputedAt(ctx context.Context) (interface{}, error) {
@@ -557,7 +582,7 @@ func (q *Queries) MaxScoreComputedAt(ctx context.Context) (interface{}, error) {
 }
 
 const maxWeatherFetchedAt = `-- name: MaxWeatherFetchedAt :one
-SELECT COALESCE(max(fetched_at), '1970-01-01'::timestamptz) FROM weather_hourly
+SELECT COALESCE(max(fetched_at), '1970-01-01'::timestamptz) FROM t_weather_hourly_forecasts
 `
 
 func (q *Queries) MaxWeatherFetchedAt(ctx context.Context) (interface{}, error) {
@@ -568,7 +593,7 @@ func (q *Queries) MaxWeatherFetchedAt(ctx context.Context) (interface{}, error) 
 }
 
 const nextScoringConfigVersion = `-- name: NextScoringConfigVersion :one
-SELECT COALESCE(max(version), 0) + 1 FROM scoring_config
+SELECT COALESCE(max(version), 0) + 1 FROM t_scoring_configs
 `
 
 func (q *Queries) NextScoringConfigVersion(ctx context.Context) (int32, error) {
@@ -580,7 +605,7 @@ func (q *Queries) NextScoringConfigVersion(ctx context.Context) (int32, error) {
 
 const reportTypeCounts = `-- name: ReportTypeCounts :many
 SELECT type, status, count(*) AS n
-FROM spot_report
+FROM t_spot_reports
 WHERE created_at >= $1 AND created_at < $2
   AND ($3::text IS NULL OR type = $3)
   AND ($4::text IS NULL OR status = $4)
@@ -630,8 +655,8 @@ SELECT count(*) AS total,
        COALESCE(avg(ss.score), 0)::float8 AS avg_score,
        count(*) FILTER (WHERE ss.cap_reason IS NOT NULL) AS capped,
        count(DISTINCT ss.spot_id) AS spots
-FROM spot_score ss
-JOIN spot s ON s.id = ss.spot_id
+FROM t_spot_scores ss
+JOIN t_spots s ON s.id = ss.spot_id
 WHERE ss.ts_hour >= $1 AND ss.ts_hour < $2
   AND ($3::uuid IS NULL OR s.city_pack_id = $3)
   AND ($4::text IS NULL OR s.kind = $4)
@@ -670,8 +695,8 @@ func (q *Queries) ScoreDistribution(ctx context.Context, arg ScoreDistributionPa
 
 const scoreHistogram = `-- name: ScoreHistogram :many
 SELECT width_bucket(ss.score, 0, 100, 10) AS bucket, count(*) AS n
-FROM spot_score ss
-JOIN spot s ON s.id = ss.spot_id
+FROM t_spot_scores ss
+JOIN t_spots s ON s.id = ss.spot_id
 WHERE ss.ts_hour >= $1 AND ss.ts_hour < $2
   AND ($3::uuid IS NULL OR s.city_pack_id = $3)
   AND ($4::text IS NULL OR s.kind = $4)
@@ -716,7 +741,7 @@ func (q *Queries) ScoreHistogram(ctx context.Context, arg ScoreHistogramParams) 
 }
 
 const startJobRun = `-- name: StartJobRun :one
-INSERT INTO job_run (job, started_at, status)
+INSERT INTO t_job_runs (job, started_at, status)
 VALUES ($1, now(), 'running')
 RETURNING id
 `
@@ -730,7 +755,7 @@ func (q *Queries) StartJobRun(ctx context.Context, job string) (int64, error) {
 
 const subscriptionStatusCounts = `-- name: SubscriptionStatusCounts :many
 SELECT status, count(*) AS n
-FROM subscription
+FROM t_subscriptions
 GROUP BY status ORDER BY status
 `
 
@@ -760,10 +785,10 @@ func (q *Queries) SubscriptionStatusCounts(ctx context.Context) ([]SubscriptionS
 }
 
 const updateJobSchedule = `-- name: UpdateJobSchedule :one
-UPDATE worker_job_schedule
+UPDATE t_worker_job_schedules
 SET interval_seconds = $2, updated_at = now()
 WHERE job = $1
-RETURNING job, interval_seconds, updated_at
+RETURNING job, interval_seconds, enabled, offset_seconds, updated_at
 `
 
 type UpdateJobScheduleParams struct {
@@ -771,15 +796,21 @@ type UpdateJobScheduleParams struct {
 	IntervalSeconds int32  `json:"interval_seconds"`
 }
 
-func (q *Queries) UpdateJobSchedule(ctx context.Context, arg UpdateJobScheduleParams) (WorkerJobSchedule, error) {
+func (q *Queries) UpdateJobSchedule(ctx context.Context, arg UpdateJobScheduleParams) (TWorkerJobSchedule, error) {
 	row := q.db.QueryRow(ctx, updateJobSchedule, arg.Job, arg.IntervalSeconds)
-	var i WorkerJobSchedule
-	err := row.Scan(&i.Job, &i.IntervalSeconds, &i.UpdatedAt)
+	var i TWorkerJobSchedule
+	err := row.Scan(
+		&i.Job,
+		&i.IntervalSeconds,
+		&i.Enabled,
+		&i.OffsetSeconds,
+		&i.UpdatedAt,
+	)
 	return i, err
 }
 
 const updateSpotReportStatus = `-- name: UpdateSpotReportStatus :execrows
-UPDATE spot_report SET status = $2 WHERE id = $1
+UPDATE t_spot_reports SET status = $2 WHERE id = $1
 `
 
 type UpdateSpotReportStatusParams struct {

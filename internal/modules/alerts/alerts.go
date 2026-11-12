@@ -19,7 +19,14 @@ var (
 	// ErrNoPushToken means the device has no APNs token registered — the
 	// delivery is skipped, not failed.
 	ErrNoPushToken = errors.New("device has no push token")
+	// ErrPushTokenDead means APNs returned 410 — the token is permanently
+	// dead; the device's push credentials are cleared and the delivery is
+	// dead-lettered rather than retried.
+	ErrPushTokenDead = errors.New("apns token unregistered")
 )
+
+// MaxDeliveryAttempts bounds claim→fail→reclaim retries per (rule, window).
+const MaxDeliveryAttempts = 3
 
 // Rule is an alert_rule row.
 type Rule struct {

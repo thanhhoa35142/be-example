@@ -64,8 +64,8 @@ func (r *WeatherRepo) DeleteBefore(ctx context.Context, before time.Time) error 
 	return r.q.DeleteWeatherBefore(ctx, before)
 }
 
-func (r *WeatherRepo) ConsumeQuota(ctx context.Context, provider string, weight, limit int) (bool, error) {
-	_, err := r.q.ConsumeProviderQuota(ctx, ConsumeProviderQuotaParams{
+func (r *WeatherRepo) ReserveQuota(ctx context.Context, provider string, weight, limit int) (bool, error) {
+	_, err := r.q.ReserveProviderQuota(ctx, ReserveProviderQuotaParams{
 		Provider: provider, Weight: int32(weight), QuotaLimit: int32(limit),
 	})
 	if errors.Is(err, pgx.ErrNoRows) {

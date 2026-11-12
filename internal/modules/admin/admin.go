@@ -74,6 +74,8 @@ type JobRun struct {
 type JobSchedule struct {
 	Job                string    `json:"job"`
 	IntervalSeconds    int64     `json:"intervalSeconds"`
+	Enabled            bool      `json:"enabled"`
+	OffsetSeconds      int64     `json:"offsetSeconds"`
 	MinIntervalSeconds int64     `json:"minIntervalSeconds"`
 	MaxIntervalSeconds int64     `json:"maxIntervalSeconds"`
 	UpdatedAt          time.Time `json:"updatedAt"`

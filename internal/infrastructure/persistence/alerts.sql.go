@@ -15,8 +15,8 @@ import (
 
 const bestScoredSpotNear = `-- name: BestScoredSpotNear :one
 SELECT s.id, s.name, ss.score
-FROM spot s
-JOIN spot_score ss ON ss.spot_id = s.id AND ss.ts_hour = $3
+FROM t_spots s
+JOIN t_spot_scores ss ON ss.spot_id = s.id AND ss.ts_hour = $3
 WHERE ST_DWithin(s.geom::geography,
                  ST_SetSRID(ST_MakePoint($2, $1), 4326)::geography, $4)
 ORDER BY ss.score DESC NULLS LAST
@@ -48,8 +48,34 @@ func (q *Queries) BestScoredSpotNear(ctx context.Context, arg BestScoredSpotNear
 	return i, err
 }
 
+const claimAlertDelivery = `-- name: ClaimAlertDelivery :one
+INSERT INTO t_alert_deliveries (rule_id, window_start, status, claimed_at)
+VALUES ($1, $2, 'claimed', now())
+ON CONFLICT (rule_id, window_start) DO NOTHING
+RETURNING rule_id, window_start
+`
+
+type ClaimAlertDeliveryParams struct {
+	RuleID      uuid.UUID `json:"rule_id"`
+	WindowStart time.Time `json:"window_start"`
+}
+
+type ClaimAlertDeliveryRow struct {
+	RuleID      uuid.UUID `json:"rule_id"`
+	WindowStart time.Time `json:"window_start"`
+}
+
+// First claim for a (rule, window): inserts a 'claimed' row. Returns no row
+// when the slot already exists in any state.
+func (q *Queries) ClaimAlertDelivery(ctx context.Context, arg ClaimAlertDeliveryParams) (ClaimAlertDeliveryRow, error) {
+	row := q.db.QueryRow(ctx, claimAlertDelivery, arg.RuleID, arg.WindowStart)
+	var i ClaimAlertDeliveryRow
+	err := row.Scan(&i.RuleID, &i.WindowStart)
+	return i, err
+}
+
 const countAlertRules = `-- name: CountAlertRules :one
-SELECT count(*) FROM alert_rule WHERE device_id = $1
+SELECT count(*) FROM t_alert_rules WHERE device_id = $1
 `
 
 func (q *Queries) CountAlertRules(ctx context.Context, deviceID uuid.UUID) (int64, error) {
@@ -59,8 +85,20 @@ func (q *Queries) CountAlertRules(ctx context.Context, deviceID uuid.UUID) (int6
 	return count, err
 }
 
+const deadLetterFailedDeliveries = `-- name: DeadLetterFailedDeliveries :exec
+UPDATE t_alert_deliveries
+SET status = 'dead', last_error = COALESCE(last_error, 'attempts exhausted')
+WHERE status = 'failed' AND attempts >= $1
+`
+
+// 'failed' rows that exhausted their reclaim attempts become 'dead'.
+func (q *Queries) DeadLetterFailedDeliveries(ctx context.Context, attempts int16) error {
+	_, err := q.db.Exec(ctx, deadLetterFailedDeliveries, attempts)
+	return err
+}
+
 const deleteAlertRule = `-- name: DeleteAlertRule :execrows
-DELETE FROM alert_rule WHERE id = $1 AND device_id = $2
+DELETE FROM t_alert_rules WHERE id = $1 AND device_id = $2
 `
 
 type DeleteAlertRuleParams struct {
@@ -78,8 +116,8 @@ func (q *Queries) DeleteAlertRule(ctx context.Context, arg DeleteAlertRuleParams
 
 const deviceAPNsToken = `-- name: DeviceAPNsToken :one
 SELECT apns_token, COALESCE(apns_env, 'sandbox'), locale
-FROM device
-WHERE id = $1 AND deleted_at IS NULL AND apns_token IS NOT NULL
+FROM t_devices
+WHERE id = $1 AND deleted_at IS NULL AND push_status = 'active'
 `
 
 type DeviceAPNsTokenRow struct {
@@ -96,7 +134,7 @@ func (q *Queries) DeviceAPNsToken(ctx context.Context, id uuid.UUID) (DeviceAPNs
 }
 
 const deviceExistsForAlert = `-- name: DeviceExistsForAlert :one
-SELECT EXISTS(SELECT 1 FROM device WHERE id = $1 AND deleted_at IS NULL)
+SELECT EXISTS(SELECT 1 FROM t_devices WHERE id = $1 AND deleted_at IS NULL)
 `
 
 func (q *Queries) DeviceExistsForAlert(ctx context.Context, id uuid.UUID) (bool, error) {
@@ -109,13 +147,13 @@ func (q *Queries) DeviceExistsForAlert(ctx context.Context, id uuid.UUID) (bool,
 const getAlertRule = `-- name: GetAlertRule :one
 SELECT id, device_id, spot_id, h3_cell, radius_m, min_score, days_mask,
        start_local, end_local, tz, enabled
-FROM alert_rule
+FROM t_alert_rules
 WHERE id = $1
 `
 
-func (q *Queries) GetAlertRule(ctx context.Context, id uuid.UUID) (AlertRule, error) {
+func (q *Queries) GetAlertRule(ctx context.Context, id uuid.UUID) (TAlertRule, error) {
 	row := q.db.QueryRow(ctx, getAlertRule, id)
-	var i AlertRule
+	var i TAlertRule
 	err := row.Scan(
 		&i.ID,
 		&i.DeviceID,
@@ -132,28 +170,8 @@ func (q *Queries) GetAlertRule(ctx context.Context, id uuid.UUID) (AlertRule, er
 	return i, err
 }
 
-const insertAlertDelivery = `-- name: InsertAlertDelivery :execrows
-INSERT INTO alert_delivery (rule_id, window_start, sent_at, apns_status)
-VALUES ($1, $2, now(), $3)
-ON CONFLICT (rule_id, window_start) DO NOTHING
-`
-
-type InsertAlertDeliveryParams struct {
-	RuleID      uuid.UUID   `json:"rule_id"`
-	WindowStart time.Time   `json:"window_start"`
-	ApnsStatus  pgtype.Int4 `json:"apns_status"`
-}
-
-func (q *Queries) InsertAlertDelivery(ctx context.Context, arg InsertAlertDeliveryParams) (int64, error) {
-	result, err := q.db.Exec(ctx, insertAlertDelivery, arg.RuleID, arg.WindowStart, arg.ApnsStatus)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
 const insertAlertRule = `-- name: InsertAlertRule :one
-INSERT INTO alert_rule (device_id, spot_id, h3_cell, radius_m, min_score,
+INSERT INTO t_alert_rules (device_id, spot_id, h3_cell, radius_m, min_score,
                         days_mask, start_local, end_local, tz)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 RETURNING id
@@ -191,20 +209,20 @@ func (q *Queries) InsertAlertRule(ctx context.Context, arg InsertAlertRuleParams
 const listAlertRules = `-- name: ListAlertRules :many
 SELECT id, device_id, spot_id, h3_cell, radius_m, min_score, days_mask,
        start_local, end_local, tz, enabled
-FROM alert_rule
+FROM t_alert_rules
 WHERE device_id = $1
 ORDER BY id
 `
 
-func (q *Queries) ListAlertRules(ctx context.Context, deviceID uuid.UUID) ([]AlertRule, error) {
+func (q *Queries) ListAlertRules(ctx context.Context, deviceID uuid.UUID) ([]TAlertRule, error) {
 	rows, err := q.db.Query(ctx, listAlertRules, deviceID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []AlertRule{}
+	items := []TAlertRule{}
 	for rows.Next() {
-		var i AlertRule
+		var i TAlertRule
 		if err := rows.Scan(
 			&i.ID,
 			&i.DeviceID,
@@ -231,19 +249,19 @@ func (q *Queries) ListAlertRules(ctx context.Context, deviceID uuid.UUID) ([]Ale
 const listEnabledAlertRules = `-- name: ListEnabledAlertRules :many
 SELECT id, device_id, spot_id, h3_cell, radius_m, min_score, days_mask,
        start_local, end_local, tz, enabled
-FROM alert_rule
+FROM t_alert_rules
 WHERE enabled
 `
 
-func (q *Queries) ListEnabledAlertRules(ctx context.Context) ([]AlertRule, error) {
+func (q *Queries) ListEnabledAlertRules(ctx context.Context) ([]TAlertRule, error) {
 	rows, err := q.db.Query(ctx, listEnabledAlertRules)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []AlertRule{}
+	items := []TAlertRule{}
 	for rows.Next() {
-		var i AlertRule
+		var i TAlertRule
 		if err := rows.Scan(
 			&i.ID,
 			&i.DeviceID,
@@ -267,26 +285,94 @@ func (q *Queries) ListEnabledAlertRules(ctx context.Context) ([]AlertRule, error
 	return items, nil
 }
 
-const setDeliveryStatus = `-- name: SetDeliveryStatus :exec
-UPDATE alert_delivery SET apns_status = $3
-WHERE rule_id = $1 AND window_start = $2
+const markDeliveryDead = `-- name: MarkDeliveryDead :exec
+UPDATE t_alert_deliveries
+SET status = 'dead', last_error = $3
+WHERE rule_id = $1 AND window_start = $2 AND status = 'failed'
 `
 
-type SetDeliveryStatusParams struct {
+type MarkDeliveryDeadParams struct {
+	RuleID      uuid.UUID   `json:"rule_id"`
+	WindowStart time.Time   `json:"window_start"`
+	LastError   pgtype.Text `json:"last_error"`
+}
+
+func (q *Queries) MarkDeliveryDead(ctx context.Context, arg MarkDeliveryDeadParams) error {
+	_, err := q.db.Exec(ctx, markDeliveryDead, arg.RuleID, arg.WindowStart, arg.LastError)
+	return err
+}
+
+const markDeliveryFailed = `-- name: MarkDeliveryFailed :exec
+UPDATE t_alert_deliveries
+SET status = 'failed', apns_status = $3, last_error = $4
+WHERE rule_id = $1 AND window_start = $2 AND status = 'claimed'
+`
+
+type MarkDeliveryFailedParams struct {
+	RuleID      uuid.UUID   `json:"rule_id"`
+	WindowStart time.Time   `json:"window_start"`
+	ApnsStatus  pgtype.Int4 `json:"apns_status"`
+	LastError   pgtype.Text `json:"last_error"`
+}
+
+func (q *Queries) MarkDeliveryFailed(ctx context.Context, arg MarkDeliveryFailedParams) error {
+	_, err := q.db.Exec(ctx, markDeliveryFailed,
+		arg.RuleID,
+		arg.WindowStart,
+		arg.ApnsStatus,
+		arg.LastError,
+	)
+	return err
+}
+
+const markDeliverySent = `-- name: MarkDeliverySent :exec
+UPDATE t_alert_deliveries
+SET status = 'sent', sent_at = now(), apns_status = $3, last_error = NULL
+WHERE rule_id = $1 AND window_start = $2 AND status = 'claimed'
+`
+
+type MarkDeliverySentParams struct {
 	RuleID      uuid.UUID   `json:"rule_id"`
 	WindowStart time.Time   `json:"window_start"`
 	ApnsStatus  pgtype.Int4 `json:"apns_status"`
 }
 
-func (q *Queries) SetDeliveryStatus(ctx context.Context, arg SetDeliveryStatusParams) error {
-	_, err := q.db.Exec(ctx, setDeliveryStatus, arg.RuleID, arg.WindowStart, arg.ApnsStatus)
+func (q *Queries) MarkDeliverySent(ctx context.Context, arg MarkDeliverySentParams) error {
+	_, err := q.db.Exec(ctx, markDeliverySent, arg.RuleID, arg.WindowStart, arg.ApnsStatus)
 	return err
+}
+
+const reclaimFailedDelivery = `-- name: ReclaimFailedDelivery :one
+UPDATE t_alert_deliveries
+SET status = 'claimed', attempts = attempts + 1, claimed_at = now()
+WHERE rule_id = $1 AND window_start = $2
+  AND status = 'failed' AND attempts < $3
+RETURNING rule_id, window_start
+`
+
+type ReclaimFailedDeliveryParams struct {
+	RuleID      uuid.UUID `json:"rule_id"`
+	WindowStart time.Time `json:"window_start"`
+	Attempts    int16     `json:"attempts"`
+}
+
+type ReclaimFailedDeliveryRow struct {
+	RuleID      uuid.UUID `json:"rule_id"`
+	WindowStart time.Time `json:"window_start"`
+}
+
+// Retry path: re-claim a 'failed' delivery while attempts remain.
+func (q *Queries) ReclaimFailedDelivery(ctx context.Context, arg ReclaimFailedDeliveryParams) (ReclaimFailedDeliveryRow, error) {
+	row := q.db.QueryRow(ctx, reclaimFailedDelivery, arg.RuleID, arg.WindowStart, arg.Attempts)
+	var i ReclaimFailedDeliveryRow
+	err := row.Scan(&i.RuleID, &i.WindowStart)
+	return i, err
 }
 
 const spotScoreAt = `-- name: SpotScoreAt :one
 SELECT s.id, s.name, ss.score
-FROM spot s
-JOIN spot_score ss ON ss.spot_id = s.id AND ss.ts_hour = $2
+FROM t_spots s
+JOIN t_spot_scores ss ON ss.spot_id = s.id AND ss.ts_hour = $2
 WHERE s.id = $1
 `
 
@@ -308,8 +394,21 @@ func (q *Queries) SpotScoreAt(ctx context.Context, arg SpotScoreAtParams) (SpotS
 	return i, err
 }
 
+const sweepStaleDeliveries = `-- name: SweepStaleDeliveries :exec
+UPDATE t_alert_deliveries
+SET status = 'failed', last_error = 'claim timeout'
+WHERE status = 'claimed' AND claimed_at < now() - interval '5 minutes'
+`
+
+// Claims older than 5 minutes are presumed crashed mid-send; mark failed so
+// the retry path can pick them up.
+func (q *Queries) SweepStaleDeliveries(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, sweepStaleDeliveries)
+	return err
+}
+
 const updateAlertRule = `-- name: UpdateAlertRule :one
-UPDATE alert_rule SET
+UPDATE t_alert_rules SET
     spot_id      = $3,
     h3_cell      = $4,
     radius_m     = $5,

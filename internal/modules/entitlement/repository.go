@@ -17,8 +17,14 @@ type Repository interface {
 	ActiveSubscription(ctx context.Context, deviceID string) (*Subscription, error)
 	// RecordNotification stores an App Store Server Notification for audit.
 	RecordNotification(ctx context.Context, n NotificationRecord) error
-	// MarkNotificationProcessed stamps processed_at.
+	// SubscriptionLastSignedDate returns the stored last_signed_date for a
+	// subscription, or ok=false when none exists.
+	SubscriptionLastSignedDate(ctx context.Context, originalTransactionID string) (signedAt time.Time, ok bool, err error)
+	// MarkNotificationProcessed/Ignored/Failed drive the notification state
+	// machine (received → processed|ignored|failed).
 	MarkNotificationProcessed(ctx context.Context, uuid string) error
+	MarkNotificationIgnored(ctx context.Context, uuid string) error
+	MarkNotificationFailed(ctx context.Context, uuid string, lastError string) error
 }
 
 // NotificationRecord is the audit row for apple_notification.

@@ -108,6 +108,10 @@ func (s *Service) Delete(ctx context.Context, id, deviceID uuid.UUID) error {
 // once thanks to the alert_delivery primary key.
 func (s *Service) Evaluate(ctx context.Context, now time.Time) (Stats, error) {
 	var st Stats
+	// Hygiene: stale claims become failed, exhausted failures become dead.
+	if err := s.repo.SweepDeliveries(ctx); err != nil {
+		slog.WarnContext(ctx, "alert delivery sweep failed", "error", err)
+	}
 	rules, err := s.repo.ListEnabledRules(ctx)
 	if err != nil {
 		return st, err
@@ -121,28 +125,55 @@ func (s *Service) Evaluate(ctx context.Context, now time.Time) (Stats, error) {
 		if !ok {
 			continue
 		}
-		claimed, err := s.repo.RecordDelivery(ctx, *d, windowStart, -1)
+		// Skip devices without a live push token before claiming the slot —
+		// a claim for an unreachable device would just churn retries.
+		_, _, _, hasToken, err := s.repo.DeviceAPNsToken(ctx, r.DeviceID)
 		if err != nil {
 			st.Failed++
-			slog.ErrorContext(ctx, "alert delivery record failed", "rule", r.ID, "error", err)
+			slog.ErrorContext(ctx, "alert token lookup failed", "rule", r.ID, "error", err)
+			continue
+		}
+		if !hasToken {
+			continue
+		}
+		claimed, err := s.repo.ClaimDelivery(ctx, *d, windowStart, MaxDeliveryAttempts)
+		if err != nil {
+			st.Failed++
+			slog.ErrorContext(ctx, "alert delivery claim failed", "rule", r.ID, "error", err)
 			continue
 		}
 		if !claimed {
-			continue // already sent for this window
+			continue // already sent/dead for this window, or retries exhausted
 		}
 		st.Fired++
 		if s.sender == nil {
 			continue
 		}
-		if err := s.sender.Send(ctx, *d); err != nil {
-			if errors.Is(err, ErrNoPushToken) {
-				continue // device never registered push — skip silently
+		switch err := s.sender.Send(ctx, *d); {
+		case err == nil:
+			st.Sent++
+			if merr := s.repo.MarkDeliverySent(ctx, r.ID, windowStart, 200); merr != nil {
+				slog.ErrorContext(ctx, "alert delivery sent-mark failed", "rule", r.ID, "error", merr)
 			}
+		case errors.Is(err, ErrNoPushToken):
+			// Token vanished between the pre-check and the send.
+			_ = s.repo.MarkDeliveryFailed(ctx, r.ID, windowStart, -1, err.Error())
+		case errors.Is(err, ErrPushTokenDead):
+			// APNs 410: clear device credentials and dead-letter — retrying
+			// a dead token can never succeed.
+			st.Failed++
+			if uerr := s.repo.MarkDeviceUnregistered(ctx, r.DeviceID); uerr != nil {
+				slog.ErrorContext(ctx, "device unregister failed", "device", r.DeviceID, "error", uerr)
+			}
+			_ = s.repo.MarkDeliveryFailed(ctx, r.ID, windowStart, 410, err.Error())
+			_ = s.repo.MarkDeliveryDead(ctx, r.ID, windowStart, err.Error())
+			slog.InfoContext(ctx, "alert device unregistered (APNs 410)", "rule", r.ID, "device", r.DeviceID)
+		default:
 			st.Failed++
 			slog.ErrorContext(ctx, "alert send failed", "rule", r.ID, "device", r.DeviceID, "error", err)
-		} else {
-			st.Sent++
-			_ = s.repo.SetDeliveryStatus(ctx, r.ID, windowStart, 200)
+			if merr := s.repo.MarkDeliveryFailed(ctx, r.ID, windowStart, -1, err.Error()); merr != nil {
+				slog.ErrorContext(ctx, "alert delivery fail-mark failed", "rule", r.ID, "error", merr)
+			}
 		}
 	}
 	return st, nil

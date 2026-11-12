@@ -87,11 +87,25 @@ func (s *Service) ProcessNotification(ctx context.Context, signedPayload string)
 	if sub == nil {
 		return s.repo.MarkNotificationProcessed(ctx, n.NotificationUUID)
 	}
+	// Out-of-order guard: ignore notifications whose signed_date is not newer
+	// than what the subscription already applied.
+	if lastSigned, ok, err := s.repo.SubscriptionLastSignedDate(ctx, otid); err != nil {
+		return s.markFailed(ctx, n.NotificationUUID, err)
+	} else if ok && !lastSigned.Before(signedAt) {
+		return s.repo.MarkNotificationIgnored(ctx, n.NotificationUUID)
+	}
 	if err := s.repo.UpsertSubscription(ctx, *sub); err != nil {
-		return err
+		return s.markFailed(ctx, n.NotificationUUID, err)
 	}
 	slog.InfoContext(ctx, "app store notification processed",
 		"type", n.NotificationType, "subtype", n.Subtype,
 		"original_transaction_id", otid)
 	return s.repo.MarkNotificationProcessed(ctx, n.NotificationUUID)
+}
+
+func (s *Service) markFailed(ctx context.Context, uuid string, cause error) error {
+	if err := s.repo.MarkNotificationFailed(ctx, uuid, cause.Error()); err != nil {
+		slog.ErrorContext(ctx, "notification fail-mark failed", "uuid", uuid, "error", err)
+	}
+	return cause
 }

@@ -15,7 +15,7 @@ import (
 
 const getActiveScoringConfig = `-- name: GetActiveScoringConfig :one
 SELECT version, weights, thresholds
-FROM scoring_config
+FROM t_scoring_configs
 WHERE active_from <= now()
 ORDER BY active_from DESC, version DESC
 LIMIT 1
@@ -36,7 +36,7 @@ func (q *Queries) GetActiveScoringConfig(ctx context.Context) (GetActiveScoringC
 
 const listActiveSpotsForScoring = `-- name: ListActiveSpotsForScoring :many
 SELECT id, kind, cell_id, tz, last_verified_at
-FROM spot
+FROM t_spots
 WHERE status = 'active'
 `
 
@@ -76,7 +76,7 @@ func (q *Queries) ListActiveSpotsForScoring(ctx context.Context) ([]ListActiveSp
 
 const listAmenitiesForSpots = `-- name: ListAmenitiesForSpots :many
 SELECT spot_id, type, distance_m
-FROM spot_amenity
+FROM t_spot_amenities
 WHERE spot_id = ANY($1::uuid[])
 `
 
@@ -108,7 +108,7 @@ func (q *Queries) ListAmenitiesForSpots(ctx context.Context, dollar_1 []uuid.UUI
 
 const listCrowdEstimatesForSpots = `-- name: ListCrowdEstimatesForSpots :many
 SELECT spot_id, dow, hour, level, source
-FROM crowd_estimate
+FROM t_crowd_estimates
 WHERE spot_id = ANY($1::uuid[])
 `
 
@@ -148,7 +148,7 @@ func (q *Queries) ListCrowdEstimatesForSpots(ctx context.Context, dollar_1 []uui
 
 const listWeatherForCells = `-- name: ListWeatherForCells :many
 SELECT cell_id, ts, temp, feels_like, precip_prob, wind, uv, cloud
-FROM weather_hourly
+FROM t_weather_hourly_forecasts
 WHERE cell_id = ANY($1::bigint[])
   AND ts >= $2
   AND ts < $3
@@ -201,7 +201,7 @@ func (q *Queries) ListWeatherForCells(ctx context.Context, arg ListWeatherForCel
 }
 
 const upsertSpotScore = `-- name: UpsertSpotScore :execrows
-INSERT INTO spot_score (
+INSERT INTO t_spot_scores (
     spot_id, ts_hour, config_version, score,
     s_weather, s_crowd, s_amenity, s_shade, s_fresh,
     cap_reason, reasons, confidence, computed_at
@@ -218,10 +218,10 @@ ON CONFLICT (spot_id, ts_hour) DO UPDATE SET
     reasons        = EXCLUDED.reasons,
     confidence     = EXCLUDED.confidence,
     computed_at    = EXCLUDED.computed_at
-WHERE spot_score.score          IS DISTINCT FROM EXCLUDED.score
-   OR spot_score.reasons        IS DISTINCT FROM EXCLUDED.reasons
-   OR spot_score.confidence     IS DISTINCT FROM EXCLUDED.confidence
-   OR spot_score.computed_at    IS DISTINCT FROM EXCLUDED.computed_at
+WHERE t_spot_scores.score          IS DISTINCT FROM EXCLUDED.score
+   OR t_spot_scores.reasons        IS DISTINCT FROM EXCLUDED.reasons
+   OR t_spot_scores.confidence     IS DISTINCT FROM EXCLUDED.confidence
+   OR t_spot_scores.computed_at    IS DISTINCT FROM EXCLUDED.computed_at
 `
 
 type UpsertSpotScoreParams struct {

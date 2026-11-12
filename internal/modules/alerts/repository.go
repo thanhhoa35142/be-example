@@ -46,10 +46,23 @@ type Repository interface {
 	SpotScoreAt(ctx context.Context, spotID uuid.UUID, tsHour time.Time) (*ScoredSpot, error)
 	// BestScoredSpotNear returns the highest-scoring spot within radius of a point.
 	BestScoredSpotNear(ctx context.Context, lat, lon float64, radiusM int, tsHour time.Time) (*Delivery, error)
-	// RecordDelivery claims the (rule, window) slot; false when already sent.
-	RecordDelivery(ctx context.Context, d Delivery, windowStart time.Time, apnsStatus int) (bool, error)
-	// SetDeliveryStatus records the APNs outcome after a send attempt.
-	SetDeliveryStatus(ctx context.Context, ruleID uuid.UUID, windowStart time.Time, apnsStatus int) error
+	// SweepDeliveries fails stale 'claimed' rows and dead-letters 'failed'
+	// rows whose attempts are exhausted. Best-effort hygiene per evaluate run.
+	SweepDeliveries(ctx context.Context) error
+	// ClaimDelivery claims the (rule, window) slot for sending: inserts a
+	// 'claimed' row, or re-claims a 'failed' one while attempts remain.
+	// Returns false when the slot is already claimed/sent/dead or retries
+	// are exhausted.
+	ClaimDelivery(ctx context.Context, d Delivery, windowStart time.Time, maxAttempts int) (bool, error)
+	// MarkDeliverySent records a successful send (claimed → sent).
+	MarkDeliverySent(ctx context.Context, ruleID uuid.UUID, windowStart time.Time, apnsStatus int) error
+	// MarkDeliveryFailed records a failed send attempt (claimed → failed).
+	MarkDeliveryFailed(ctx context.Context, ruleID uuid.UUID, windowStart time.Time, apnsStatus int, lastError string) error
+	// MarkDeliveryDead terminally fails a delivery (failed → dead), e.g. on
+	// APNs 410 where retrying can never succeed.
+	MarkDeliveryDead(ctx context.Context, ruleID uuid.UUID, windowStart time.Time, lastError string) error
+	// MarkDeviceUnregistered clears push credentials after APNs 410.
+	MarkDeviceUnregistered(ctx context.Context, deviceID uuid.UUID) error
 	// DeviceExists reports whether an active device exists.
 	DeviceExists(ctx context.Context, deviceID uuid.UUID) (bool, error)
 }

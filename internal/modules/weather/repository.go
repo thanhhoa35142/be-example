@@ -27,7 +27,7 @@ type Repository interface {
 	ReplaceRows(ctx context.Context, cellID int64, from, to time.Time, rows []Row) error
 	// DeleteBefore removes rows older than the cutoff (retention ~14 days).
 	DeleteBefore(ctx context.Context, before time.Time) error
-	// ConsumeQuota atomically adds weight to the provider's daily budget.
+	// ReserveQuota atomically adds weight to the provider's UTC-day budget.
 	// Returns false when the budget would be exceeded.
-	ConsumeQuota(ctx context.Context, provider string, weight, limit int) (bool, error)
+	ReserveQuota(ctx context.Context, provider string, weight, limit int) (bool, error)
 }

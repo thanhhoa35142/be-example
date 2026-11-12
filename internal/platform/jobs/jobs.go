@@ -13,27 +13,38 @@ import (
 
 var ErrLockNotAcquired = errors.New("job lock not acquired")
 
+// Acquire takes the session-level advisory lock for name and returns a
+// release function. Returns ErrLockNotAcquired when another session holds it.
+func Acquire(ctx context.Context, pool *pgxpool.Pool, name string) (func(), error) {
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire conn: %w", err)
+	}
+
+	var acquired bool
+	if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", lockKey(name)).Scan(&acquired); err != nil {
+		conn.Release()
+		return nil, fmt.Errorf("advisory lock: %w", err)
+	}
+	if !acquired {
+		conn.Release()
+		return nil, ErrLockNotAcquired
+	}
+	return func() {
+		_, _ = conn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", lockKey(name))
+		conn.Release()
+	}, nil
+}
+
 // RunWithLock executes fn while holding a session-level advisory lock derived
 // from name. If another session holds the lock, it returns ErrLockNotAcquired
 // without running fn.
 func RunWithLock(ctx context.Context, pool *pgxpool.Pool, name string, fn func(ctx context.Context) error) error {
-	conn, err := pool.Acquire(ctx)
+	release, err := Acquire(ctx, pool, name)
 	if err != nil {
-		return fmt.Errorf("acquire conn: %w", err)
+		return err
 	}
-	defer conn.Release()
-
-	var acquired bool
-	if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", lockKey(name)).Scan(&acquired); err != nil {
-		return fmt.Errorf("advisory lock: %w", err)
-	}
-	if !acquired {
-		return ErrLockNotAcquired
-	}
-	defer func() {
-		_, _ = conn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", lockKey(name))
-	}()
-
+	defer release()
 	return fn(ctx)
 }
 

@@ -155,6 +155,22 @@ func main() {
 				return nil
 			},
 		},
+		{
+			name:         "retention.purge",
+			initialDelay: 10 * time.Minute, // daily, lowest priority — runs last
+			fn: func(ctx context.Context) error {
+				stats, err := persistence.NewRetentionRepo(queries).Purge(ctx)
+				if err != nil {
+					return err
+				}
+				logger.Info("retention done",
+					"weather", stats.WeatherForecasts, "scores", stats.SpotScores,
+					"events", stats.Events, "crowd_reports", stats.CrowdReports,
+					"job_runs", stats.JobRuns, "deliveries", stats.AlertDeliveries,
+					"payloads_scrubbed", stats.PayloadsScrubbed)
+				return nil
+			},
+		},
 	}
 
 	if len(registry) == 0 {
@@ -172,20 +188,33 @@ func main() {
 
 func runJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, adminSvc *admin.Service, j job) {
 	run := func() {
+		// Per-run advisory lock: only one replica executes the job at a time.
+		release, err := jobs.Acquire(ctx, pool, j.name)
+		if errors.Is(err, jobs.ErrLockNotAcquired) {
+			return // another replica owns this tick
+		}
+		if err != nil {
+			logger.Error("job lock failed", "job", j.name, "error", err)
+			return
+		}
+		defer release()
+
+		// Winning the lock means any 'running' rows for this job are orphans
+		// from a dead worker — abandon them before recording this run.
+		if err := adminSvc.AbandonJobRuns(ctx, j.name); err != nil {
+			logger.Warn("job orphan sweep failed", "job", j.name, "error", err)
+		}
+
 		runID, err := adminSvc.RecordJobStart(ctx, j.name)
 		if err != nil {
 			logger.Error("job_run insert failed", "job", j.name, "error", err)
 		}
-		jobErr := jobs.RunWithLock(ctx, pool, j.name, j.fn)
+		jobErr := j.fn(ctx)
 		switch {
 		case jobErr == nil:
 			logger.Info("job ok", "job", j.name)
 			if runID != 0 {
-				adminSvc.RecordJobFinish(ctx, runID, "ok", nil, nil)
-			}
-		case errors.Is(jobErr, jobs.ErrLockNotAcquired):
-			if runID != 0 {
-				adminSvc.RecordJobFinish(ctx, runID, "skipped", nil, nil)
+				adminSvc.RecordJobFinish(ctx, runID, "succeeded", nil, nil)
 			}
 		default:
 			logger.Error("job failed", "job", j.name, "error", jobErr)
@@ -195,18 +224,31 @@ func runJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, adminS
 		}
 	}
 
-	// Stagger first runs: weather hits the forecast provider, the rest are
-	// DB-only but cheap to spread anyway.
-	if j.initialDelay > 0 {
+	// First schedule load decides the boot offset and enabled flag; offset
+	// comes from t_worker_job_schedules (falls back to the static
+	// initialDelay when the row is missing).
+	interval := time.Duration(0)
+	enabled := true
+	offset := j.initialDelay
+	if schedule, err := adminSvc.JobSchedule(ctx, j.name); err == nil {
+		interval = time.Duration(schedule.IntervalSeconds) * time.Second
+		enabled = schedule.Enabled
+		offset = time.Duration(schedule.OffsetSeconds) * time.Second
+	} else {
+		logger.Warn("job schedule missing, using defaults", "job", j.name, "error", err)
+	}
+
+	if offset > 0 {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(j.initialDelay):
+		case <-time.After(offset):
 		}
 	}
-	run() // run once at startup, then on every tick
+	if enabled {
+		run() // run once at startup, then on every tick
+	}
 
-	var interval time.Duration
 	var timer *time.Timer
 	var timerC <-chan time.Time
 	defer func() {
@@ -223,6 +265,7 @@ func runJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, adminS
 			logger.Error("job schedule load failed", "job", j.name, "error", err)
 			return
 		}
+		enabled = schedule.Enabled
 		nextInterval := time.Duration(schedule.IntervalSeconds) * time.Second
 		if nextInterval == interval {
 			return
@@ -252,7 +295,9 @@ func runJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, adminS
 		case <-timerC:
 			timer.Reset(interval)
 			timerC = timer.C
-			run()
+			if enabled {
+				run()
+			}
 			refreshSchedule(true)
 		case <-pollTicker.C:
 			refreshSchedule(true)

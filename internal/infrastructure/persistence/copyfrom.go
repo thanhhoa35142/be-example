@@ -47,5 +47,5 @@ func (r iteratorForUpsertWeatherHourly) Err() error {
 }
 
 func (q *Queries) UpsertWeatherHourly(ctx context.Context, arg []UpsertWeatherHourlyParams) (int64, error) {
-	return q.db.CopyFrom(ctx, []string{"weather_hourly"}, []string{"cell_id", "ts", "temp", "feels_like", "precip_prob", "wind", "uv", "cloud", "provider", "fetched_at"}, &iteratorForUpsertWeatherHourly{rows: arg})
+	return q.db.CopyFrom(ctx, []string{"t_weather_hourly_forecasts"}, []string{"cell_id", "ts", "temp", "feels_like", "precip_prob", "wind", "uv", "cloud", "provider", "fetched_at"}, &iteratorForUpsertWeatherHourly{rows: arg})
 }

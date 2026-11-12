@@ -63,7 +63,7 @@ func (s *Service) Refresh(ctx context.Context) (Stats, error) {
 	// front; on exhaustion skip the run — the next tick retries tomorrow's
 	// window naturally.
 	if s.dailyLimit > 0 {
-		ok, err := s.repo.ConsumeQuota(ctx, s.provider.Name(), len(cells), s.dailyLimit)
+		ok, err := s.repo.ReserveQuota(ctx, s.provider.Name(), len(cells), s.dailyLimit)
 		if err != nil {
 			return Stats{}, err
 		}

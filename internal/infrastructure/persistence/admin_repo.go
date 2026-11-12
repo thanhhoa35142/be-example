@@ -25,6 +25,10 @@ func (r *AdminRepo) StartJobRun(ctx context.Context, job string) (int64, error) 
 	return r.q.StartJobRun(ctx, job)
 }
 
+func (r *AdminRepo) AbandonJobRuns(ctx context.Context, job string) error {
+	return r.q.AbandonJobRuns(ctx, job)
+}
+
 func (r *AdminRepo) FinishJobRun(ctx context.Context, id int64, status string, rowsAffected *int, errText *string) error {
 	var rows pgtype.Int4
 	if rowsAffected != nil {
@@ -99,10 +103,12 @@ func (r *AdminRepo) UpdateJobSchedule(ctx context.Context, job string, intervalS
 	return jobScheduleFromRow(row), nil
 }
 
-func jobScheduleFromRow(row WorkerJobSchedule) admin.JobSchedule {
+func jobScheduleFromRow(row TWorkerJobSchedule) admin.JobSchedule {
 	return admin.JobSchedule{
 		Job:             row.Job,
 		IntervalSeconds: int64(row.IntervalSeconds),
+		Enabled:         row.Enabled,
+		OffsetSeconds:   int64(row.OffsetSeconds),
 		UpdatedAt:       row.UpdatedAt.UTC(),
 	}
 }

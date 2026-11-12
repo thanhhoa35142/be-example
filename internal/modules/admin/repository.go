@@ -12,6 +12,9 @@ type Repository interface {
 	// Job instrumentation
 	StartJobRun(ctx context.Context, job string) (int64, error)
 	FinishJobRun(ctx context.Context, id int64, status string, rowsAffected *int, errText *string) error
+	// AbandonJobRuns marks orphaned 'running' rows of a job as 'abandoned'.
+	// Called after the job wins its advisory lock.
+	AbandonJobRuns(ctx context.Context, job string) error
 	ListJobRuns(ctx context.Context, limit int, beforeID *int64) ([]JobRun, error)
 	ListJobSchedules(ctx context.Context) ([]JobSchedule, error)
 	GetJobSchedule(ctx context.Context, job string) (JobSchedule, error)

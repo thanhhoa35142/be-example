@@ -109,10 +109,42 @@ func (r *EntitlementRepo) RecordNotification(ctx context.Context, n entitlement.
 	})
 }
 
+func (r *EntitlementRepo) SubscriptionLastSignedDate(ctx context.Context, originalTransactionID string) (time.Time, bool, error) {
+	t, err := r.q.SubscriptionLastSignedDate(ctx, originalTransactionID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	return t, true, nil
+}
+
 func (r *EntitlementRepo) MarkNotificationProcessed(ctx context.Context, uuidStr string) error {
+	return r.markNotification(ctx, uuidStr, func(id uuid.UUID) error {
+		return r.q.MarkNotificationProcessed(ctx, id)
+	})
+}
+
+func (r *EntitlementRepo) MarkNotificationIgnored(ctx context.Context, uuidStr string) error {
+	return r.markNotification(ctx, uuidStr, func(id uuid.UUID) error {
+		return r.q.MarkNotificationIgnored(ctx, id)
+	})
+}
+
+func (r *EntitlementRepo) MarkNotificationFailed(ctx context.Context, uuidStr, lastError string) error {
+	return r.markNotification(ctx, uuidStr, func(id uuid.UUID) error {
+		return r.q.MarkNotificationFailed(ctx, MarkNotificationFailedParams{
+			NotificationUuid: id,
+			LastError:        pgtype.Text{String: lastError, Valid: lastError != ""},
+		})
+	})
+}
+
+func (r *EntitlementRepo) markNotification(ctx context.Context, uuidStr string, fn func(uuid.UUID) error) error {
 	id, err := uuid.Parse(uuidStr)
 	if err != nil {
 		return nil // unparseable uuid can't be in the table anyway
 	}
-	return r.q.MarkNotificationProcessed(ctx, id)
+	return fn(id)
 }

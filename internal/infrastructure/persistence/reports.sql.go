@@ -14,7 +14,7 @@ import (
 )
 
 const countCrowdReportsSince = `-- name: CountCrowdReportsSince :one
-SELECT count(*) FROM crowd_report
+SELECT count(*) FROM t_crowd_reports
 WHERE device_id = $1 AND created_at > $2
 `
 
@@ -31,8 +31,9 @@ func (q *Queries) CountCrowdReportsSince(ctx context.Context, arg CountCrowdRepo
 }
 
 const insertCrowdReport = `-- name: InsertCrowdReport :exec
-INSERT INTO crowd_report (spot_id, device_id, level, local_dow, local_hour)
+INSERT INTO t_crowd_reports (spot_id, device_id, level, local_dow, local_hour)
 VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (device_id, spot_id, created_day, local_hour) DO NOTHING
 `
 
 type InsertCrowdReportParams struct {
@@ -43,6 +44,8 @@ type InsertCrowdReportParams struct {
 	LocalHour int16     `json:"local_hour"`
 }
 
+// One report per device/spot/hour-slot per UTC day (enforced by
+// uq_t_crowd_reports_slot); duplicates are dropped silently.
 func (q *Queries) InsertCrowdReport(ctx context.Context, arg InsertCrowdReportParams) error {
 	_, err := q.db.Exec(ctx, insertCrowdReport,
 		arg.SpotID,
@@ -55,8 +58,10 @@ func (q *Queries) InsertCrowdReport(ctx context.Context, arg InsertCrowdReportPa
 }
 
 const insertScoreFeedback = `-- name: InsertScoreFeedback :exec
-INSERT INTO score_feedback (spot_id, device_id, ts_hour, verdict)
+INSERT INTO t_score_feedbacks (spot_id, device_id, ts_hour, verdict)
 VALUES ($1, $2, $3, $4)
+ON CONFLICT (device_id, spot_id, ts_hour)
+DO UPDATE SET verdict = EXCLUDED.verdict
 `
 
 type InsertScoreFeedbackParams struct {
@@ -66,6 +71,7 @@ type InsertScoreFeedbackParams struct {
 	Verdict  int16     `json:"verdict"`
 }
 
+// Latest verdict wins for a (device, spot, hour) slot.
 func (q *Queries) InsertScoreFeedback(ctx context.Context, arg InsertScoreFeedbackParams) error {
 	_, err := q.db.Exec(ctx, insertScoreFeedback,
 		arg.SpotID,
@@ -77,8 +83,8 @@ func (q *Queries) InsertScoreFeedback(ctx context.Context, arg InsertScoreFeedba
 }
 
 const insertSpotReport = `-- name: InsertSpotReport :exec
-INSERT INTO spot_report (spot_id, device_id, type, issue_code, created_day)
-VALUES ($1, $2, $3, $4, current_date)
+INSERT INTO t_spot_reports (spot_id, device_id, type, issue_code)
+VALUES ($1, $2, $3, $4)
 `
 
 type InsertSpotReportParams struct {

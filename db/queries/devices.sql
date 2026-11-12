@@ -1,29 +1,50 @@
 -- name: UpsertDevice :one
-INSERT INTO device (id, apns_token, apns_env, locale, tz, app_version, prefs, last_seen_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+-- push_status tracks token state: providing apns_token marks the device
+-- 'active'; omitting it keeps the current status/token pair intact.
+INSERT INTO t_devices (id, apns_token, apns_env, locale, tz, app_version, prefs,
+                       push_status, push_status_changed_at, last_seen_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7,
+        CASE WHEN $2::text IS NOT NULL THEN 'active' ELSE 'none' END,
+        CASE WHEN $2::text IS NOT NULL THEN now() END,
+        now())
 ON CONFLICT (id) DO UPDATE SET
-    apns_token   = COALESCE(EXCLUDED.apns_token, device.apns_token),
-    apns_env     = COALESCE(EXCLUDED.apns_env, device.apns_env),
-    locale       = COALESCE(EXCLUDED.locale, device.locale),
-    tz           = COALESCE(EXCLUDED.tz, device.tz),
-    app_version  = COALESCE(EXCLUDED.app_version, device.app_version),
-    prefs        = CASE WHEN EXCLUDED.prefs = '{}'::jsonb THEN device.prefs ELSE EXCLUDED.prefs END,
+    apns_token   = COALESCE(EXCLUDED.apns_token, t_devices.apns_token),
+    apns_env     = COALESCE(EXCLUDED.apns_env, t_devices.apns_env),
+    locale       = COALESCE(EXCLUDED.locale, t_devices.locale),
+    tz           = COALESCE(EXCLUDED.tz, t_devices.tz),
+    app_version  = COALESCE(EXCLUDED.app_version, t_devices.app_version),
+    prefs        = CASE WHEN EXCLUDED.prefs = '{}'::jsonb THEN t_devices.prefs ELSE EXCLUDED.prefs END,
+    push_status  = CASE WHEN EXCLUDED.apns_token IS NOT NULL THEN 'active' ELSE t_devices.push_status END,
+    push_status_changed_at = CASE
+        WHEN EXCLUDED.apns_token IS NOT NULL
+             AND t_devices.apns_token IS DISTINCT FROM EXCLUDED.apns_token
+        THEN now() ELSE t_devices.push_status_changed_at END,
     last_seen_at = now(),
     deleted_at   = NULL
 RETURNING id;
 
 -- name: GetActiveDevice :one
-SELECT id FROM device
+SELECT id FROM t_devices
 WHERE id = $1 AND deleted_at IS NULL;
 
 -- name: GetDeviceTz :one
-SELECT COALESCE(tz, 'UTC') FROM device
+SELECT COALESCE(tz, 'UTC') FROM t_devices
 WHERE id = $1 AND deleted_at IS NULL;
 
 -- name: SoftDeleteDevice :execrows
-UPDATE device SET deleted_at = now()
+UPDATE t_devices SET deleted_at = now()
 WHERE id = $1 AND deleted_at IS NULL;
 
 -- name: TouchDevice :exec
-UPDATE device SET last_seen_at = now()
+UPDATE t_devices SET last_seen_at = now()
+WHERE id = $1 AND deleted_at IS NULL;
+
+-- name: MarkDevicePushUnregistered :exec
+-- Called on APNs 410: token is dead, drop it and stop selecting the device
+-- for pushes.
+UPDATE t_devices
+SET push_status = 'unregistered',
+    push_status_changed_at = now(),
+    apns_token = NULL,
+    apns_env   = NULL
 WHERE id = $1 AND deleted_at IS NULL;
