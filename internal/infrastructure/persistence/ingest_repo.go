@@ -230,6 +230,26 @@ func (s *ingestStore) Amenities(ctx context.Context) ([]ingest.AmenityRow, error
 	return out, nil
 }
 
+func spotRowFrom(r ListPackSpotsRow) ingest.SpotRow {
+	return ingest.SpotRow{
+		ID:           r.ID,
+		Status:       r.Status,
+		Quality:      int(r.Quality.Int16),
+		Curated:      r.Curated,
+		Kind:         r.Kind,
+		Name:         r.Name.String,
+		NamesJSON:    r.Names,
+		AttrsJSON:    r.Attrs,
+		Country:      r.Country,
+		TZ:           r.Tz,
+		CellID:       r.CellID,
+		Lon:          f64(r.Lon),
+		Lat:          f64(r.Lat),
+		AreaGeoJSON:  strPtr(r.AreaGeojson),
+		StatusReason: r.StatusReason.String,
+	}
+}
+
 func (s *ingestStore) Spots(ctx context.Context) ([]ingest.SpotRow, error) {
 	rows, err := s.q.ListPackSpots(ctx, s.packID)
 	if err != nil {
@@ -237,23 +257,43 @@ func (s *ingestStore) Spots(ctx context.Context) ([]ingest.SpotRow, error) {
 	}
 	out := make([]ingest.SpotRow, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, ingest.SpotRow{
+		out = append(out, spotRowFrom(r))
+	}
+	return out, nil
+}
+
+// SpotsNear returns pending/active spots of the pack within radiusM meters
+// of (lon, lat), nearest first — the spatial fallback for OSM remaps.
+func (s *ingestStore) SpotsNear(ctx context.Context, lon, lat, radiusM float64) ([]ingest.SpotRow, error) {
+	rows, err := s.q.ListSpotsNearPoint(ctx, ListSpotsNearPointParams{
+		CityPackID:    s.packID,
+		StMakepoint:   lon,
+		StMakepoint_2: lat,
+		StDwithin:     radiusM,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ingest.SpotRow, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, spotRowFrom(ListPackSpotsRow{
 			ID:           r.ID,
 			Status:       r.Status,
-			Quality:      int(r.Quality.Int16),
+			Quality:      r.Quality,
 			Curated:      r.Curated,
+			MergedInto:   r.MergedInto,
 			Kind:         r.Kind,
-			Name:         r.Name.String,
-			NamesJSON:    r.Names,
-			AttrsJSON:    r.Attrs,
+			Name:         r.Name,
+			Names:        r.Names,
+			Attrs:        r.Attrs,
 			Country:      r.Country,
-			TZ:           r.Tz,
+			Tz:           r.Tz,
 			CellID:       r.CellID,
-			Lon:          f64(r.Lon),
-			Lat:          f64(r.Lat),
-			AreaGeoJSON:  strPtr(r.AreaGeojson),
-			StatusReason: r.StatusReason.String,
-		})
+			StatusReason: r.StatusReason,
+			Lon:          r.Lon,
+			Lat:          r.Lat,
+			AreaGeojson:  r.AreaGeojson,
+		}))
 	}
 	return out, nil
 }

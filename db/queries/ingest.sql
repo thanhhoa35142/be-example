@@ -92,6 +92,24 @@ SELECT id, status, quality, curated, merged_into, kind, name, names,
 FROM t_spots
 WHERE city_pack_id = $1;
 
+-- name: ListSpotsNearPoint :many
+-- Spatial fallback candidates for OSM remaps: same columns as
+-- ListPackSpots, restricted to reviewable statuses (closed/hidden/merged
+-- must never be resurrected by a name match) within radius meters of the
+-- point, nearest first, capped at 10.
+SELECT id, status, quality, curated, merged_into, kind, name, names,
+       attrs, country, tz, cell_id, status_reason,
+       ST_X(geom::geometry) AS lon, ST_Y(geom::geometry) AS lat,
+       CASE WHEN area IS NOT NULL THEN ST_AsGeoJSON(area) END AS area_geojson
+FROM t_spots
+WHERE city_pack_id = $1
+  AND status IN ('pending','active')
+  AND ST_DWithin(geom,
+      ST_SetSRID(ST_MakePoint($2, $3), 4326)::geography, $4)
+ORDER BY ST_Distance(geom,
+      ST_SetSRID(ST_MakePoint($2, $3), 4326)::geography)
+LIMIT 10;
+
 -- name: InsertIngestSpot :one
 INSERT INTO t_spots (city_pack_id, kind, name, names, geom, area, country,
                      city, tz, cell_id, status, quality, attrs,

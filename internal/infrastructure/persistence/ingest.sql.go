@@ -667,6 +667,93 @@ func (q *Queries) ListSpotsMissingAllSources(ctx context.Context, arg ListSpotsM
 	return items, nil
 }
 
+const listSpotsNearPoint = `-- name: ListSpotsNearPoint :many
+SELECT id, status, quality, curated, merged_into, kind, name, names,
+       attrs, country, tz, cell_id, status_reason,
+       ST_X(geom::geometry) AS lon, ST_Y(geom::geometry) AS lat,
+       CASE WHEN area IS NOT NULL THEN ST_AsGeoJSON(area) END AS area_geojson
+FROM t_spots
+WHERE city_pack_id = $1
+  AND status IN ('pending','active')
+  AND ST_DWithin(geom,
+      ST_SetSRID(ST_MakePoint($2, $3), 4326)::geography, $4)
+ORDER BY ST_Distance(geom,
+      ST_SetSRID(ST_MakePoint($2, $3), 4326)::geography)
+LIMIT 10
+`
+
+type ListSpotsNearPointParams struct {
+	CityPackID    uuid.UUID   `json:"city_pack_id"`
+	StMakepoint   interface{} `json:"st_makepoint"`
+	StMakepoint_2 interface{} `json:"st_makepoint_2"`
+	StDwithin     interface{} `json:"st_dwithin"`
+}
+
+type ListSpotsNearPointRow struct {
+	ID           uuid.UUID   `json:"id"`
+	Status       string      `json:"status"`
+	Quality      pgtype.Int2 `json:"quality"`
+	Curated      bool        `json:"curated"`
+	MergedInto   pgtype.UUID `json:"merged_into"`
+	Kind         string      `json:"kind"`
+	Name         pgtype.Text `json:"name"`
+	Names        []byte      `json:"names"`
+	Attrs        []byte      `json:"attrs"`
+	Country      string      `json:"country"`
+	Tz           string      `json:"tz"`
+	CellID       int64       `json:"cell_id"`
+	StatusReason pgtype.Text `json:"status_reason"`
+	Lon          interface{} `json:"lon"`
+	Lat          interface{} `json:"lat"`
+	AreaGeojson  interface{} `json:"area_geojson"`
+}
+
+// Spatial fallback candidates for OSM remaps: same columns as
+// ListPackSpots, restricted to reviewable statuses (closed/hidden/merged
+// must never be resurrected by a name match) within radius meters of the
+// point, nearest first, capped at 10.
+func (q *Queries) ListSpotsNearPoint(ctx context.Context, arg ListSpotsNearPointParams) ([]ListSpotsNearPointRow, error) {
+	rows, err := q.db.Query(ctx, listSpotsNearPoint,
+		arg.CityPackID,
+		arg.StMakepoint,
+		arg.StMakepoint_2,
+		arg.StDwithin,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListSpotsNearPointRow{}
+	for rows.Next() {
+		var i ListSpotsNearPointRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Status,
+			&i.Quality,
+			&i.Curated,
+			&i.MergedInto,
+			&i.Kind,
+			&i.Name,
+			&i.Names,
+			&i.Attrs,
+			&i.Country,
+			&i.Tz,
+			&i.CellID,
+			&i.StatusReason,
+			&i.Lon,
+			&i.Lat,
+			&i.AreaGeojson,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const markExtractFetched = `-- name: MarkExtractFetched :exec
 UPDATE t_city_packs SET extract_fetched_at = $2
 WHERE osm_extract = $1

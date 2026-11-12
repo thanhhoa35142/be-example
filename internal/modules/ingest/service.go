@@ -24,6 +24,11 @@ import (
 // usually a truncated extract or broken filter).
 var ErrGuardTripped = errors.New("ingest guard tripped")
 
+// fallbackRadiusM bounds the spatial+name fallback: when an OSM object is
+// remapped to a new id, the new candidate may re-link to an existing
+// pending/active spot of the same kind and name within this distance.
+const fallbackRadiusM = 30.0
+
 // Stats is written to t_job_runs.stats after each pack run.
 type Stats struct {
 	FeaturesRead     int            `json:"features_read"`
@@ -38,6 +43,7 @@ type Stats struct {
 	Closed           int            `json:"closed"`
 	HiddenVanished   int            `json:"hidden_vanished"`
 	SkippedCurated   int            `json:"skipped_curated"`
+	FallbackMatched  int            `json:"fallback_matched"`
 	AmenitiesLinked  int            `json:"amenities_linked"`
 	OrphanSites      int            `json:"orphan_sites"`
 	GuardTripped     bool           `json:"guard_tripped,omitempty"`
@@ -155,6 +161,10 @@ type Store interface {
 	OrphanTableClusters(ctx context.Context, epsMerc float64, minPts int) ([]TableCluster, error)
 	Amenities(ctx context.Context) ([]AmenityRow, error)
 	Spots(ctx context.Context) ([]SpotRow, error)
+	// SpotsNear returns pending/active spots within radiusM meters of
+	// (lon, lat), nearest first — used by the name+proximity fallback when
+	// SpotBySource misses (OSM object remaps).
+	SpotsNear(ctx context.Context, lon, lat, radiusM float64) ([]SpotRow, error)
 	SpotBySource(ctx context.Context, source, sourceID string) (spotID uuid.UUID, version int, found bool, err error)
 	InsertSpot(ctx context.Context, s NewSpot) (uuid.UUID, error)
 	UpdateSpot(ctx context.Context, id uuid.UUID, s NewSpot) error
@@ -341,15 +351,44 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 				}
 			}
 
+			// Candidate name is needed early: it drives the spatial+name
+			// fallback when provenance misses.
+			var tags map[string]string
+			_ = json.Unmarshal(c.TagsJSON, &tags)
+			name := tags["name"]
+
 			// Resolve existing spot via provenance.
 			var spotID uuid.UUID
 			var oldVersion int
 			found := false
+			viaFallback := false
 			if id, ver, ok, err := store.SpotBySource(ctx, c.Source, c.SourceID); err != nil {
 				return err
 			} else if ok {
 				spotID, oldVersion, found = id, ver, true
 				spotBySource[key] = id
+			} else if norm := normalizeName(name); norm != "" && !isAbsorbed {
+				// OSM remap fallback: the object was re-created under a new
+				// id. Re-link to an existing pending/active spot of the
+				// same kind within fallbackRadiusM carrying the same name —
+				// but only when exactly one candidate matches.
+				near, err := store.SpotsNear(ctx, c.Lon, c.Lat, fallbackRadiusM)
+				if err != nil {
+					return err
+				}
+				var match uuid.UUID
+				matches := 0
+				for _, sp := range near {
+					if sp.Kind != c.Kind || normalizeName(sp.Name) != norm {
+						continue
+					}
+					match, matches = sp.ID, matches+1
+				}
+				if matches == 1 {
+					spotID, found, viaFallback = match, true, true
+					spotBySource[key] = match
+					st.FallbackMatched++
+				}
 			}
 
 			if isAbsorbed {
@@ -372,10 +411,6 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 			}
 			namesJSON, _ := json.Marshal(map[string]string{})
 			var attrsJSON []byte = []byte("{}")
-			var name string
-			var tags map[string]string
-			_ = json.Unmarshal(c.TagsJSON, &tags)
-			name = tags["name"]
 			attrs := map[string]string{}
 			for _, k := range []string{"access", "fee", "reservation", "nudism", "supervised", "capacity", "description", "wikidata", "website"} {
 				if v, ok := tags[k]; ok {
@@ -413,7 +448,7 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 						CurrentStatus:  osm.Status(sp.Status),
 						Quality:        quality,
 						Trusted:        true,
-						SourceChanged:  c.Version > oldVersion,
+						SourceChanged:  !viaFallback && c.Version > oldVersion,
 						ClosedByReport: strings.Contains(sp.StatusReason, "report"),
 					})
 					ns.Status = string(newStatus)
