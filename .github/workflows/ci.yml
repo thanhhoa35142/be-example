@@ -1,0 +1,51 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    services:
+      db:
+        image: postgis/postgis:18-3.6
+        env:
+          POSTGRES_DB: picnic
+          POSTGRES_USER: picnic
+          POSTGRES_PASSWORD: picnic
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U picnic -d picnic"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: "postgres://picnic:picnic@localhost:5432/picnic?sslmode=disable"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Run migrations
+        run: go run ./cmd/migrate
+
+      - name: Test
+        run: make test
+
+      - name: Lint (vet + gofmt)
+        run: make lint
+
+      - name: Build
+        run: make build
