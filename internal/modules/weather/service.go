@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"time"
 
-	"gitlab.com/walkalike-group/pickhour/internal/modules/geo"
+	"github.com/thanhhoa35142/be-example/internal/modules/geo"
 )
 
 // ForecastDays: Open-Meteo free tier allows ~15 days of hourly forecast.

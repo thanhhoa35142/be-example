@@ -9,7 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"gitlab.com/walkalike-group/pickhour/internal/modules/reports"
+	"github.com/thanhhoa35142/be-example/internal/modules/reports"
 )
 
 type ReportsRepo struct {

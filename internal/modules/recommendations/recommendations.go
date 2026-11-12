@@ -4,7 +4,7 @@ import (
 	"errors"
 	"time"
 
-	"gitlab.com/walkalike-group/pickhour/internal/modules/spots"
+	"github.com/thanhhoa35142/be-example/internal/modules/spots"
 )
 
 var (

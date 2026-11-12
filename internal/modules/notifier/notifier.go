@@ -6,7 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/google/uuid"
-	"gitlab.com/walkalike-group/pickhour/internal/modules/alerts"
+	"github.com/thanhhoa35142/be-example/internal/modules/alerts"
 )
 
 // TokenProvider resolves a device's APNs token, environment and locale.

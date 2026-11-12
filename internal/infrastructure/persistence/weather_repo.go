@@ -6,7 +6,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"gitlab.com/walkalike-group/pickhour/internal/modules/weather"
+	"github.com/thanhhoa35142/be-example/internal/modules/weather"
 )
 
 type WeatherRepo struct {

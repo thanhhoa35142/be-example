@@ -6,7 +6,7 @@ import (
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
-	"gitlab.com/walkalike-group/pickhour/db/migrations"
+	"github.com/thanhhoa35142/be-example/db/migrations"
 )
 
 func RunMigrations(databaseURL string) error {

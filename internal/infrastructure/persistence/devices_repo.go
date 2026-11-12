@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"gitlab.com/walkalike-group/pickhour/internal/modules/devices"
+	"github.com/thanhhoa35142/be-example/internal/modules/devices"
 )
 
 type DevicesRepo struct {

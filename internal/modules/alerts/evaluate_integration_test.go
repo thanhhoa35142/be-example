@@ -7,10 +7,10 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"gitlab.com/walkalike-group/pickhour/internal/infrastructure/persistence"
-	"gitlab.com/walkalike-group/pickhour/internal/modules/alerts"
-	"gitlab.com/walkalike-group/pickhour/internal/modules/entitlement"
-	"gitlab.com/walkalike-group/pickhour/internal/modules/notifier"
+	"github.com/thanhhoa35142/be-example/internal/infrastructure/persistence"
+	"github.com/thanhhoa35142/be-example/internal/modules/alerts"
+	"github.com/thanhhoa35142/be-example/internal/modules/entitlement"
+	"github.com/thanhhoa35142/be-example/internal/modules/notifier"
 	"log/slog"
 )
 

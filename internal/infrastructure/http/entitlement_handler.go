@@ -6,8 +6,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"gitlab.com/walkalike-group/pickhour/internal/modules/entitlement"
-	"gitlab.com/walkalike-group/pickhour/internal/platform/httpx"
+	"github.com/thanhhoa35142/be-example/internal/modules/entitlement"
+	"github.com/thanhhoa35142/be-example/internal/platform/httpx"
 )
 
 type EntitlementHandler struct {

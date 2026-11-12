@@ -3,8 +3,8 @@ package http
 import (
 	"time"
 
-	"gitlab.com/walkalike-group/pickhour/internal/modules/recommendations"
-	"gitlab.com/walkalike-group/pickhour/internal/modules/spots"
+	"github.com/thanhhoa35142/be-example/internal/modules/recommendations"
+	"github.com/thanhhoa35142/be-example/internal/modules/spots"
 )
 
 type recommendationItemDTO struct {

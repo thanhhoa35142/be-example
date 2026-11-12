@@ -8,8 +8,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"gitlab.com/walkalike-group/pickhour/internal/modules/alerts"
-	"gitlab.com/walkalike-group/pickhour/internal/platform/httpx"
+	"github.com/thanhhoa35142/be-example/internal/modules/alerts"
+	"github.com/thanhhoa35142/be-example/internal/platform/httpx"
 )
 
 type AlertsHandler struct {

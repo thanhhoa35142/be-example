@@ -3,7 +3,7 @@ package notifier
 import (
 	"fmt"
 
-	"gitlab.com/walkalike-group/pickhour/internal/modules/alerts"
+	"github.com/thanhhoa35142/be-example/internal/modules/alerts"
 )
 
 // Payload is the APNs HTTP/2 JSON body sent to /3/device/{token}.

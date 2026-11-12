@@ -1,4 +1,4 @@
-module gitlab.com/walkalike-group/pickhour
+module github.com/thanhhoa35142/be-example
 
 go 1.25.11
 

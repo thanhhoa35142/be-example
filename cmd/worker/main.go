@@ -10,17 +10,17 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"gitlab.com/walkalike-group/pickhour/internal/infrastructure/persistence"
-	"gitlab.com/walkalike-group/pickhour/internal/modules/admin"
-	"gitlab.com/walkalike-group/pickhour/internal/modules/alerts"
-	"gitlab.com/walkalike-group/pickhour/internal/modules/crowd"
-	"gitlab.com/walkalike-group/pickhour/internal/modules/entitlement"
-	"gitlab.com/walkalike-group/pickhour/internal/modules/notifier"
-	"gitlab.com/walkalike-group/pickhour/internal/modules/scoring"
-	"gitlab.com/walkalike-group/pickhour/internal/modules/weather"
-	"gitlab.com/walkalike-group/pickhour/internal/platform/config"
-	"gitlab.com/walkalike-group/pickhour/internal/platform/jobs"
-	platformlog "gitlab.com/walkalike-group/pickhour/internal/platform/log"
+	"github.com/thanhhoa35142/be-example/internal/infrastructure/persistence"
+	"github.com/thanhhoa35142/be-example/internal/modules/admin"
+	"github.com/thanhhoa35142/be-example/internal/modules/alerts"
+	"github.com/thanhhoa35142/be-example/internal/modules/crowd"
+	"github.com/thanhhoa35142/be-example/internal/modules/entitlement"
+	"github.com/thanhhoa35142/be-example/internal/modules/notifier"
+	"github.com/thanhhoa35142/be-example/internal/modules/scoring"
+	"github.com/thanhhoa35142/be-example/internal/modules/weather"
+	"github.com/thanhhoa35142/be-example/internal/platform/config"
+	"github.com/thanhhoa35142/be-example/internal/platform/jobs"
+	platformlog "github.com/thanhhoa35142/be-example/internal/platform/log"
 )
 
 // job is a periodic background task. Workers compute ahead; the API only reads.

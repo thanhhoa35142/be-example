@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"gitlab.com/walkalike-group/pickhour/internal/modules/alerts"
+	"github.com/thanhhoa35142/be-example/internal/modules/alerts"
 )
 
 func testDelivery() alerts.Delivery {

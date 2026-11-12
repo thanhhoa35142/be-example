@@ -9,7 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
-	"gitlab.com/walkalike-group/pickhour/internal/modules/entitlement"
+	"github.com/thanhhoa35142/be-example/internal/modules/entitlement"
 )
 
 type EntitlementRepo struct {

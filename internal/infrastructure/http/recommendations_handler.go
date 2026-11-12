@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"gitlab.com/walkalike-group/pickhour/internal/modules/recommendations"
-	"gitlab.com/walkalike-group/pickhour/internal/platform/httpx"
+	"github.com/thanhhoa35142/be-example/internal/modules/recommendations"
+	"github.com/thanhhoa35142/be-example/internal/platform/httpx"
 )
 
 type RecommendationsHandler struct {

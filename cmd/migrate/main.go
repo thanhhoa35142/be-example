@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"log"
 
-	"gitlab.com/walkalike-group/pickhour/internal/infrastructure/persistence"
-	"gitlab.com/walkalike-group/pickhour/internal/platform/config"
+	"github.com/thanhhoa35142/be-example/internal/infrastructure/persistence"
+	"github.com/thanhhoa35142/be-example/internal/platform/config"
 )
 
 func main() {
