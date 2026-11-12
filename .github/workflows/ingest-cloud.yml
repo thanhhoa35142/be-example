@@ -60,11 +60,14 @@ jobs:
         run: go mod download
 
       - name: Download Geofabrik extracts
+        env:
+          FRANCE: ${{ inputs.france }}
         run: |
           mkdir -p "$INGEST_EXTRACT_DIR"
           cd "$INGEST_EXTRACT_DIR"
-          for c in $EXTRACTS ${{ inputs.france && 'france' || '' }}; do
-            [ -z "$c" ] && continue
+          COUNTRIES="$EXTRACTS"
+          [ "$FRANCE" = "true" ] && COUNTRIES="$COUNTRIES france"
+          for c in $COUNTRIES; do
             curl -fSL --retry 3 -o "$c-latest.osm.pbf" \
               "https://download.geofabrik.de/europe/$c-latest.osm.pbf" &
           done
@@ -84,8 +87,13 @@ jobs:
       - name: Create city packs
         env:
           PGCONNECT_TIMEOUT: 10
+          FRANCE: ${{ inputs.france }}
         run: |
-          psql "$DATABASE_URL" <<'SQL'
+          EXTRA=""
+          if [ "$FRANCE" = "true" ]; then
+            EXTRA=",('paris','Paris','FR','Europe/Paris', ST_MakeEnvelope(2.20,48.75,2.50,49.00,4326),'beta','europe/france-latest','1970-01-01')"
+          fi
+          psql "$DATABASE_URL" <<SQL
           insert into t_city_packs (slug,name,country,tz,boundary,status,osm_extract,last_import_at) values
            ('luxembourg','Luxembourg','LU','Europe/Luxembourg', ST_MakeEnvelope(5.70,49.40,6.55,50.20,4326),'beta','europe/luxembourg-latest','1970-01-01'),
            ('brussels','Brussels','BE','Europe/Brussels', ST_MakeEnvelope(4.25,50.75,4.50,50.95,4326),'beta','europe/belgium-latest','1970-01-01'),
@@ -95,15 +103,17 @@ jobs:
            ('denhaag','The Hague','NL','Europe/Amsterdam', ST_MakeEnvelope(4.20,52.00,4.45,52.12,4326),'beta','europe/netherlands-latest','1970-01-01'),
            ('vienna','Vienna','AT','Europe/Vienna', ST_MakeEnvelope(16.05,48.05,16.65,48.35,4326),'beta','europe/austria-latest','1970-01-01'),
            ('zurich','Zurich','CH','Europe/Zurich', ST_MakeEnvelope(8.35,47.30,8.65,47.48,4326),'beta','europe/switzerland-latest','1970-01-01')
-          ${{ inputs.france && ",('paris','Paris','FR','Europe/Paris', ST_MakeEnvelope(2.20,48.75,2.50,49.00,4326),'beta','europe/france-latest','1970-01-01')" || '' }};
+          \$EXTRA;
           SQL
 
       - name: Ingest packs
+        env:
+          FRANCE: ${{ inputs.france }}
         run: |
           go build -o /tmp/worker ./cmd/worker
           packs="luxembourg brussels amsterdam rotterdam utrecht denhaag vienna zurich"
-          ${{ inputs.france && 'echo "paris" >> /tmp/extra-packs' || true }}
-          for p in $packs $(cat /tmp/extra-packs 2>/dev/null); do
+          [ "$FRANCE" = "true" ] && packs="$packs paris"
+          for p in $packs; do
             echo "=== ingest $p ==="
             /tmp/worker -job ingest.osm -pack "$p"
           done
