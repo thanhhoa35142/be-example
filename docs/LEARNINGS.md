@@ -268,6 +268,108 @@ WHERE (created_at, id) > (cursor_ts, cursor_id)
 
 ---
 
+## 8. SwiftUI / iOS lessons (pickhour-app)
+
+App iOS viết trên máy Linux/WSL — **không có Xcode local**, build/test qua
+macOS CI. Hệ quả: phải viết cẩn thận hơn, review syntax kỹ trước khi push.
+
+### Project scaffold
+
+- Xcode 16 synchronized groups (`objectVersion 77`) — add file vào folder
+  là auto-include vào target, **không cần sửa `.pbxproj` thủ công**.
+  CocoaPods không hỗ trợ format này.
+- Cấu trúc: `App/` (entry, delegate, deep link, push), `Services/` (API),
+  `Models/` (DTO), `Utilities/` (keychain, queue, geo), `Components/`,
+  `Features/<domain>/` (MVVM: View + ViewModel), `Widgets/` (app extension
+  target riêng — cần target membership riêng trong Xcode).
+- Bundle id `com.example.MyApp` — **đổi trước release**.
+
+### APIClient — actor + type erasure + RFC 7807
+
+```swift
+actor APIClient { ... }
+```
+
+- **`actor`** cho thread-safe mutable state (decoder config, session) mà
+  không cần lock thủ công; `async` methods gọi `URLSession.data(for:)`.
+- **`AnyEncodable` type-erasure**: Swift không cho `Encodable` tồn tại như
+  existential trực tiếp trong generic context → wrapper struct giữ closure
+  `encode(to:)`. Pattern kinh điển khi cần `func send(body: Encodable)`.
+- **`Envelope<T>`**: API trả `{data: ...}` → decode 2 lớp; param
+  `enveloped: Bool` cho endpoint không wrap.
+- **Error contract**: server trả RFC 7807 `application/problem+json`
+  (`type/title/status/detail`) → decode thành `APIProblem`, non-2xx mà
+  decode fail thì fallback `http_<status>` — app luôn có error object,
+  không crash.
+- **Date**: custom `dateDecodingStrategy` thử fractional-seconds trước
+  rồi plain ISO8601 — backend đôi khi trả `.000Z` đôi khi không.
+- **Request metadata headers**: `X-Request-ID` (UUID mỗi call — trace
+  được trong log backend), `X-Client`, `X-Client-Version` (semver+build),
+  `Accept-Language` (top-3 preferred languages) → backend/admin nhìn
+  được app version nào đang gọi.
+- **camelCase contract**: backend trả camelCase → `JSONEncoder/Decoder`
+  default `.convertToSnakeCase` phải **tắt/không set**; models đặt tên
+  property trùng luôn, đỡ `CodingKeys`.
+
+### Bảo mật & privacy
+
+- **`KeychainStore`** — Security framework thuần, không dependency.
+  `kSecAttrAccessibleAfterFirstUnlock` cho device ID/APNs token: đọc được
+  sau first unlock để register device lúc cold launch, nhưng **không** dùng
+  `...Always` (quá quyền cho secret nhỏ, chậm launch) hay
+  `...WhenUnlocked` (app không register được khi device locked → miss push).
+- **Không lưu user location** — chỉ gửi bbox/rounded coords; token +
+  device ID trong Keychain, không UserDefaults.
+- **APNs env phân biệt DEBUG/RELEASE** bằng `#if DEBUG` → sandbox vs
+  production token — gửi kèm `apnsEnv` khi register device để backend
+  biết push qua gateway nào.
+- **Push permission contextual**: `requestAuthorization()` chỉ gọi khi
+  user tạo alert đầu tiên — **không bao giờ prompt lúc cold launch**
+  (Apple reject + UX tệ).
+- Log **không bao giờ** in full token — chỉ `token.prefix(8)…`.
+
+### Event tracking offline (EventQueue)
+
+- `actor` + persist JSON atomic (`.atomic` write) vào Application Support
+  → survive kill/restart.
+- **Flush ordered**: batch 100, dừng ở failure đầu tiên → giữ ordering,
+  unsent events vẫn queued (không drop).
+- `clear()` khi sign-out/account deletion — không leak analytics sang
+  account khác.
+
+### Localization — reason codes, không phải text
+
+- Backend trả `{code, params}` (vd `weather.rain_risk` + `{prob: 80}`),
+  **không bao giờ** gửi câu đã dịch → `ReasonLocalizer` là single place
+  map code → `String(localized:)`.
+- `default: return code` — server thêm reason mới app không crash,
+  không render blank.
+- `JSONValue` enum (`number/string/bool/...`) cho params heterogeneous —
+  Swift Codable không decode được `[String: Any]` trực tiếp.
+
+### Widget / Live Activity
+
+- Widget là **app extension target riêng** — share data qua App Group
+  UserDefaults (hoặc file container chung), không share memory.
+- Live Activity cần `ActivityKit` + push-to-start token riêng — khác
+  APNs device token thường.
+
+### Checklist iOS
+
+- [ ] Không Xcode local? → review syntax cực kỹ, để macOS CI bắt lỗi;
+      tránh cú pháp edge-case.
+- [ ] Secrets nhỏ cần đọc lúc cold launch? → Keychain
+      `AfterFirstUnlock`, không phải `WhenUnlocked`.
+- [ ] Push? → permission contextual, tách sandbox/prod env, log token
+      phải truncate.
+- [ ] API enum params? → `JSONValue` wrapper, đừng cố `[String: Any]`.
+- [ ] Server gửi text dịch sẵn? → **đừng** — reason codes + params,
+      localize ở client.
+- [ ] Analytics offline? → actor queue + atomic persist + ordered flush.
+- [ ] Widget? → App Group, target membership riêng.
+
+---
+
 ## Checklist áp dụng cho dự án mới
 
 - [ ] Nhiều Go binaries? → 1 multi-stage Dockerfile, compose services
