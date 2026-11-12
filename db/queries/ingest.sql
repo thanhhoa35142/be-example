@@ -186,3 +186,7 @@ ORDER BY osm_extract;
 
 -- name: TouchPackImport :exec
 UPDATE t_city_packs SET last_import_at = now() WHERE id = $1;
+
+-- name: NotifyIngestDone :exec
+-- Transactional wake-up: delivered only if the ingest tx commits.
+SELECT pg_notify('pickhour_ingest', '');

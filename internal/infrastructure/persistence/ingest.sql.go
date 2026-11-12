@@ -644,6 +644,16 @@ func (q *Queries) NearestSpotForPoint(ctx context.Context, arg NearestSpotForPoi
 	return i, err
 }
 
+const notifyIngestDone = `-- name: NotifyIngestDone :exec
+SELECT pg_notify('pickhour_ingest', '')
+`
+
+// Transactional wake-up: delivered only if the ingest tx commits.
+func (q *Queries) NotifyIngestDone(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, notifyIngestDone)
+	return err
+}
+
 const packBBox = `-- name: PackBBox :one
 SELECT ST_XMin(boundary), ST_YMin(boundary), ST_XMax(boundary), ST_YMax(boundary)
 FROM t_city_packs WHERE id = $1

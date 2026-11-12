@@ -144,6 +144,9 @@ type Store interface {
 	ClearAmenities(ctx context.Context) error
 	AssignAmenity(ctx context.Context, lat, lon float64, amenity string) error
 	TouchImport(ctx context.Context) error
+	// NotifyIngestDone emits pg_notify('pickhour_ingest') inside the tx —
+	// delivered only on commit, so dry-runs and rollbacks stay silent.
+	NotifyIngestDone(ctx context.Context) error
 }
 
 // Runner executes fn inside one DB transaction scoped to a pack;
@@ -501,7 +504,10 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 			st.AmenitiesLinked++
 		}
 
-		return store.TouchImport(ctx)
+		if err := store.TouchImport(ctx); err != nil {
+			return err
+		}
+		return store.NotifyIngestDone(ctx)
 	})
 	return st, err
 }

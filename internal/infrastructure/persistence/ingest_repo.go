@@ -356,6 +356,10 @@ func (s *ingestStore) TouchImport(ctx context.Context) error {
 	return s.q.TouchPackImport(ctx, s.packID)
 }
 
+func (s *ingestStore) NotifyIngestDone(ctx context.Context) error {
+	return s.q.NotifyIngestDone(ctx)
+}
+
 // pgtype helpers — sqlc generates nullable columns as pgtype.*.
 func textOrNull(s string) pgtype.Text {
 	return pgtype.Text{String: s, Valid: s != ""}

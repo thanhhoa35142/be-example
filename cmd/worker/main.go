@@ -283,6 +283,10 @@ func main() {
 		go runJob(ctx, pool, logger, adminSvc, j)
 	}
 
+	// Wake-up channel: a committed ingest notifies 'pickhour_ingest' and we
+	// kick scoring.recompute immediately instead of waiting for its tick.
+	go listenIngestDone(ctx, pool, logger, adminSvc, registry)
+
 	<-ctx.Done()
 	pool.Close()
 	logger.Info("worker stopped")
@@ -409,6 +413,87 @@ func executeJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, ad
 		logger.Error("job failed", "job", j.name, "error", jobErr)
 		if runID != 0 {
 			adminSvc.RecordJobFinish(ctx, runID, "failed", nil, jobErr)
+		}
+	}
+}
+
+// listenIngestDone LISTENs on 'pickhour_ingest' and runs scoring.recompute
+// shortly after each committed ingest, debounced so a multi-pack run
+// triggers at most one extra scoring pass.
+func listenIngestDone(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, adminSvc *admin.Service, registry []job) {
+	var scoring *job
+	for i := range registry {
+		if registry[i].name == "scoring.recompute" {
+			scoring = &registry[i]
+			break
+		}
+	}
+	if scoring == nil {
+		return
+	}
+
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		logger.Warn("ingest listener: acquire conn", "error", err)
+		return
+	}
+	defer conn.Release()
+	pgxConn := conn.Conn()
+	if _, err := pgxConn.Exec(ctx, "LISTEN pickhour_ingest"); err != nil {
+		logger.Warn("ingest listener: LISTEN failed", "error", err)
+		return
+	}
+	logger.Info("ingest listener ready")
+
+	// WaitForNotification blocks, so it runs in its own goroutine feeding a
+	// channel; the select below can then debounce on a timer.
+	notifyCh := make(chan struct{}, 64)
+	go func() {
+		defer close(notifyCh)
+		for {
+			if _, err := pgxConn.WaitForNotification(ctx); err != nil {
+				return
+			}
+			select {
+			case notifyCh <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	const debounce = 15 * time.Second
+	pending := false
+	var timer *time.Timer
+	var timerC <-chan time.Time
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case _, ok := <-notifyCh:
+			if !ok {
+				return // listener conn died
+			}
+			pending = true
+			if timer == nil {
+				timer = time.NewTimer(debounce)
+			} else {
+				timer.Reset(debounce)
+			}
+			timerC = timer.C
+		case <-timerC:
+			timerC = nil
+			if pending {
+				pending = false
+				logger.Info("ingest notify received, running scoring.recompute")
+				executeJob(ctx, pool, logger, adminSvc, *scoring)
+			}
 		}
 	}
 }
