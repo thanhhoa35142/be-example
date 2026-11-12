@@ -11,10 +11,10 @@ name: ingest-cloud
 on:
   workflow_dispatch:
     inputs:
-      france:
-        description: "Also ingest Paris (europe/france-latest ~4.5GB, +~1h)"
-        type: boolean
-        default: false
+      countries:
+        description: "Space-separated Geofabrik country slugs (e.g. 'france' or 'germany spain'). Supported: luxembourg belgium netherlands austria switzerland france"
+        type: string
+        default: "luxembourg belgium netherlands austria switzerland"
 
 jobs:
   ingest:
@@ -40,7 +40,7 @@ jobs:
       DATABASE_URL: "postgres://picnic:picnic@localhost:5432/picnic?sslmode=disable"
       INGEST_SOURCE: osmium
       INGEST_EXTRACT_DIR: ${{ github.workspace }}/data/extracts
-      EXTRACTS: "luxembourg belgium netherlands austria switzerland"
+      COUNTRIES: ${{ inputs.countries }}
 
     steps:
       - uses: actions/checkout@v4
@@ -60,13 +60,9 @@ jobs:
         run: go mod download
 
       - name: Download Geofabrik extracts
-        env:
-          FRANCE: ${{ inputs.france }}
         run: |
           mkdir -p "$INGEST_EXTRACT_DIR"
           cd "$INGEST_EXTRACT_DIR"
-          COUNTRIES="$EXTRACTS"
-          [ "$FRANCE" = "true" ] && COUNTRIES="$COUNTRIES france"
           for c in $COUNTRIES; do
             curl -fSL --retry 3 -o "$c-latest.osm.pbf" \
               "https://download.geofabrik.de/europe/$c-latest.osm.pbf" &
@@ -97,38 +93,52 @@ jobs:
       - name: Create city packs
         env:
           PGCONNECT_TIMEOUT: 10
-          FRANCE: ${{ inputs.france }}
         run: |
-          EXTRA=""
-          if [ "$FRANCE" = "true" ]; then
-            EXTRA=",('paris','Paris','FR','Europe/Paris', ST_MakeEnvelope(2.20,48.75,2.50,49.00,4326),'beta','europe/france-latest','1970-01-01')"
-          fi
+          # country -> t_city_packs tuple; keep in sync with the slug map
+          # used by the ingest step below.
+          pack_tuple() {
+            case "$1" in
+              luxembourg)  echo "('luxembourg','Luxembourg','LU','Europe/Luxembourg', ST_MakeEnvelope(5.70,49.40,6.55,50.20,4326),'beta','europe/luxembourg-latest','1970-01-01')" ;;
+              belgium)     echo "('brussels','Brussels','BE','Europe/Brussels', ST_MakeEnvelope(4.25,50.75,4.50,50.95,4326),'beta','europe/belgium-latest','1970-01-01')" ;;
+              netherlands) echo "('amsterdam','Amsterdam','NL','Europe/Amsterdam', ST_MakeEnvelope(4.70,52.25,5.10,52.45,4326),'beta','europe/netherlands-latest','1970-01-01'),('rotterdam','Rotterdam','NL','Europe/Amsterdam', ST_MakeEnvelope(4.35,51.85,4.60,52.00,4326),'beta','europe/netherlands-latest','1970-01-01'),('utrecht','Utrecht','NL','Europe/Amsterdam', ST_MakeEnvelope(4.95,52.05,5.20,52.15,4326),'beta','europe/netherlands-latest','1970-01-01'),('denhaag','The Hague','NL','Europe/Amsterdam', ST_MakeEnvelope(4.20,52.00,4.45,52.12,4326),'beta','europe/netherlands-latest','1970-01-01')" ;;
+              austria)     echo "('vienna','Vienna','AT','Europe/Vienna', ST_MakeEnvelope(16.05,48.05,16.65,48.35,4326),'beta','europe/austria-latest','1970-01-01')" ;;
+              switzerland) echo "('zurich','Zurich','CH','Europe/Zurich', ST_MakeEnvelope(8.35,47.30,8.65,47.48,4326),'beta','europe/switzerland-latest','1970-01-01')" ;;
+              france)      echo "('paris','Paris','FR','Europe/Paris', ST_MakeEnvelope(2.20,48.75,2.50,49.00,4326),'beta','europe/france-latest','1970-01-01')" ;;
+              *) echo "unsupported country: $1" >&2; return 1 ;;
+            esac
+          }
+          VALUES=""
+          for c in $COUNTRIES; do
+            T=$(pack_tuple "$c") || exit 1
+            VALUES="${VALUES:+$VALUES,}$T"
+          done
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<SQL
           insert into t_city_packs (slug,name,country,tz,boundary,status,osm_extract,last_import_at) values
-           ('luxembourg','Luxembourg','LU','Europe/Luxembourg', ST_MakeEnvelope(5.70,49.40,6.55,50.20,4326),'beta','europe/luxembourg-latest','1970-01-01'),
-           ('brussels','Brussels','BE','Europe/Brussels', ST_MakeEnvelope(4.25,50.75,4.50,50.95,4326),'beta','europe/belgium-latest','1970-01-01'),
-           ('amsterdam','Amsterdam','NL','Europe/Amsterdam', ST_MakeEnvelope(4.70,52.25,5.10,52.45,4326),'beta','europe/netherlands-latest','1970-01-01'),
-           ('rotterdam','Rotterdam','NL','Europe/Amsterdam', ST_MakeEnvelope(4.35,51.85,4.60,52.00,4326),'beta','europe/netherlands-latest','1970-01-01'),
-           ('utrecht','Utrecht','NL','Europe/Amsterdam', ST_MakeEnvelope(4.95,52.05,5.20,52.15,4326),'beta','europe/netherlands-latest','1970-01-01'),
-           ('denhaag','The Hague','NL','Europe/Amsterdam', ST_MakeEnvelope(4.20,52.00,4.45,52.12,4326),'beta','europe/netherlands-latest','1970-01-01'),
-           ('vienna','Vienna','AT','Europe/Vienna', ST_MakeEnvelope(16.05,48.05,16.65,48.35,4326),'beta','europe/austria-latest','1970-01-01'),
-           ('zurich','Zurich','CH','Europe/Zurich', ST_MakeEnvelope(8.35,47.30,8.65,47.48,4326),'beta','europe/switzerland-latest','1970-01-01')
-          $EXTRA;
+          $VALUES;
           SQL
           COUNT=$(psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -tAc "select count(*) from t_city_packs where status in ('beta','live')")
           echo "packs=$COUNT"
-          [ "$COUNT" -ge 8 ] || { echo "pack insert failed"; exit 1; }
+          [ "$COUNT" -ge 1 ] || { echo "pack insert failed"; exit 1; }
 
       - name: Ingest packs
-        env:
-          FRANCE: ${{ inputs.france }}
         run: |
           go build -o /tmp/worker ./cmd/worker
-          packs="luxembourg brussels amsterdam rotterdam utrecht denhaag vienna zurich"
-          [ "$FRANCE" = "true" ] && packs="$packs paris"
-          for p in $packs; do
-            echo "=== ingest $p ==="
-            /tmp/worker -job ingest.osm -pack "$p"
+          slugs_for() {
+            case "$1" in
+              luxembourg)  echo "luxembourg" ;;
+              belgium)     echo "brussels" ;;
+              netherlands) echo "amsterdam rotterdam utrecht denhaag" ;;
+              austria)     echo "vienna" ;;
+              switzerland) echo "zurich" ;;
+              france)      echo "paris" ;;
+              *) echo "unsupported country: $1" >&2; return 1 ;;
+            esac
+          }
+          for c in $COUNTRIES; do
+            for p in $(slugs_for "$c"); do
+              echo "=== ingest $p ($c) ==="
+              /tmp/worker -job ingest.osm -pack "$p" || exit 1
+            done
           done
 
       - name: Weather refresh
