@@ -16,6 +16,8 @@ type Config struct {
 	WeatherH3Res      int    // H3 resolution for weather cells (default 6)
 	WeatherDailyLimit int    // max provider calls/day (default 9000)
 	RunMigrations     bool   // auto-run DB migrations on boot (default true)
+	OverpassURL       string // Overpass interpreter endpoint (ingest dev path)
+	IngestExtractDir  string // local dir for Geofabrik .pbf snapshots
 }
 
 func Load() (Config, error) {
@@ -27,6 +29,8 @@ func Load() (Config, error) {
 		WeatherH3Res:      getEnvInt("WEATHER_H3_RES", 6),
 		WeatherDailyLimit: getEnvInt("WEATHER_DAILY_LIMIT", 9000),
 		RunMigrations:     getEnv("RUN_MIGRATIONS", "true") != "false",
+		OverpassURL:       getEnv("OVERPASS_URL", "https://overpass-api.de/api/interpreter"),
+		IngestExtractDir:  getEnv("INGEST_EXTRACT_DIR", "./data/extracts"),
 	}
 	if cfg.WeatherH3Res < 0 || cfg.WeatherH3Res > 15 {
 		return Config{}, fmt.Errorf("WEATHER_H3_RES must be 0-15, got %d", cfg.WeatherH3Res)

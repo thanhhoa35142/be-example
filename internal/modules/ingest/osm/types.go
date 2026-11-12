@@ -30,7 +30,15 @@ type Pack struct {
 	Slug       string
 	Country    string
 	TZ         string
-	OSMExtract string // Geofabrik extract key, e.g. "netherlands-latest"
+	OSMExtract string // Geofabrik extract path, e.g. "europe/netherlands-latest"
+	// Bounds is the pack boundary bbox (west, south, east, north) — needed
+	// by bbox-based sources like Overpass. Populated by the caller.
+	Bounds Bounds
+}
+
+// Bounds is a WGS84 bounding box.
+type Bounds struct {
+	West, South, East, North float64
 }
 
 // Snapshot is an opened extract: features stream once, then Close.

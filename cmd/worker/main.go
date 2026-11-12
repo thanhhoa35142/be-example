@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
+	"fmt"
 	"log"
 	"log/slog"
 	"os/signal"
@@ -16,6 +18,8 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/modules/crowd"
 	"github.com/thanhhoa35142/be-example/internal/modules/entitlement"
 	"github.com/thanhhoa35142/be-example/internal/modules/geo"
+	"github.com/thanhhoa35142/be-example/internal/modules/ingest"
+	"github.com/thanhhoa35142/be-example/internal/modules/ingest/osm"
 	"github.com/thanhhoa35142/be-example/internal/modules/notifier"
 	"github.com/thanhhoa35142/be-example/internal/modules/scoring"
 	"github.com/thanhhoa35142/be-example/internal/modules/weather"
@@ -38,6 +42,11 @@ type job struct {
 const jobSchedulePollInterval = 30 * time.Second
 
 func main() {
+	jobName := flag.String("job", "", "run a single job once and exit")
+	packSlug := flag.String("pack", "", "ingest.osm: restrict to one city pack slug")
+	dryRun := flag.Bool("dry-run", false, "ingest.osm: run the full tx then roll back")
+	flag.Parse()
+
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("config: %v", err)
@@ -92,6 +101,46 @@ func main() {
 		entitlementSvc,
 		notifier.NewSender(logger, alertsRepo, apnsClient),
 	)
+
+	// Ingest: Overpass dev path today; the osmium adapter slots in behind
+	// the same osm.FeatureSource port later.
+	ingestRepo := persistence.NewIngestRepo(pool)
+	ingestSvc := &ingest.Service{
+		Src: &osm.OverpassSource{
+			URL:    cfg.OverpassURL,
+			Client: httpx.NewClient(httpx.Policy{Name: "overpass", RatePerSec: 1, Burst: 2, Timeout: 300 * time.Second}),
+		},
+		Store:          ingestRepo,
+		Clf:            osm.Classifier{Policy: osm.DefaultQualityPolicy},
+		Pol:            osm.DefaultPolicy,
+		AmenityRadiusM: 300,
+	}
+
+	runIngest := func(ctx context.Context) error {
+		packs, err := ingestRepo.ListIngestPacks(ctx)
+		if err != nil {
+			return err
+		}
+		for i := range packs {
+			if *packSlug != "" && packs[i].Slug != *packSlug {
+				continue
+			}
+			bounds, err := ingestRepo.PackBounds(ctx, packs[i].ID)
+			if err != nil {
+				return fmt.Errorf("pack %s bounds: %w", packs[i].Slug, err)
+			}
+			packs[i].Bounds = bounds
+			st, err := ingestSvc.RunPack(ctx, packs[i], 0, *dryRun)
+			if err != nil {
+				return fmt.Errorf("pack %s: %w", packs[i].Slug, err)
+			}
+			logger.Info("ingest pack done", "pack", packs[i].Slug, "dry_run", *dryRun,
+				"features", st.FeaturesRead, "created", st.Created, "updated", st.Updated,
+				"activated", st.Activated, "pending", st.Pending, "closed", st.Closed,
+				"absorbed", st.Absorbed, "amenities", st.AmenitiesLinked)
+		}
+		return nil
+	}
 
 	registry := []job{
 		{
@@ -156,6 +205,32 @@ func main() {
 			},
 		},
 		{
+			name:         "ingest.osm",
+			initialDelay: 5 * time.Minute,
+			fn:           runIngest,
+		},
+		{
+			name:         "ingest.extract.refresh",
+			initialDelay: 11 * time.Minute,
+			fn: func(ctx context.Context) error {
+				extracts, err := ingestRepo.DistinctExtracts(ctx)
+				if err != nil {
+					return err
+				}
+				fetched, err := ingest.RefreshExtracts(ctx, nil, cfg.IngestExtractDir, extracts, 7*24*time.Hour, false)
+				if err != nil {
+					return err
+				}
+				for _, e := range fetched {
+					if err := ingestRepo.MarkExtractFetched(ctx, e, time.Now().UTC()); err != nil {
+						return err
+					}
+				}
+				logger.Info("extract refresh done", "extracts", len(extracts), "fetched", len(fetched))
+				return nil
+			},
+		},
+		{
 			name:         "retention.purge",
 			initialDelay: 10 * time.Minute, // daily, lowest priority — runs last
 			fn: func(ctx context.Context) error {
@@ -177,6 +252,17 @@ func main() {
 		logger.Info("worker started, no jobs registered")
 	}
 
+	// One-shot mode: `worker -job ingest.osm -pack amsterdam -dry-run`.
+	if *jobName != "" {
+		for _, j := range registry {
+			if j.name == *jobName {
+				executeJob(ctx, pool, logger, adminSvc, j)
+				return
+			}
+		}
+		log.Fatalf("unknown job %q", *jobName)
+	}
+
 	for _, j := range registry {
 		go runJob(ctx, pool, logger, adminSvc, j)
 	}
@@ -188,40 +274,7 @@ func main() {
 
 func runJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, adminSvc *admin.Service, j job) {
 	run := func() {
-		// Per-run advisory lock: only one replica executes the job at a time.
-		release, err := jobs.Acquire(ctx, pool, j.name)
-		if errors.Is(err, jobs.ErrLockNotAcquired) {
-			return // another replica owns this tick
-		}
-		if err != nil {
-			logger.Error("job lock failed", "job", j.name, "error", err)
-			return
-		}
-		defer release()
-
-		// Winning the lock means any 'running' rows for this job are orphans
-		// from a dead worker — abandon them before recording this run.
-		if err := adminSvc.AbandonJobRuns(ctx, j.name); err != nil {
-			logger.Warn("job orphan sweep failed", "job", j.name, "error", err)
-		}
-
-		runID, err := adminSvc.RecordJobStart(ctx, j.name)
-		if err != nil {
-			logger.Error("job_run insert failed", "job", j.name, "error", err)
-		}
-		jobErr := j.fn(ctx)
-		switch {
-		case jobErr == nil:
-			logger.Info("job ok", "job", j.name)
-			if runID != 0 {
-				adminSvc.RecordJobFinish(ctx, runID, "succeeded", nil, nil)
-			}
-		default:
-			logger.Error("job failed", "job", j.name, "error", jobErr)
-			if runID != 0 {
-				adminSvc.RecordJobFinish(ctx, runID, "failed", nil, jobErr)
-			}
-		}
+		executeJob(ctx, pool, logger, adminSvc, j)
 	}
 
 	// First schedule load decides the boot offset and enabled flag; offset
@@ -301,6 +354,45 @@ func runJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, adminS
 			refreshSchedule(true)
 		case <-pollTicker.C:
 			refreshSchedule(true)
+		}
+	}
+}
+
+// executeJob runs one job under its advisory lock with t_job_runs
+// instrumentation. Used by both the periodic loop and -job one-shot mode.
+func executeJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, adminSvc *admin.Service, j job) {
+	// Per-run advisory lock: only one replica executes the job at a time.
+	release, err := jobs.Acquire(ctx, pool, j.name)
+	if errors.Is(err, jobs.ErrLockNotAcquired) {
+		return // another replica owns this tick
+	}
+	if err != nil {
+		logger.Error("job lock failed", "job", j.name, "error", err)
+		return
+	}
+	defer release()
+
+	// Winning the lock means any 'running' rows for this job are orphans
+	// from a dead worker — abandon them before recording this run.
+	if err := adminSvc.AbandonJobRuns(ctx, j.name); err != nil {
+		logger.Warn("job orphan sweep failed", "job", j.name, "error", err)
+	}
+
+	runID, err := adminSvc.RecordJobStart(ctx, j.name)
+	if err != nil {
+		logger.Error("job_run insert failed", "job", j.name, "error", err)
+	}
+	jobErr := j.fn(ctx)
+	switch {
+	case jobErr == nil:
+		logger.Info("job ok", "job", j.name)
+		if runID != 0 {
+			adminSvc.RecordJobFinish(ctx, runID, "succeeded", nil, nil)
+		}
+	default:
+		logger.Error("job failed", "job", j.name, "error", jobErr)
+		if runID != 0 {
+			adminSvc.RecordJobFinish(ctx, runID, "failed", nil, jobErr)
 		}
 	}
 }
