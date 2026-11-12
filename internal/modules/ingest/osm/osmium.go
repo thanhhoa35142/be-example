@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"iter"
@@ -103,12 +105,22 @@ func (s *OsmiumSource) run(ctx context.Context, args ...string) error {
 	return nil
 }
 
+// filterVersion fingerprints the filter expression set so a classifier/tag
+// change produces new artifact names instead of silently reusing stale ones.
+func filterVersion() string {
+	sum := sha256.Sum256([]byte(strings.Join(filterExpressions, "\n")))
+	return hex.EncodeToString(sum[:4])
+}
+
 // ensureArtifact runs an osmium subcommand once per extract, caching the
-// output file. Skips when a non-empty file already exists.
-func (s *OsmiumSource) ensureArtifact(ctx context.Context, suffix, inPath string, args func(outRel, inRel string) []string) (string, error) {
-	out := filepath.Join(s.workDir(), s.base()+suffix)
+// output file. A cached file is reused only when it is newer than its input
+// (so a refreshed .pbf invalidates downstream artifacts).
+func (s *OsmiumSource) ensureArtifact(ctx context.Context, name, inPath string, args func(outRel, inRel string) []string) (string, error) {
+	out := filepath.Join(s.workDir(), name)
 	if st, err := os.Stat(out); err == nil && st.Size() > 0 {
-		return out, nil
+		if inSt, ierr := os.Stat(inPath); ierr != nil || !st.ModTime().Before(inSt.ModTime()) {
+			return out, nil
+		}
 	}
 	if err := s.run(ctx, args(s.relPath(out), s.relPath(inPath))...); err != nil {
 		return "", err
@@ -237,7 +249,8 @@ func (s *osmiumSnapshot) Features() iter.Seq2[RawFeature, error] {
 // Open ensures the filtered pbf + geojsonseq export exist, then returns a
 // snapshot streaming the export file for this pack's bounds.
 func (s *OsmiumSource) Open(ctx context.Context, p Pack) (Snapshot, error) {
-	filtered, err := s.ensureArtifact(ctx, ".filtered.osm.pbf", s.PBFPath, func(out, in string) []string {
+	fv := filterVersion()
+	filtered, err := s.ensureArtifact(ctx, s.base()+".f"+fv+".filtered.osm.pbf", s.PBFPath, func(out, in string) []string {
 		args := []string{"tags-filter", "-o", out, "--overwrite", in}
 		return append(args, filterExpressions...)
 	})
@@ -245,7 +258,7 @@ func (s *OsmiumSource) Open(ctx context.Context, p Pack) (Snapshot, error) {
 		return nil, err
 	}
 
-	exportPath, err := s.ensureArtifact(ctx, ".export.geojsonseq", filtered, func(out, in string) []string {
+	exportPath, err := s.ensureArtifact(ctx, s.base()+".f"+fv+".export.geojsonseq", filtered, func(out, in string) []string {
 		// "polygon" covers Polygon and MultiPolygon; osmium rejects the
 		// multi* names in --geometry-types.
 		return []string{"export", "-f", "geojsonseq", "-u", "type_id",
