@@ -113,6 +113,21 @@ type TableCluster struct {
 	Size     int
 }
 
+// SourceLink is the provenance record for one (source, source_id).
+type SourceLink struct {
+	SpotID      uuid.UUID
+	Version     int
+	Via         string // "primary" | "absorbed"
+	ContentHash string
+	Found       bool
+}
+
+// SourcelessSpot is an active/pending spot with zero primary sources.
+type SourcelessSpot struct {
+	ID     uuid.UUID
+	Status string
+}
+
 // SpotRow mirrors ListPackSpots.
 type SpotRow struct {
 	ID           uuid.UUID
@@ -165,15 +180,21 @@ type Store interface {
 	// (lon, lat), nearest first — used by the name+proximity fallback when
 	// SpotBySource misses (OSM object remaps).
 	SpotsNear(ctx context.Context, lon, lat, radiusM float64) ([]SpotRow, error)
-	SpotBySource(ctx context.Context, source, sourceID string) (spotID uuid.UUID, version int, found bool, err error)
+	SpotBySource(ctx context.Context, source, sourceID string) (SourceLink, error)
 	InsertSpot(ctx context.Context, s NewSpot) (uuid.UUID, error)
 	UpdateSpot(ctx context.Context, id uuid.UUID, s NewSpot) error
 	SetStatus(ctx context.Context, id uuid.UUID, status, reason string) error
-	UpsertSource(ctx context.Context, spotID uuid.UUID, source, sourceID string, version int) error
+	// UpsertSource links (source, sourceID) to a spot. via is "primary"
+	// (the candidate that IS the spot) or "absorbed" (child evidence);
+	// only primary sources keep a spot alive in missing-source logic.
+	UpsertSource(ctx context.Context, spotID uuid.UUID, source, sourceID string, version int, via, contentHash string) error
 	ResetSightings(ctx context.Context) error
 	BumpMissing(ctx context.Context) error
 	MissingActive(ctx context.Context, minMissingRuns int) ([]uuid.UUID, error)
 	MissingPending(ctx context.Context, minMissingRuns int) ([]uuid.UUID, error)
+	// Sourceless returns active/pending spots with no primary source —
+	// their identity moved elsewhere and they must be closed out.
+	Sourceless(ctx context.Context) ([]SourcelessSpot, error)
 	RecentConfirm(ctx context.Context, spotID uuid.UUID, days int) (bool, error)
 	ClearAmenities(ctx context.Context) error
 	AssignAmenity(ctx context.Context, lat, lon float64, amenity string, radiusM float64) error
@@ -321,6 +342,7 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 		type childLink struct {
 			source, sourceID string
 			version          int
+			contentHash      string
 			parentKey        [2]string
 		}
 		var links []childLink
@@ -360,13 +382,26 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 			// Resolve existing spot via provenance.
 			var spotID uuid.UUID
 			var oldVersion int
+			var oldHash string
 			found := false
 			viaFallback := false
-			if id, ver, ok, err := store.SpotBySource(ctx, c.Source, c.SourceID); err != nil {
+			link, err := store.SpotBySource(ctx, c.Source, c.SourceID)
+			if err != nil {
 				return err
-			} else if ok {
-				spotID, oldVersion, found = id, ver, true
-				spotBySource[key] = id
+			}
+			if link.Found {
+				oldVersion, oldHash = link.Version, link.ContentHash
+				// A source still linked as 'absorbed' evidence while its
+				// candidate is no longer absorbed is stale — the object
+				// became its own spot. Treat as unmatched so a new spot is
+				// created and the link moves here with via='primary'.
+				if link.Via == "absorbed" && !isAbsorbed {
+					link.Found = false
+				}
+			}
+			if link.Found {
+				spotID, found = link.SpotID, true
+				spotBySource[key] = link.SpotID
 			} else if norm := normalizeName(name); norm != "" && !isAbsorbed {
 				// OSM remap fallback: the object was re-created under a new
 				// id. Re-link to an existing pending/active spot of the
@@ -395,12 +430,12 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 				// Attach this child's source to the parent's spot — resolved
 				// in the second pass once parents have spot ids.
 				if id, ok := parentSpot[parentKey]; ok {
-					if err := store.UpsertSource(ctx, id, c.Source, c.SourceID, c.Version); err != nil {
+					if err := store.UpsertSource(ctx, id, c.Source, c.SourceID, c.Version, "absorbed", c.ContentHash); err != nil {
 						return err
 					}
 					st.Absorbed++
 				} else {
-					links = append(links, childLink{c.Source, c.SourceID, c.Version, parentKey})
+					links = append(links, childLink{c.Source, c.SourceID, c.Version, c.ContentHash, parentKey})
 				}
 				continue
 			}
@@ -448,7 +483,9 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 						CurrentStatus:  osm.Status(sp.Status),
 						Quality:        quality,
 						Trusted:        true,
-						SourceChanged:  !viaFallback && c.Version > oldVersion,
+						SourceChanged: !viaFallback &&
+							(c.Version > oldVersion ||
+								(oldHash != "" && c.ContentHash != "" && c.ContentHash != oldHash)),
 						ClosedByReport: strings.Contains(sp.StatusReason, "report"),
 					})
 					ns.Status = string(newStatus)
@@ -488,7 +525,7 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 				}
 				st.Created++
 			}
-			if err := store.UpsertSource(ctx, spotID, c.Source, c.SourceID, c.Version); err != nil {
+			if err := store.UpsertSource(ctx, spotID, c.Source, c.SourceID, c.Version, "primary", c.ContentHash); err != nil {
 				return err
 			}
 			parentSpot[key] = spotID
@@ -500,7 +537,7 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 			if !ok {
 				continue // parent below floor — child stays raw-only
 			}
-			if err := store.UpsertSource(ctx, id, l.source, l.sourceID, l.version); err != nil {
+			if err := store.UpsertSource(ctx, id, l.source, l.sourceID, l.version, "absorbed", l.contentHash); err != nil {
 				return err
 			}
 			st.Absorbed++
@@ -538,18 +575,18 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 			var sp SpotRow
 			found := false
 			for _, m := range cl.Members {
-				id, _, ok, err := store.SpotBySource(ctx, m.Source, m.SourceID)
+				l, err := store.SpotBySource(ctx, m.Source, m.SourceID)
 				if err != nil {
 					return err
 				}
-				if !ok {
+				if !l.Found {
 					continue
 				}
-				row, ok2 := spotRow[id]
+				row, ok2 := spotRow[l.SpotID]
 				if !ok2 || row.Kind != "site" {
 					continue
 				}
-				spotID, sp, found = id, row, true
+				spotID, sp, found = l.SpotID, row, true
 				break
 			}
 
@@ -608,7 +645,7 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 			// Every member table becomes a source of the cluster spot so
 			// sightings/missing-runs track each table independently.
 			for _, m := range cl.Members {
-				if err := store.UpsertSource(ctx, spotID, m.Source, m.SourceID, m.Version); err != nil {
+				if err := store.UpsertSource(ctx, spotID, m.Source, m.SourceID, m.Version, "primary", ""); err != nil {
 					return err
 				}
 			}
@@ -650,6 +687,27 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 				return err
 			}
 			st.HiddenVanished++
+		}
+
+		// Spots whose primary sources all moved to other spots this run
+		// (e.g. a site absorbed into a park) have no identity left — close
+		// them instead of letting them linger active forever.
+		sourceless, err := store.Sourceless(ctx)
+		if err != nil {
+			return err
+		}
+		for _, sp := range sourceless {
+			if sp.Status == string(osm.StatusActive) {
+				if err := store.SetStatus(ctx, sp.ID, string(osm.StatusClosed), "sources_moved"); err != nil {
+					return err
+				}
+				st.Closed++
+			} else {
+				if err := store.SetStatus(ctx, sp.ID, string(osm.StatusHidden), "sources_moved"); err != nil {
+					return err
+				}
+				st.HiddenVanished++
+			}
 		}
 
 		// Stage 4: amenities attach to the nearest active spot.

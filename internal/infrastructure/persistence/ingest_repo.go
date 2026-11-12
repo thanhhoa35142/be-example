@@ -306,15 +306,21 @@ func (s *ingestStore) SpotsNear(ctx context.Context, lon, lat, radiusM float64) 
 	return out, nil
 }
 
-func (s *ingestStore) SpotBySource(ctx context.Context, source, sourceID string) (uuid.UUID, int, bool, error) {
+func (s *ingestStore) SpotBySource(ctx context.Context, source, sourceID string) (ingest.SourceLink, error) {
 	row, err := s.q.FindSpotBySource(ctx, FindSpotBySourceParams{Source: source, SourceID: sourceID})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return uuid.Nil, 0, false, nil
+		return ingest.SourceLink{}, nil
 	}
 	if err != nil {
-		return uuid.Nil, 0, false, err
+		return ingest.SourceLink{}, err
 	}
-	return row.SpotID, int(row.Version.Int32), true, nil
+	return ingest.SourceLink{
+		SpotID:      row.SpotID,
+		Version:     int(row.Version.Int32),
+		Via:         row.Via,
+		ContentHash: strOf(row.ContentHash),
+		Found:       true,
+	}, nil
 }
 
 func (s *ingestStore) cellID(lat, lon float64) int64 {
@@ -373,12 +379,14 @@ func (s *ingestStore) SetStatus(ctx context.Context, id uuid.UUID, status, reaso
 	})
 }
 
-func (s *ingestStore) UpsertSource(ctx context.Context, spotID uuid.UUID, source, sourceID string, version int) error {
+func (s *ingestStore) UpsertSource(ctx context.Context, spotID uuid.UUID, source, sourceID string, version int, via, contentHash string) error {
 	return s.q.UpsertSpotSource(ctx, UpsertSpotSourceParams{
-		SpotID:   spotID,
-		Source:   source,
-		SourceID: sourceID,
-		Version:  int4OrNull(version),
+		SpotID:      spotID,
+		Source:      source,
+		SourceID:    sourceID,
+		Version:     int4OrNull(version),
+		Via:         via,
+		ContentHash: pgtype.Text{String: contentHash, Valid: contentHash != ""},
 	})
 }
 
@@ -403,6 +411,18 @@ func (s *ingestStore) MissingPending(ctx context.Context, minMissingRuns int) ([
 		CityPackID:  s.packID,
 		MissingRuns: int16(minMissingRuns),
 	})
+}
+
+func (s *ingestStore) Sourceless(ctx context.Context) ([]ingest.SourcelessSpot, error) {
+	rows, err := s.q.ListSourcelessSpots(ctx, s.packID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ingest.SourcelessSpot, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, ingest.SourcelessSpot{ID: r.ID, Status: r.Status})
+	}
+	return out, nil
 }
 
 func (s *ingestStore) RecentConfirm(ctx context.Context, spotID uuid.UUID, days int) (bool, error) {

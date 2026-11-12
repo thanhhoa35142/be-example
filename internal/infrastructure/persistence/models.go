@@ -279,6 +279,8 @@ type TSpotSource struct {
 	ImportedAt  time.Time          `json:"imported_at"`
 	LastSeenAt  pgtype.Timestamptz `json:"last_seen_at"`
 	MissingRuns int16              `json:"missing_runs"`
+	Via         string             `json:"via"`
+	ContentHash pgtype.Text        `json:"content_hash"`
 }
 
 type TStateTransition struct {

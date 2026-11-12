@@ -162,7 +162,7 @@ func (q *Queries) CountRecentSpotConfirms(ctx context.Context, arg CountRecentSp
 }
 
 const findSpotBySource = `-- name: FindSpotBySource :one
-SELECT spot_id, version FROM t_spot_sources
+SELECT spot_id, version, via, content_hash FROM t_spot_sources
 WHERE source = $1 AND source_id = $2
 `
 
@@ -172,14 +172,21 @@ type FindSpotBySourceParams struct {
 }
 
 type FindSpotBySourceRow struct {
-	SpotID  uuid.UUID   `json:"spot_id"`
-	Version pgtype.Int4 `json:"version"`
+	SpotID      uuid.UUID   `json:"spot_id"`
+	Version     pgtype.Int4 `json:"version"`
+	Via         string      `json:"via"`
+	ContentHash pgtype.Text `json:"content_hash"`
 }
 
 func (q *Queries) FindSpotBySource(ctx context.Context, arg FindSpotBySourceParams) (FindSpotBySourceRow, error) {
 	row := q.db.QueryRow(ctx, findSpotBySource, arg.Source, arg.SourceID)
 	var i FindSpotBySourceRow
-	err := row.Scan(&i.SpotID, &i.Version)
+	err := row.Scan(
+		&i.SpotID,
+		&i.Version,
+		&i.Via,
+		&i.ContentHash,
+	)
 	return i, err
 }
 
@@ -600,13 +607,14 @@ SELECT DISTINCT ss.spot_id
 FROM t_spot_sources ss
 JOIN t_spots sp ON sp.id = ss.spot_id
 WHERE sp.city_pack_id = $1 AND sp.status = 'pending'
+  AND ss.via = 'primary'
   AND ss.missing_runs >= $2
   AND NOT EXISTS (
       SELECT 1 FROM t_spot_sources s2
       JOIN t_ingest_features f
         ON f.pack_id = $1 AND f.source = s2.source AND f.source_id = s2.source_id
        AND f.role IN ('candidate','amenity')
-      WHERE s2.spot_id = ss.spot_id)
+      WHERE s2.spot_id = ss.spot_id AND s2.via = 'primary')
 `
 
 type ListPendingVanishedParams struct {
@@ -634,18 +642,56 @@ func (q *Queries) ListPendingVanished(ctx context.Context, arg ListPendingVanish
 	return items, nil
 }
 
+const listSourcelessSpots = `-- name: ListSourcelessSpots :many
+SELECT sp.id, sp.status
+FROM t_spots sp
+WHERE sp.city_pack_id = $1 AND sp.status IN ('active','pending')
+  AND NOT sp.curated
+  AND NOT EXISTS (
+      SELECT 1 FROM t_spot_sources ss
+      WHERE ss.spot_id = sp.id AND ss.via = 'primary')
+`
+
+type ListSourcelessSpotsRow struct {
+	ID     uuid.UUID `json:"id"`
+	Status string    `json:"status"`
+}
+
+// Active/pending spots with no primary source left — their identity moved
+// to another spot (e.g. a site absorbed into a park). Close them out.
+func (q *Queries) ListSourcelessSpots(ctx context.Context, cityPackID uuid.UUID) ([]ListSourcelessSpotsRow, error) {
+	rows, err := q.db.Query(ctx, listSourcelessSpots, cityPackID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListSourcelessSpotsRow{}
+	for rows.Next() {
+		var i ListSourcelessSpotsRow
+		if err := rows.Scan(&i.ID, &i.Status); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listSpotsMissingAllSources = `-- name: ListSpotsMissingAllSources :many
 SELECT DISTINCT ss.spot_id
 FROM t_spot_sources ss
 JOIN t_spots sp ON sp.id = ss.spot_id
 WHERE sp.city_pack_id = $1 AND sp.status = 'active'
+  AND ss.via = 'primary'
   AND ss.missing_runs >= $2
   AND NOT EXISTS (
       SELECT 1 FROM t_spot_sources s2
       JOIN t_ingest_features f
         ON f.pack_id = $1 AND f.source = s2.source AND f.source_id = s2.source_id
        AND f.role IN ('candidate','amenity')
-      WHERE s2.spot_id = ss.spot_id)
+      WHERE s2.spot_id = ss.spot_id AND s2.via = 'primary')
 `
 
 type ListSpotsMissingAllSourcesParams struct {
@@ -653,7 +699,8 @@ type ListSpotsMissingAllSourcesParams struct {
 	MissingRuns int16     `json:"missing_runs"`
 }
 
-// Active spots of the pack whose sources are all missing this run.
+// Active spots of the pack whose PRIMARY sources are all missing this run.
+// Absorbed child links (via='absorbed') never keep a spot alive.
 func (q *Queries) ListSpotsMissingAllSources(ctx context.Context, arg ListSpotsMissingAllSourcesParams) ([]uuid.UUID, error) {
 	rows, err := q.db.Query(ctx, listSpotsMissingAllSources, arg.CityPackID, arg.MissingRuns)
 	if err != nil {
@@ -942,21 +989,26 @@ func (q *Queries) UpsertSpotAmenity(ctx context.Context, arg UpsertSpotAmenityPa
 }
 
 const upsertSpotSource = `-- name: UpsertSpotSource :exec
-INSERT INTO t_spot_sources (spot_id, source, source_id, version,
-                            imported_at, last_seen_at, missing_runs)
-VALUES ($1, $2, $3, $4, now(), now(), 0)
+INSERT INTO t_spot_sources (spot_id, source, source_id, version, via,
+                            content_hash, imported_at, last_seen_at,
+                            missing_runs)
+VALUES ($1, $2, $3, $4, $5, $6, now(), now(), 0)
 ON CONFLICT (source, source_id) DO UPDATE SET
     spot_id = EXCLUDED.spot_id,
     version = EXCLUDED.version,
+    via = EXCLUDED.via,
+    content_hash = COALESCE(EXCLUDED.content_hash, t_spot_sources.content_hash),
     last_seen_at = now(),
     missing_runs = 0
 `
 
 type UpsertSpotSourceParams struct {
-	SpotID   uuid.UUID   `json:"spot_id"`
-	Source   string      `json:"source"`
-	SourceID string      `json:"source_id"`
-	Version  pgtype.Int4 `json:"version"`
+	SpotID      uuid.UUID   `json:"spot_id"`
+	Source      string      `json:"source"`
+	SourceID    string      `json:"source_id"`
+	Version     pgtype.Int4 `json:"version"`
+	Via         string      `json:"via"`
+	ContentHash pgtype.Text `json:"content_hash"`
 }
 
 func (q *Queries) UpsertSpotSource(ctx context.Context, arg UpsertSpotSourceParams) error {
@@ -965,6 +1017,8 @@ func (q *Queries) UpsertSpotSource(ctx context.Context, arg UpsertSpotSourcePara
 		arg.Source,
 		arg.SourceID,
 		arg.Version,
+		arg.Via,
+		arg.ContentHash,
 	)
 	return err
 }

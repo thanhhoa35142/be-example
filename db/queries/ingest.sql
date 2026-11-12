@@ -37,7 +37,7 @@ FROM t_ingest_features
 WHERE pack_id = $1 AND role = 'amenity';
 
 -- name: FindSpotBySource :one
-SELECT spot_id, version FROM t_spot_sources
+SELECT spot_id, version, via, content_hash FROM t_spot_sources
 WHERE source = $1 AND source_id = $2;
 
 -- name: ListAbsorbedCandidates :many
@@ -138,12 +138,15 @@ UPDATE t_spots SET status = $2, status_reason = $3, updated_at = now()
 WHERE id = $1;
 
 -- name: UpsertSpotSource :exec
-INSERT INTO t_spot_sources (spot_id, source, source_id, version,
-                            imported_at, last_seen_at, missing_runs)
-VALUES ($1, $2, $3, $4, now(), now(), 0)
+INSERT INTO t_spot_sources (spot_id, source, source_id, version, via,
+                            content_hash, imported_at, last_seen_at,
+                            missing_runs)
+VALUES ($1, $2, $3, $4, $5, $6, now(), now(), 0)
 ON CONFLICT (source, source_id) DO UPDATE SET
     spot_id = EXCLUDED.spot_id,
     version = EXCLUDED.version,
+    via = EXCLUDED.via,
+    content_hash = COALESCE(EXCLUDED.content_hash, t_spot_sources.content_hash),
     last_seen_at = now(),
     missing_runs = 0;
 
@@ -197,31 +200,45 @@ USING t_spots s
 WHERE s.id = a.spot_id AND s.city_pack_id = $1 AND a.source = 'osm';
 
 -- name: ListSpotsMissingAllSources :many
--- Active spots of the pack whose sources are all missing this run.
+-- Active spots of the pack whose PRIMARY sources are all missing this run.
+-- Absorbed child links (via='absorbed') never keep a spot alive.
 SELECT DISTINCT ss.spot_id
 FROM t_spot_sources ss
 JOIN t_spots sp ON sp.id = ss.spot_id
 WHERE sp.city_pack_id = $1 AND sp.status = 'active'
+  AND ss.via = 'primary'
   AND ss.missing_runs >= $2
   AND NOT EXISTS (
       SELECT 1 FROM t_spot_sources s2
       JOIN t_ingest_features f
         ON f.pack_id = $1 AND f.source = s2.source AND f.source_id = s2.source_id
        AND f.role IN ('candidate','amenity')
-      WHERE s2.spot_id = ss.spot_id);
+      WHERE s2.spot_id = ss.spot_id AND s2.via = 'primary');
 
 -- name: ListPendingVanished :many
 SELECT DISTINCT ss.spot_id
 FROM t_spot_sources ss
 JOIN t_spots sp ON sp.id = ss.spot_id
 WHERE sp.city_pack_id = $1 AND sp.status = 'pending'
+  AND ss.via = 'primary'
   AND ss.missing_runs >= $2
   AND NOT EXISTS (
       SELECT 1 FROM t_spot_sources s2
       JOIN t_ingest_features f
         ON f.pack_id = $1 AND f.source = s2.source AND f.source_id = s2.source_id
        AND f.role IN ('candidate','amenity')
-      WHERE s2.spot_id = ss.spot_id);
+      WHERE s2.spot_id = ss.spot_id AND s2.via = 'primary');
+
+-- name: ListSourcelessSpots :many
+-- Active/pending spots with no primary source left — their identity moved
+-- to another spot (e.g. a site absorbed into a park). Close them out.
+SELECT sp.id, sp.status
+FROM t_spots sp
+WHERE sp.city_pack_id = $1 AND sp.status IN ('active','pending')
+  AND NOT sp.curated
+  AND NOT EXISTS (
+      SELECT 1 FROM t_spot_sources ss
+      WHERE ss.spot_id = sp.id AND ss.via = 'primary');
 
 -- name: MarkExtractFetched :exec
 UPDATE t_city_packs SET extract_fetched_at = $2
