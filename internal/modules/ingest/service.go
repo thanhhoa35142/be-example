@@ -176,7 +176,7 @@ type Store interface {
 	MissingPending(ctx context.Context, minMissingRuns int) ([]uuid.UUID, error)
 	RecentConfirm(ctx context.Context, spotID uuid.UUID, days int) (bool, error)
 	ClearAmenities(ctx context.Context) error
-	AssignAmenity(ctx context.Context, lat, lon float64, amenity string) error
+	AssignAmenity(ctx context.Context, lat, lon float64, amenity string, radiusM float64) error
 	TouchImport(ctx context.Context) error
 	// NotifyIngestDone emits pg_notify('pickhour_ingest') inside the tx —
 	// delivered only on commit, so dry-runs and rollbacks stay silent.
@@ -665,7 +665,7 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 			radius = 300
 		}
 		for _, a := range amenities {
-			if err := store.AssignAmenity(ctx, a.Lat, a.Lon, a.Amenity); err != nil {
+			if err := store.AssignAmenity(ctx, a.Lat, a.Lon, a.Amenity, radius); err != nil {
 				return err
 			}
 			st.AmenitiesLinked++

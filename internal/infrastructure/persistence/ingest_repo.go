@@ -40,6 +40,14 @@ func (r *IngestRepo) ListIngestPacks(ctx context.Context) ([]osm.Pack, error) {
 			TZ:         row.Tz,
 			OSMExtract: row.OsmExtract.String,
 		})
+		if row.LastImportAt.Valid {
+			t := row.LastImportAt.Time
+			out[len(out)-1].LastImportAt = &t
+		}
+		if row.ExtractFetchedAt.Valid {
+			t := row.ExtractFetchedAt.Time
+			out[len(out)-1].ExtractFetchedAt = &t
+		}
 	}
 	return out, nil
 }
@@ -410,13 +418,13 @@ func (s *ingestStore) ClearAmenities(ctx context.Context) error {
 }
 
 // AssignAmenity links one amenity feature to the nearest active spot whose
-// area contains it within radius meters; no-op when nothing is near.
-func (s *ingestStore) AssignAmenity(ctx context.Context, lat, lon float64, amenity string) error {
+// area contains it within radiusM meters; no-op when nothing is near.
+func (s *ingestStore) AssignAmenity(ctx context.Context, lat, lon float64, amenity string, radiusM float64) error {
 	row, err := s.q.NearestSpotForPoint(ctx, NearestSpotForPointParams{
 		StMakepoint:   lon,
 		StMakepoint_2: lat,
 		CityPackID:    s.packID,
-		StDwithin:     300,
+		StDwithin:     radiusM,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil

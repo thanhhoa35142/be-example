@@ -81,6 +81,7 @@ WITH orphan AS (
           SELECT 1 FROM t_ingest_features p
           WHERE p.pack_id = f.pack_id AND p.role = 'candidate'
             AND p.kind IN ('park','beach')
+            AND p.geom && ST_Centroid(f.geom)
             AND ST_GeometryType(p.geom) IN ('ST_Polygon','ST_MultiPolygon')
             AND ST_Contains(p.geom, ST_Centroid(f.geom))
             AND NOT (p.source = f.source AND p.source_id = f.source_id))
@@ -283,6 +284,7 @@ FROM t_ingest_features c
 JOIN t_ingest_features p
   ON p.pack_id = c.pack_id AND p.role = 'candidate'
  AND p.kind IN ('park','beach')
+ AND p.geom && ST_Centroid(c.geom)
  AND ST_GeometryType(p.geom) IN ('ST_Polygon','ST_MultiPolygon')
  AND ST_Contains(p.geom, ST_Centroid(c.geom))
 WHERE c.pack_id = $1 AND c.role = 'candidate'
@@ -450,20 +452,23 @@ func (q *Queries) ListDistinctExtracts(ctx context.Context) ([]pgtype.Text, erro
 }
 
 const listIngestPacks = `-- name: ListIngestPacks :many
-SELECT id, slug, name, country, tz, osm_extract, boundary
+SELECT id, slug, name, country, tz, osm_extract, boundary,
+       last_import_at, extract_fetched_at
 FROM t_city_packs
 WHERE status IN ('beta','live')
 ORDER BY slug
 `
 
 type ListIngestPacksRow struct {
-	ID         uuid.UUID   `json:"id"`
-	Slug       string      `json:"slug"`
-	Name       string      `json:"name"`
-	Country    string      `json:"country"`
-	Tz         string      `json:"tz"`
-	OsmExtract pgtype.Text `json:"osm_extract"`
-	Boundary   interface{} `json:"boundary"`
+	ID               uuid.UUID          `json:"id"`
+	Slug             string             `json:"slug"`
+	Name             string             `json:"name"`
+	Country          string             `json:"country"`
+	Tz               string             `json:"tz"`
+	OsmExtract       pgtype.Text        `json:"osm_extract"`
+	Boundary         interface{}        `json:"boundary"`
+	LastImportAt     pgtype.Timestamptz `json:"last_import_at"`
+	ExtractFetchedAt pgtype.Timestamptz `json:"extract_fetched_at"`
 }
 
 func (q *Queries) ListIngestPacks(ctx context.Context) ([]ListIngestPacksRow, error) {
@@ -483,6 +488,8 @@ func (q *Queries) ListIngestPacks(ctx context.Context) ([]ListIngestPacksRow, er
 			&i.Tz,
 			&i.OsmExtract,
 			&i.Boundary,
+			&i.LastImportAt,
+			&i.ExtractFetchedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -885,7 +892,7 @@ UPDATE t_spots SET
     name = $2, names = $3::jsonb, attrs = $4::jsonb,
     quality = $5, geom = ST_SetSRID(ST_MakePoint($6, $7), 4326)::geography,
     area = CASE WHEN $8::text IS NOT NULL
-                THEN ST_Multi(ST_GeomFromGeoJSON($8)) ELSE area END,
+                THEN ST_Multi(ST_GeomFromGeoJSON($8)) ELSE NULL END,
     updated_at = now()
 WHERE id = $1
 `

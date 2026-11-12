@@ -114,7 +114,9 @@ func filterVersion() string {
 
 // ensureArtifact runs an osmium subcommand once per extract, caching the
 // output file. A cached file is reused only when it is newer than its input
-// (so a refreshed .pbf invalidates downstream artifacts).
+// (so a refreshed .pbf invalidates downstream artifacts). osmium writes to
+// "<name>.tmp" and the file is renamed into place only on success, so a
+// killed run never poisons the cache with a truncated artifact.
 func (s *OsmiumSource) ensureArtifact(ctx context.Context, name, inPath string, args func(outRel, inRel string) []string) (string, error) {
 	out := filepath.Join(s.workDir(), name)
 	if st, err := os.Stat(out); err == nil && st.Size() > 0 {
@@ -122,7 +124,12 @@ func (s *OsmiumSource) ensureArtifact(ctx context.Context, name, inPath string, 
 			return out, nil
 		}
 	}
-	if err := s.run(ctx, args(s.relPath(out), s.relPath(inPath))...); err != nil {
+	tmp := out + ".tmp"
+	_ = os.Remove(tmp)
+	if err := s.run(ctx, args(s.relPath(tmp), s.relPath(inPath))...); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp, out); err != nil {
 		return "", err
 	}
 	return out, nil

@@ -31,6 +31,10 @@ type Pack struct {
 	Country    string
 	TZ         string
 	OSMExtract string // Geofabrik extract path, e.g. "europe/netherlands-latest"
+	// Freshness stamps used by the scheduled job to skip packs whose
+	// extract hasn't been re-fetched since the last successful import.
+	LastImportAt     *time.Time
+	ExtractFetchedAt *time.Time
 	// Bounds is the pack boundary bbox (west, south, east, north) — needed
 	// by bbox-based sources like Overpass. Populated by the caller.
 	Bounds Bounds

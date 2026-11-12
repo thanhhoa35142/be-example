@@ -73,14 +73,18 @@ func main() {
 		}
 	}
 
-	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	poolCfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
+	if err != nil {
+		log.Fatalf("db config: %v", err)
+	}
+	// Each job holds one conn for its advisory lock; size the pool so all
+	// registered jobs can run concurrently.
+	poolCfg.MaxConns = 12
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		log.Fatalf("db connect: %v", err)
 	}
 	defer pool.Close()
-	// Each job holds one conn for its advisory lock; size the pool so all
-	// registered jobs can run concurrently.
-	pool.Config().MaxConns = 12
 
 	queries := persistence.New(pool)
 
@@ -148,6 +152,14 @@ func main() {
 		}
 		for i := range packs {
 			if *packSlug != "" && packs[i].Slug != *packSlug {
+				continue
+			}
+			// Freshness gate: skip packs whose extract hasn't been
+			// re-fetched since the last import (scheduled runs only —
+			// an explicit -pack one-shot always runs).
+			if *packSlug == "" && packs[i].ExtractFetchedAt != nil &&
+				packs[i].LastImportAt != nil &&
+				!packs[i].ExtractFetchedAt.After(*packs[i].LastImportAt) {
 				continue
 			}
 			bounds, err := ingestRepo.PackBounds(ctx, packs[i].ID)
