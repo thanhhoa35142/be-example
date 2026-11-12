@@ -85,10 +85,10 @@ jobs:
         # discovering it after a multi-hour ingest.
         run: |
           docker run --rm --network host -e PGPASSWORD=picnic \
-            postgis/postgis:18-3.6 \
+            -v "$PWD:/out" postgis/postgis:18-3.6 \
             pg_dump -h localhost -U picnic -d picnic -Fc -Z9 \
-            -f /tmp/probe.dump
-          ls -lh /tmp/probe.dump
+            -f /out/probe.dump
+          ls -lh probe.dump && rm probe.dump
 
       - name: Create city packs
         env:
