@@ -1,6 +1,6 @@
 -- ============================================================================
 -- Pickhour — PostgreSQL schema snapshot (PostgreSQL 18 + PostGIS 3.6)
--- Generated via pg_dump --schema-only from picnic_v2 (migrations 0001+0002).
+-- Generated via pg_dump --schema-only from picnic_v2 (migrations 0001-0003).
 --
 -- Naming: all app tables are t_<plural>; constraints pk_/fk_/uq_/ck_/ix_.
 -- Strict state machines are enforced by trg_* triggers (check_violation on
@@ -27,10 +27,11 @@
 -- ============================================================================
 
 --
+--
 -- PostgreSQL database dump
 --
 
-\restrict WG2Z4awr55h8I6qIohXgY2miTiddUhb6fLJFstdhdULwW3FBrUihBFINn2kGPYV
+\restrict qXPcLN7HfLvvFg1KMy6OUiQ8GOTNX9bby27KBNxN0e2N8ye0Dg22Be3WOLoJLJp
 
 -- Dumped from database version 18.6 (Debian 18.6-1.pgdg13+2)
 -- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg13+2)
@@ -236,6 +237,7 @@ BEGIN
     END;
     IF NEW.status IS DISTINCT FROM OLD.status THEN
         PERFORM fn_assert_transition(allowed, OLD.status, NEW.status);
+        NEW.status_changed_at := now();
         PERFORM fn_log_transition('spot', NEW.id::text, OLD.status, NEW.status);
     END IF;
     RETURN NEW;
@@ -386,6 +388,7 @@ CREATE TABLE public.t_city_packs (
     status text DEFAULT 'draft'::text NOT NULL,
     osm_extract text,
     last_import_at timestamp with time zone,
+    extract_fetched_at timestamp with time zone,
     CONSTRAINT ck_t_city_packs_country CHECK ((country ~ '^[A-Z]{2}$'::text)),
     CONSTRAINT ck_t_city_packs_live_needs_import CHECK (((status <> ALL (ARRAY['beta'::text, 'live'::text])) OR (last_import_at IS NOT NULL))),
     CONSTRAINT ck_t_city_packs_status CHECK ((status = ANY (ARRAY['draft'::text, 'beta'::text, 'live'::text, 'retired'::text])))
@@ -527,6 +530,32 @@ CREATE TABLE public.t_holidays (
 ALTER TABLE public.t_holidays OWNER TO picnic;
 
 --
+-- Name: t_ingest_features; Type: TABLE; Schema: public; Owner: picnic
+--
+
+CREATE TABLE public.t_ingest_features (
+    pack_id uuid NOT NULL,
+    source text NOT NULL,
+    source_id text NOT NULL,
+    role text NOT NULL,
+    kind text,
+    amenity text,
+    quality smallint,
+    exclude_reason text,
+    version integer,
+    tags jsonb DEFAULT '{}'::jsonb NOT NULL,
+    geom public.geometry(Geometry,4326),
+    content_hash text NOT NULL,
+    run_id bigint,
+    seen_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_t_ingest_features_quality CHECK (((quality IS NULL) OR ((quality >= 0) AND (quality <= 100)))),
+    CONSTRAINT ck_t_ingest_features_role CHECK ((role = ANY (ARRAY['candidate'::text, 'amenity'::text, 'excluded'::text])))
+);
+
+
+ALTER TABLE public.t_ingest_features OWNER TO picnic;
+
+--
 -- Name: t_job_runs; Type: TABLE; Schema: public; Owner: picnic
 --
 
@@ -539,6 +568,7 @@ CREATE TABLE public.t_job_runs (
     status text NOT NULL,
     rows_affected integer,
     error text,
+    stats jsonb,
     CONSTRAINT ck_t_job_runs_finished_pair CHECK (((status = 'running'::text) = (finished_at IS NULL))),
     CONSTRAINT ck_t_job_runs_status CHECK ((status = ANY (ARRAY['running'::text, 'succeeded'::text, 'failed'::text, 'abandoned'::text])))
 );
@@ -628,7 +658,9 @@ CREATE TABLE public.t_spot_amenities (
     spot_id uuid NOT NULL,
     type text NOT NULL,
     distance_m smallint NOT NULL,
-    source text NOT NULL
+    source text NOT NULL,
+    count smallint DEFAULT 1 NOT NULL,
+    CONSTRAINT ck_t_spot_amenities_count CHECK ((count >= 1))
 );
 
 
@@ -694,6 +726,9 @@ CREATE TABLE public.t_spot_sources (
     source_id text NOT NULL,
     version integer,
     imported_at timestamp with time zone NOT NULL,
+    last_seen_at timestamp with time zone,
+    missing_runs smallint DEFAULT 0 NOT NULL,
+    CONSTRAINT ck_t_spot_sources_missing_runs CHECK ((missing_runs >= 0)),
     CONSTRAINT ck_t_spot_sources_version CHECK (((version IS NULL) OR (version >= 0)))
 );
 
@@ -721,9 +756,15 @@ CREATE TABLE public.t_spots (
     last_verified_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    quality smallint,
+    attrs jsonb DEFAULT '{}'::jsonb NOT NULL,
+    curated boolean DEFAULT false NOT NULL,
+    status_reason text,
+    status_changed_at timestamp with time zone,
     CONSTRAINT ck_t_spots_country CHECK ((country ~ '^[A-Z]{2}$'::text)),
     CONSTRAINT ck_t_spots_kind CHECK ((kind = ANY (ARRAY['table'::text, 'site'::text, 'park'::text, 'beach'::text]))),
     CONSTRAINT ck_t_spots_merged_pair CHECK (((status = 'merged'::text) = (merged_into IS NOT NULL))),
+    CONSTRAINT ck_t_spots_quality CHECK (((quality IS NULL) OR ((quality >= 0) AND (quality <= 100)))),
     CONSTRAINT ck_t_spots_status CHECK ((status = ANY (ARRAY['pending'::text, 'active'::text, 'closed'::text, 'hidden'::text, 'merged'::text])))
 );
 
@@ -928,6 +969,14 @@ ALTER TABLE ONLY public.t_events
 
 ALTER TABLE ONLY public.t_holidays
     ADD CONSTRAINT pk_t_holidays PRIMARY KEY (country, region, date, kind);
+
+
+--
+-- Name: t_ingest_features pk_t_ingest_features; Type: CONSTRAINT; Schema: public; Owner: picnic
+--
+
+ALTER TABLE ONLY public.t_ingest_features
+    ADD CONSTRAINT pk_t_ingest_features PRIMARY KEY (pack_id, source, source_id);
 
 
 --
@@ -1198,6 +1247,13 @@ CREATE INDEX ix_t_events_name_created ON public.t_events USING btree (name, crea
 
 
 --
+-- Name: ix_t_ingest_features_geom; Type: INDEX; Schema: public; Owner: picnic
+--
+
+CREATE INDEX ix_t_ingest_features_geom ON public.t_ingest_features USING gist (geom);
+
+
+--
 -- Name: ix_t_job_runs_job_started; Type: INDEX; Schema: public; Owner: picnic
 --
 
@@ -1405,6 +1461,22 @@ ALTER TABLE ONLY public.t_events
 
 
 --
+-- Name: t_ingest_features fk_t_ingest_features_t_city_packs; Type: FK CONSTRAINT; Schema: public; Owner: picnic
+--
+
+ALTER TABLE ONLY public.t_ingest_features
+    ADD CONSTRAINT fk_t_ingest_features_t_city_packs FOREIGN KEY (pack_id) REFERENCES public.t_city_packs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: t_ingest_features fk_t_ingest_features_t_job_runs; Type: FK CONSTRAINT; Schema: public; Owner: picnic
+--
+
+ALTER TABLE ONLY public.t_ingest_features
+    ADD CONSTRAINT fk_t_ingest_features_t_job_runs FOREIGN KEY (run_id) REFERENCES public.t_job_runs(id);
+
+
+--
 -- Name: t_job_runs fk_t_job_runs_t_city_packs; Type: FK CONSTRAINT; Schema: public; Owner: picnic
 --
 
@@ -1496,5 +1568,5 @@ ALTER TABLE ONLY public.t_spots
 -- PostgreSQL database dump complete
 --
 
-\unrestrict WG2Z4awr55h8I6qIohXgY2miTiddUhb6fLJFstdhdULwW3FBrUihBFINn2kGPYV
+\unrestrict qXPcLN7HfLvvFg1KMy6OUiQ8GOTNX9bby27KBNxN0e2N8ye0Dg22Be3WOLoJLJp
 

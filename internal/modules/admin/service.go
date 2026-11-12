@@ -33,6 +33,8 @@ var jobScheduleLimits = map[string]jobScheduleLimit{
 	"scoring.recompute": {min: 5 * 60, max: 6 * 60 * 60},
 	"alerts.evaluate":   {min: 60, max: 60 * 60},
 	"retention.purge":   {min: 60 * 60, max: 30 * 24 * 60 * 60},
+	"ingest.osm":        {min: 60 * 60, max: 7 * 24 * 60 * 60},
+	"ingest.extract.refresh": {min: 24 * 60 * 60, max: 30 * 24 * 60 * 60},
 }
 
 type Service struct {

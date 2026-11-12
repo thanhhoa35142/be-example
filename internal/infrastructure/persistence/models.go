@@ -74,15 +74,16 @@ type TAppleNotification struct {
 }
 
 type TCityPack struct {
-	ID           uuid.UUID          `json:"id"`
-	Slug         string             `json:"slug"`
-	Name         string             `json:"name"`
-	Country      string             `json:"country"`
-	Tz           string             `json:"tz"`
-	Boundary     interface{}        `json:"boundary"`
-	Status       string             `json:"status"`
-	OsmExtract   pgtype.Text        `json:"osm_extract"`
-	LastImportAt pgtype.Timestamptz `json:"last_import_at"`
+	ID               uuid.UUID          `json:"id"`
+	Slug             string             `json:"slug"`
+	Name             string             `json:"name"`
+	Country          string             `json:"country"`
+	Tz               string             `json:"tz"`
+	Boundary         interface{}        `json:"boundary"`
+	Status           string             `json:"status"`
+	OsmExtract       pgtype.Text        `json:"osm_extract"`
+	LastImportAt     pgtype.Timestamptz `json:"last_import_at"`
+	ExtractFetchedAt pgtype.Timestamptz `json:"extract_fetched_at"`
 }
 
 type TCrowdCurf struct {
@@ -152,6 +153,23 @@ type THoliday struct {
 	Name    pgtype.Text `json:"name"`
 }
 
+type TIngestFeature struct {
+	PackID        uuid.UUID   `json:"pack_id"`
+	Source        string      `json:"source"`
+	SourceID      string      `json:"source_id"`
+	Role          string      `json:"role"`
+	Kind          pgtype.Text `json:"kind"`
+	Amenity       pgtype.Text `json:"amenity"`
+	Quality       pgtype.Int2 `json:"quality"`
+	ExcludeReason pgtype.Text `json:"exclude_reason"`
+	Version       pgtype.Int4 `json:"version"`
+	Tags          []byte      `json:"tags"`
+	Geom          interface{} `json:"geom"`
+	ContentHash   string      `json:"content_hash"`
+	RunID         pgtype.Int8 `json:"run_id"`
+	SeenAt        time.Time   `json:"seen_at"`
+}
+
 type TJobRun struct {
 	ID           int64              `json:"id"`
 	Job          string             `json:"job"`
@@ -161,6 +179,7 @@ type TJobRun struct {
 	Status       string             `json:"status"`
 	RowsAffected pgtype.Int4        `json:"rows_affected"`
 	Error        pgtype.Text        `json:"error"`
+	Stats        []byte             `json:"stats"`
 }
 
 type TPlanLimit struct {
@@ -193,22 +212,27 @@ type TScoringConfig struct {
 }
 
 type TSpot struct {
-	ID             uuid.UUID          `json:"id"`
-	CityPackID     uuid.UUID          `json:"city_pack_id"`
-	Kind           string             `json:"kind"`
-	Name           pgtype.Text        `json:"name"`
-	Names          []byte             `json:"names"`
-	Geom           interface{}        `json:"geom"`
-	Area           interface{}        `json:"area"`
-	Country        string             `json:"country"`
-	City           pgtype.Text        `json:"city"`
-	Tz             string             `json:"tz"`
-	CellID         int64              `json:"cell_id"`
-	Status         string             `json:"status"`
-	MergedInto     pgtype.UUID        `json:"merged_into"`
-	LastVerifiedAt pgtype.Timestamptz `json:"last_verified_at"`
-	CreatedAt      time.Time          `json:"created_at"`
-	UpdatedAt      time.Time          `json:"updated_at"`
+	ID              uuid.UUID          `json:"id"`
+	CityPackID      uuid.UUID          `json:"city_pack_id"`
+	Kind            string             `json:"kind"`
+	Name            pgtype.Text        `json:"name"`
+	Names           []byte             `json:"names"`
+	Geom            interface{}        `json:"geom"`
+	Area            interface{}        `json:"area"`
+	Country         string             `json:"country"`
+	City            pgtype.Text        `json:"city"`
+	Tz              string             `json:"tz"`
+	CellID          int64              `json:"cell_id"`
+	Status          string             `json:"status"`
+	MergedInto      pgtype.UUID        `json:"merged_into"`
+	LastVerifiedAt  pgtype.Timestamptz `json:"last_verified_at"`
+	CreatedAt       time.Time          `json:"created_at"`
+	UpdatedAt       time.Time          `json:"updated_at"`
+	Quality         pgtype.Int2        `json:"quality"`
+	Attrs           []byte             `json:"attrs"`
+	Curated         bool               `json:"curated"`
+	StatusReason    pgtype.Text        `json:"status_reason"`
+	StatusChangedAt pgtype.Timestamptz `json:"status_changed_at"`
 }
 
 type TSpotAmenity struct {
@@ -216,6 +240,7 @@ type TSpotAmenity struct {
 	Type      string    `json:"type"`
 	DistanceM int16     `json:"distance_m"`
 	Source    string    `json:"source"`
+	Count     int16     `json:"count"`
 }
 
 type TSpotReport struct {
@@ -247,11 +272,13 @@ type TSpotScore struct {
 }
 
 type TSpotSource struct {
-	SpotID     uuid.UUID   `json:"spot_id"`
-	Source     string      `json:"source"`
-	SourceID   string      `json:"source_id"`
-	Version    pgtype.Int4 `json:"version"`
-	ImportedAt time.Time   `json:"imported_at"`
+	SpotID      uuid.UUID          `json:"spot_id"`
+	Source      string             `json:"source"`
+	SourceID    string             `json:"source_id"`
+	Version     pgtype.Int4        `json:"version"`
+	ImportedAt  time.Time          `json:"imported_at"`
+	LastSeenAt  pgtype.Timestamptz `json:"last_seen_at"`
+	MissingRuns int16              `json:"missing_runs"`
 }
 
 type TStateTransition struct {
