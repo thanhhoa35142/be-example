@@ -40,6 +40,15 @@ type job struct {
 	initialDelay time.Duration
 }
 
+// jobRunIDKey carries the current t_job_runs.id to job functions that need
+// it (ingest stamps it on t_ingest_features.run_id for traceability).
+type jobRunIDKey struct{}
+
+func jobRunID(ctx context.Context) int64 {
+	id, _ := ctx.Value(jobRunIDKey{}).(int64)
+	return id
+}
+
 const jobSchedulePollInterval = 30 * time.Second
 
 func main() {
@@ -146,7 +155,7 @@ func main() {
 				return fmt.Errorf("pack %s bounds: %w", packs[i].Slug, err)
 			}
 			packs[i].Bounds = bounds
-			st, err := ingestSvc.RunPack(ctx, packs[i], 0, *dryRun)
+			st, err := ingestSvc.RunPack(ctx, packs[i], jobRunID(ctx), *dryRun)
 			if err != nil {
 				return fmt.Errorf("pack %s: %w", packs[i].Slug, err)
 			}
@@ -401,6 +410,9 @@ func executeJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, ad
 	runID, err := adminSvc.RecordJobStart(ctx, j.name)
 	if err != nil {
 		logger.Error("job_run insert failed", "job", j.name, "error", err)
+	}
+	if runID != 0 {
+		ctx = context.WithValue(ctx, jobRunIDKey{}, runID)
 	}
 	jobErr := j.fn(ctx)
 	switch {
