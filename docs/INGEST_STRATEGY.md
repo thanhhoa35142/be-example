@@ -110,6 +110,14 @@ Cadence: `ingest.osm` daily, **no-ops when the extract is not newer than
 the pack's last import** (freshness gate) → failed runs self-heal.
 `ingest.extract.refresh` weekly.
 
+**Disk model (40 GB VPS target)**: raw `.osm.pbf` files are deleted after
+each `ingest.osm` run (`EnsureExtracts` backfills only missing ones up
+front; `RemoveExtract` cleans up post-run). Steady-state disk = osmium
+artifacts only (filtered pbf + geojsonseq ≈ 20% of raw size), so the
+worker holds ~30-50 country extracts in ~10-15 GB instead of ~60 GB.
+Trade-off: a filter-expression change or artifact loss triggers one
+re-download of that extract (~1-4 GB) via `EnsureExtracts`.
+
 ## 3. Clustering (as implemented)
 
 Hierarchy: **park ⊃ picnic_site ⊃ table**.
@@ -274,6 +282,9 @@ geojsonseq → classify → tx → stats):
   revisit if a single pack approaches country scale (memory of
   geojsonseq stream is fine, but per-pack re-stream of a huge export
   file is wasteful).
+- Raw `.osm.pbf` deleted post-ingest (disk hygiene) — a same-week
+  re-ingest reuses artifacts; only filter changes or artifact loss
+  force a re-download via `EnsureExtracts`.
 - Overpass path: relations → centroid only; no golden fixtures on it.
 - Production worker image does not yet ship `osmium-tool` (dev runs it
   via `pickhour-osmium` docker image + `OSMIUM_CMD`).

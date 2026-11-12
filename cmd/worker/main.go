@@ -165,6 +165,9 @@ func main() {
 		if err != nil {
 			return err
 		}
+		// Resolve which packs will actually run (slug filter + freshness
+		// gate) so extract ensure/cleanup only touches those extracts.
+		var todo []int
 		for i := range packs {
 			if *packSlug != "" && packs[i].Slug != *packSlug {
 				continue
@@ -177,6 +180,27 @@ func main() {
 				!packs[i].ExtractFetchedAt.After(*packs[i].LastImportAt) {
 				continue
 			}
+			todo = append(todo, i)
+		}
+		// Osmium disk hygiene: raw .pbf files are huge and only needed while
+		// artifacts are (re)built. Ensure missing ones exist up front, then
+		// delete them after the run — the ~20%-sized artifacts stay cached.
+		// Skipped when OSMIUM_PBF pins a single dev file.
+		osmiumMode := cfg.IngestSource == "osmium" && cfg.OsmiumPBF == ""
+		var extracts []string
+		if osmiumMode {
+			seen := map[string]bool{}
+			for _, i := range todo {
+				if packs[i].OSMExtract != "" && !seen[packs[i].OSMExtract] {
+					seen[packs[i].OSMExtract] = true
+					extracts = append(extracts, packs[i].OSMExtract)
+				}
+			}
+			if err := ingest.EnsureExtracts(ctx, nil, cfg.IngestExtractDir, extracts); err != nil {
+				return fmt.Errorf("ensure extracts: %w", err)
+			}
+		}
+		for _, i := range todo {
 			bounds, err := ingestRepo.PackBounds(ctx, packs[i].ID)
 			if err != nil {
 				return fmt.Errorf("pack %s bounds: %w", packs[i].Slug, err)
@@ -196,6 +220,14 @@ func main() {
 				"features", st.FeaturesRead, "created", st.Created, "updated", st.Updated,
 				"activated", st.Activated, "pending", st.Pending, "closed", st.Closed,
 				"absorbed", st.Absorbed, "amenities", st.AmenitiesLinked)
+		}
+		// Cleanup only on full scheduled runs: -pack one-shots may share an
+		// extract with packs that haven't run yet, and deleting the .pbf
+		// between them would force a re-download.
+		if osmiumMode && !*dryRun && *packSlug == "" {
+			for _, e := range extracts {
+				ingest.RemoveExtract(cfg.IngestExtractDir, e)
+			}
 		}
 		return nil
 	}

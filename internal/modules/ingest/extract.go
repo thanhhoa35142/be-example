@@ -51,6 +51,46 @@ func RefreshExtracts(ctx context.Context, client *http.Client, dir string, extra
 	return fetched, nil
 }
 
+// EnsureExtracts downloads extracts that are missing from dir. Unlike
+// RefreshExtracts it performs no freshness check — used right before an
+// ingest run so a pack added mid-cycle still finds its .pbf on disk.
+func EnsureExtracts(ctx context.Context, client *http.Client, dir string, extracts []string) error {
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Minute}
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	for _, extract := range extracts {
+		if extract == "" || strings.Contains(extract, "..") {
+			return fmt.Errorf("invalid extract key %q", extract)
+		}
+		dest := filepath.Join(dir, filepath.Base(extract)+".osm.pbf")
+		if _, err := os.Stat(dest); err == nil {
+			continue
+		}
+		url := geofabrikBase + extract + ".osm.pbf"
+		if err := download(ctx, client, url, dest); err != nil {
+			return fmt.Errorf("extract %s: %w", extract, err)
+		}
+	}
+	return nil
+}
+
+// RemoveExtract deletes the raw .pbf (and .prev) for an extract once all
+// its packs have been ingested. The osmium artifacts (filtered pbf +
+// geojsonseq, ~20% of the raw size) stay cached for re-runs within the
+// freshness window; the next extract.refresh re-downloads the raw file.
+func RemoveExtract(dir, extract string) {
+	if extract == "" || strings.Contains(extract, "..") {
+		return
+	}
+	base := filepath.Base(extract)
+	for _, suffix := range []string{".osm.pbf", ".prev.osm.pbf"} {
+		_ = os.Remove(filepath.Join(dir, base+suffix))
+	}
+}
+
 func download(ctx context.Context, client *http.Client, url, dest string) error {
 	tmp := dest + ".tmp"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
