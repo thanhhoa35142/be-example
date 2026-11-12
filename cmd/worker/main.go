@@ -15,10 +15,12 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/modules/alerts"
 	"github.com/thanhhoa35142/be-example/internal/modules/crowd"
 	"github.com/thanhhoa35142/be-example/internal/modules/entitlement"
+	"github.com/thanhhoa35142/be-example/internal/modules/geo"
 	"github.com/thanhhoa35142/be-example/internal/modules/notifier"
 	"github.com/thanhhoa35142/be-example/internal/modules/scoring"
 	"github.com/thanhhoa35142/be-example/internal/modules/weather"
 	"github.com/thanhhoa35142/be-example/internal/platform/config"
+	"github.com/thanhhoa35142/be-example/internal/platform/httpx"
 	"github.com/thanhhoa35142/be-example/internal/platform/jobs"
 	platformlog "github.com/thanhhoa35142/be-example/internal/platform/log"
 )
@@ -27,6 +29,10 @@ import (
 type job struct {
 	name string
 	fn   func(ctx context.Context) error
+	// initialDelay staggers the first run after boot so jobs that share a
+	// provider don't all fire at t=0. Subsequent ticks keep the offset
+	// because intervals are fixed.
+	initialDelay time.Duration
 }
 
 const jobSchedulePollInterval = 30 * time.Second
@@ -37,6 +43,7 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 	logger := platformlog.New("worker")
+	geo.WeatherResolution = cfg.WeatherH3Res
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -67,9 +74,11 @@ func main() {
 	case "weatherkit":
 		weatherProvider = &weather.WeatherKit{}
 	default:
-		weatherProvider = weather.NewOpenMeteo()
+		weatherProvider = weather.NewOpenMeteo(httpx.NewClient(httpx.Policy{
+			Name: "open-meteo", RatePerSec: 5, Burst: 10,
+		}))
 	}
-	weatherSvc := weather.NewService(persistence.NewWeatherRepo(queries), weatherProvider)
+	weatherSvc := weather.NewService(persistence.NewWeatherRepo(queries), weatherProvider, cfg.WeatherDailyLimit)
 	crowdSvc := crowd.NewService(persistence.NewCrowdRepo(queries))
 	adminSvc := admin.NewService(persistence.NewAdminRepo(queries))
 	entitlementSvc := entitlement.NewService(persistence.NewEntitlementRepo(queries))
@@ -86,7 +95,8 @@ func main() {
 
 	registry := []job{
 		{
-			name: "weather.refresh",
+			name:         "weather.refresh",
+			initialDelay: 0, // provider-bound: goes first
 			fn: func(ctx context.Context) error {
 				stats, err := weatherSvc.Refresh(ctx)
 				if err != nil {
@@ -97,7 +107,8 @@ func main() {
 			},
 		},
 		{
-			name: "crowd.refresh",
+			name:         "crowd.refresh",
+			initialDelay: 7 * time.Minute, // daily, heaviest — offset far out
 			fn: func(ctx context.Context) error {
 				stats, err := crowdSvc.Refresh(ctx)
 				if err != nil {
@@ -108,7 +119,8 @@ func main() {
 			},
 		},
 		{
-			name: "crowd.aggregate",
+			name:         "crowd.aggregate",
+			initialDelay: 2 * time.Minute,
 			fn: func(ctx context.Context) error {
 				stats, err := crowdSvc.AggregateCommunity(ctx)
 				if err != nil {
@@ -119,7 +131,8 @@ func main() {
 			},
 		},
 		{
-			name: "scoring.recompute",
+			name:         "scoring.recompute",
+			initialDelay: 4 * time.Minute, // after weather+crowd have fresh data
 			fn: func(ctx context.Context) error {
 				stats, err := scoringSvc.Recompute(ctx)
 				if err != nil {
@@ -130,7 +143,8 @@ func main() {
 			},
 		},
 		{
-			name: "alerts.evaluate",
+			name:         "alerts.evaluate",
+			initialDelay: time.Minute,
 			fn: func(ctx context.Context) error {
 				stats, err := alertsSvc.Evaluate(ctx, time.Now())
 				if err != nil {
@@ -181,6 +195,15 @@ func runJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, adminS
 		}
 	}
 
+	// Stagger first runs: weather hits the forecast provider, the rest are
+	// DB-only but cheap to spread anyway.
+	if j.initialDelay > 0 {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(j.initialDelay):
+		}
+	}
 	run() // run once at startup, then on every tick
 
 	var interval time.Duration

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -21,8 +22,9 @@ func authFrom(ctx context.Context) (*apikeys.Auth, bool) {
 }
 
 // apiKeyAuth requires "Authorization: Bearer phk_..." and resolves it to
-// an apikeys.Auth (key + grants) stored in the request context.
-func apiKeyAuth(svc *apikeys.Service) gin.HandlerFunc {
+// an apikeys.Auth (key + grants) stored in the request context. Enforces
+// the key's rate_limit_rps via an in-memory token bucket.
+func apiKeyAuth(svc *apikeys.Service, limiter *keyLimiter) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := c.GetHeader("Authorization")
 		token, ok := strings.CutPrefix(header, "Bearer ")
@@ -37,6 +39,11 @@ func apiKeyAuth(svc *apikeys.Service) gin.HandlerFunc {
 				status = http.StatusForbidden
 			}
 			writeAuthProblem(c, status, "Invalid or expired API key")
+			return
+		}
+		if retryAfter := limiter.retryAfter(auth.Key); retryAfter > 0 {
+			c.Header("Retry-After", strconv.Itoa(retryAfter))
+			writeAuthProblem(c, http.StatusTooManyRequests, "Rate limit exceeded")
 			return
 		}
 		ctx := context.WithValue(c.Request.Context(), authContextKey, auth)

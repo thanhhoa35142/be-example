@@ -12,6 +12,32 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const consumeProviderQuota = `-- name: ConsumeProviderQuota :one
+INSERT INTO provider_quota (provider, day, used)
+VALUES ($1, CURRENT_DATE, $2)
+ON CONFLICT (provider, day) DO UPDATE
+SET used = provider_quota.used + EXCLUDED.used,
+    updated_at = now()
+WHERE provider_quota.used + EXCLUDED.used <= $3
+RETURNING used
+`
+
+type ConsumeProviderQuotaParams struct {
+	Provider   string `json:"provider"`
+	Weight     int32  `json:"weight"`
+	QuotaLimit int32  `json:"quota_limit"`
+}
+
+// Atomically adds `weight` to today's usage for `provider`, but only while
+// the result stays within `limit`. Returns the new `used` value; no row is
+// returned (sqlc.ErrNoRows) when the budget would be exceeded.
+func (q *Queries) ConsumeProviderQuota(ctx context.Context, arg ConsumeProviderQuotaParams) (int32, error) {
+	row := q.db.QueryRow(ctx, consumeProviderQuota, arg.Provider, arg.Weight, arg.QuotaLimit)
+	var used int32
+	err := row.Scan(&used)
+	return used, err
+}
+
 const deleteWeatherBefore = `-- name: DeleteWeatherBefore :exec
 DELETE FROM weather_hourly
 WHERE ts < $1

@@ -71,7 +71,7 @@ func main() {
 	router := gin.New()
 	router.Use(gin.Recovery())
 	router.GET("/healthz", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
-	router.Any("/mcp", apiKeyAuth(keysSvc), gin.WrapH(mcpHandler))
+	router.Any("/mcp", apiKeyAuth(keysSvc, newKeyLimiter()), gin.WrapH(mcpHandler))
 
 	srv := &http.Server{
 		Addr:              ":" + port,

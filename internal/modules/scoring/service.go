@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/thanhhoa35142/be-example/internal/modules/geo"
 )
 
 // ForecastHorizon is how far ahead scores are precomputed (spec: 7 days).
@@ -57,7 +58,8 @@ func (s *Service) Recompute(ctx context.Context) (Stats, error) {
 	cellSet := make(map[int64]struct{})
 	for _, sp := range spots {
 		spotIDs = append(spotIDs, sp.ID)
-		cellSet[sp.CellID] = struct{}{}
+		// Weather rows live on the coarser weather grid.
+		cellSet[geo.WeatherCellID(sp.CellID)] = struct{}{}
 	}
 	cellIDs := make([]int64, 0, len(cellSet))
 	for c := range cellSet {
@@ -95,13 +97,14 @@ func (s *Service) Recompute(ctx context.Context) (Stats, error) {
 		}
 		amenScore := amenIdx[sp.ID]
 		daysSince := daysSince(sp.LastVerifiedAt, now)
+		weatherCell := geo.WeatherCellID(sp.CellID)
 
 		for h := 0; h < int(ForecastHorizon/time.Hour); h++ {
 			ts := from.Add(time.Duration(h) * time.Hour)
 			local := ts.In(loc)
 
 			in := Inputs{
-				Weather:          weatherAt(weatherIdx, sp.CellID, ts),
+				Weather:          weatherAt(weatherIdx, weatherCell, ts),
 				Crowd:            crowdAt(crowdIdx, sp.ID, int(local.Weekday()), local.Hour()),
 				AmenityScore:     amenScore,
 				DaysSinceUpdated: daysSince,

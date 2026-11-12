@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/thanhhoa35142/be-example/internal/platform/httpx"
 )
 
 // Client sends alert pushes to APNs over HTTP/2 using a provider token
@@ -58,15 +60,21 @@ func ClientFromEnv() (*Client, error) {
 	if bundleID == "" {
 		bundleID = "com.example.MyApp"
 	}
-	return newClient(Config{KeyID: keyID, TeamID: teamID, KeyPEM: keyPEM, BundleID: bundleID})
+	return newClient(Config{
+		KeyID: keyID, TeamID: teamID, KeyPEM: keyPEM, BundleID: bundleID,
+		HTTPClient: httpx.NewClient(httpx.Policy{
+			Name: "apns", RatePerSec: 50, Burst: 50, Timeout: 10 * time.Second,
+		}),
+	})
 }
 
 // Config carries APNs credentials explicitly (mainly for tests).
 type Config struct {
-	KeyID    string
-	TeamID   string
-	KeyPEM   string
-	BundleID string
+	KeyID      string
+	TeamID     string
+	KeyPEM     string
+	BundleID   string
+	HTTPClient *http.Client // optional; defaults to a plain 10s client
 }
 
 func newClient(cfg Config) (*Client, error) {
@@ -82,16 +90,16 @@ func newClient(cfg Config) (*Client, error) {
 	if !ok || ecKey.Curve != elliptic.P256() {
 		return nil, fmt.Errorf("APNS_KEY must be an EC P-256 private key (.p8)")
 	}
+	httpClient := cfg.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 10 * time.Second}
+	}
 	return &Client{
 		key:      ecKey,
 		keyID:    cfg.KeyID,
 		teamID:   cfg.TeamID,
 		bundleID: cfg.BundleID,
-		http: &http.Client{
-			Timeout: 10 * time.Second,
-			// APNs requires HTTP/2 — Go's transport negotiates it via ALPN
-			// on TLS automatically.
-		},
+		http:     httpClient,
 	}, nil
 }
 

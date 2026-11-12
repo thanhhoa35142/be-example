@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/thanhhoa35142/be-example/internal/modules/geo"
 )
 
 type Service struct {
@@ -48,7 +49,8 @@ func (s *Service) Refresh(ctx context.Context) (Stats, error) {
 	cellSet := map[int64]struct{}{}
 	countrySet := map[string]struct{}{}
 	for _, sp := range spots {
-		cellSet[sp.CellID] = struct{}{}
+		// Weather rows live on the coarser weather grid.
+		cellSet[geo.WeatherCellID(sp.CellID)] = struct{}{}
 		countrySet[sp.Country] = struct{}{}
 	}
 	cellIDs := make([]int64, 0, len(cellSet))
@@ -141,7 +143,7 @@ func (s *Service) estimateSpot(
 	todayDow := int(now.Weekday())
 
 	baseline := Baseline(sp.Kind, sp.AreaM2)
-	cellWeather := weatherIdx[sp.CellID]
+	cellWeather := weatherIdx[geo.WeatherCellID(sp.CellID)]
 
 	for dow := 0; dow < 7; dow++ {
 		// Next calendar date (in spot-local time) with this weekday.

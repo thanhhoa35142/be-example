@@ -2,8 +2,10 @@ package persistence
 
 import (
 	"context"
+	"errors"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/thanhhoa35142/be-example/internal/modules/weather"
@@ -60,4 +62,17 @@ func (r *WeatherRepo) ReplaceRows(ctx context.Context, cellID int64, from, to ti
 
 func (r *WeatherRepo) DeleteBefore(ctx context.Context, before time.Time) error {
 	return r.q.DeleteWeatherBefore(ctx, before)
+}
+
+func (r *WeatherRepo) ConsumeQuota(ctx context.Context, provider string, weight, limit int) (bool, error) {
+	_, err := r.q.ConsumeProviderQuota(ctx, ConsumeProviderQuotaParams{
+		Provider: provider, Weight: int32(weight), QuotaLimit: int32(limit),
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }

@@ -20,10 +20,13 @@ type OpenMeteo struct {
 	client  *http.Client
 }
 
-func NewOpenMeteo() *OpenMeteo {
+func NewOpenMeteo(client *http.Client) *OpenMeteo {
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
+	}
 	return &OpenMeteo{
 		baseURL: openMeteoDefaultURL,
-		client:  &http.Client{Timeout: 30 * time.Second},
+		client:  client,
 	}
 }
 

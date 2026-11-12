@@ -167,6 +167,13 @@ type PlanLimit struct {
 	LimitValue pgtype.Int4 `json:"limit_value"`
 }
 
+type ProviderQuotum struct {
+	Provider  string      `json:"provider"`
+	Day       pgtype.Date `json:"day"`
+	Used      int32       `json:"used"`
+	UpdatedAt time.Time   `json:"updated_at"`
+}
+
 type ScoreFeedback struct {
 	ID        uuid.UUID `json:"id"`
 	SpotID    uuid.UUID `json:"spot_id"`
