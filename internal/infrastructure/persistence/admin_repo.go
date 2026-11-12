@@ -38,8 +38,12 @@ func (r *AdminRepo) FinishJobRun(ctx context.Context, id int64, status string, r
 	})
 }
 
-func (r *AdminRepo) ListJobRuns(ctx context.Context, limit int) ([]admin.JobRun, error) {
-	rows, err := r.q.ListJobRuns(ctx, int32(limit))
+func (r *AdminRepo) ListJobRuns(ctx context.Context, limit int, beforeID *int64) ([]admin.JobRun, error) {
+	var before pgtype.Int8
+	if beforeID != nil {
+		before = pgtype.Int8{Int64: *beforeID, Valid: true}
+	}
+	rows, err := r.q.ListJobRuns(ctx, ListJobRunsParams{Limit: int32(limit), BeforeID: before})
 	if err != nil {
 		return nil, err
 	}
@@ -158,8 +162,18 @@ func (r *AdminRepo) Freshness(ctx context.Context) (admin.Freshness, error) {
 	return f, nil
 }
 
-func (r *AdminRepo) ListPendingReports(ctx context.Context, limit int) ([]admin.PendingReport, error) {
-	rows, err := r.q.ListPendingSpotReports(ctx, int32(limit))
+func (r *AdminRepo) ListPendingReports(ctx context.Context, limit int, after *admin.ReportCursor) ([]admin.PendingReport, error) {
+	var afterTs pgtype.Timestamptz
+	var afterID pgtype.UUID
+	if after != nil {
+		afterTs = pgtype.Timestamptz{Time: after.CreatedAt, Valid: true}
+		afterID = pgtype.UUID{Bytes: after.ID, Valid: true}
+	}
+	rows, err := r.q.ListPendingSpotReports(ctx, ListPendingSpotReportsParams{
+		Limit:   int32(limit),
+		AfterTs: afterTs,
+		AfterID: afterID,
+	})
 	if err != nil {
 		return nil, err
 	}

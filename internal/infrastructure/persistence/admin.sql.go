@@ -376,9 +376,15 @@ func (q *Queries) InsertScoringConfig(ctx context.Context, arg InsertScoringConf
 const listJobRuns = `-- name: ListJobRuns :many
 SELECT id, job, started_at, finished_at, status, rows_affected, error
 FROM job_run
+WHERE ($2::bigint IS NULL OR id < $2)
 ORDER BY id DESC
 LIMIT $1
 `
+
+type ListJobRunsParams struct {
+	Limit    int32       `json:"limit"`
+	BeforeID pgtype.Int8 `json:"before_id"`
+}
 
 type ListJobRunsRow struct {
 	ID           int64              `json:"id"`
@@ -390,8 +396,8 @@ type ListJobRunsRow struct {
 	Error        pgtype.Text        `json:"error"`
 }
 
-func (q *Queries) ListJobRuns(ctx context.Context, limit int32) ([]ListJobRunsRow, error) {
-	rows, err := q.db.Query(ctx, listJobRuns, limit)
+func (q *Queries) ListJobRuns(ctx context.Context, arg ListJobRunsParams) ([]ListJobRunsRow, error) {
+	rows, err := q.db.Query(ctx, listJobRuns, arg.Limit, arg.BeforeID)
 	if err != nil {
 		return nil, err
 	}
@@ -449,9 +455,17 @@ SELECT r.id, r.spot_id, s.name, r.type, r.issue_code, r.created_at
 FROM spot_report r
 JOIN spot s ON s.id = r.spot_id
 WHERE r.status = 'pending'
-ORDER BY r.created_at
+  AND ($2::timestamptz IS NULL
+       OR (r.created_at, r.id) > ($2::timestamptz, $3::uuid))
+ORDER BY r.created_at, r.id
 LIMIT $1
 `
+
+type ListPendingSpotReportsParams struct {
+	Limit   int32              `json:"limit"`
+	AfterTs pgtype.Timestamptz `json:"after_ts"`
+	AfterID pgtype.UUID        `json:"after_id"`
+}
 
 type ListPendingSpotReportsRow struct {
 	ID        uuid.UUID   `json:"id"`
@@ -462,8 +476,8 @@ type ListPendingSpotReportsRow struct {
 	CreatedAt time.Time   `json:"created_at"`
 }
 
-func (q *Queries) ListPendingSpotReports(ctx context.Context, limit int32) ([]ListPendingSpotReportsRow, error) {
-	rows, err := q.db.Query(ctx, listPendingSpotReports, limit)
+func (q *Queries) ListPendingSpotReports(ctx context.Context, arg ListPendingSpotReportsParams) ([]ListPendingSpotReportsRow, error) {
+	rows, err := q.db.Query(ctx, listPendingSpotReports, arg.Limit, arg.AfterTs, arg.AfterID)
 	if err != nil {
 		return nil, err
 	}

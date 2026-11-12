@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -98,11 +99,24 @@ func (s *Service) EventSummary(ctx context.Context, f MetricsFilter) (EventSumma
 	return s.repo.EventSummary(ctx, f)
 }
 
-func (s *Service) Jobs(ctx context.Context, limit int) ([]JobRun, error) {
+func clampLimit(limit int) int {
 	if limit <= 0 || limit > 200 {
-		limit = 50
+		return 50
 	}
-	return s.repo.ListJobRuns(ctx, limit)
+	return limit
+}
+
+func (s *Service) Jobs(ctx context.Context, limit int, beforeID *int64) (Page[JobRun], error) {
+	limit = clampLimit(limit)
+	rows, err := s.repo.ListJobRuns(ctx, limit+1, beforeID)
+	if err != nil {
+		return Page[JobRun]{}, err
+	}
+	if len(rows) > limit {
+		cur := strconv.FormatInt(rows[limit-1].ID, 10)
+		return Page[JobRun]{Items: rows[:limit], NextCursor: &cur}, nil
+	}
+	return Page[JobRun]{Items: rows}, nil
 }
 
 func (s *Service) JobSchedules(ctx context.Context) ([]JobSchedule, error) {
@@ -170,11 +184,17 @@ func validateJobInterval(seconds int64, limits jobScheduleLimit) error {
 	return nil
 }
 
-func (s *Service) PendingReports(ctx context.Context, limit int) ([]PendingReport, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 50
+func (s *Service) PendingReports(ctx context.Context, limit int, after *ReportCursor) (Page[PendingReport], error) {
+	limit = clampLimit(limit)
+	rows, err := s.repo.ListPendingReports(ctx, limit+1, after)
+	if err != nil {
+		return Page[PendingReport]{}, err
 	}
-	return s.repo.ListPendingReports(ctx, limit)
+	if len(rows) > limit {
+		cur := ReportCursor{CreatedAt: rows[limit-1].CreatedAt, ID: rows[limit-1].ID}.Encode()
+		return Page[PendingReport]{Items: rows[:limit], NextCursor: &cur}, nil
+	}
+	return Page[PendingReport]{Items: rows}, nil
 }
 
 // ModerateReport sets a spot_report status (accepted/rejected).

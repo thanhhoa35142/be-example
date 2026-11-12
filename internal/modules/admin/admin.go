@@ -6,6 +6,9 @@ package admin
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -20,7 +23,41 @@ var (
 	ErrInvalidFilter       = errors.New("invalid filter")
 	ErrInvalidJobSchedule  = errors.New("invalid job schedule")
 	ErrJobScheduleNotFound = errors.New("job schedule not found")
+	ErrInvalidCursor       = errors.New("invalid cursor")
 )
+
+// Page is a keyset-paginated list response. NextCursor is nil on the last page.
+type Page[T any] struct {
+	Items      []T     `json:"items"`
+	NextCursor *string `json:"nextCursor"`
+}
+
+// ReportCursor is the keyset position in the moderation queue
+// (created_at, id), encoded as "<unixnano>|<uuid>".
+type ReportCursor struct {
+	CreatedAt time.Time
+	ID        uuid.UUID
+}
+
+func (c ReportCursor) Encode() string {
+	return fmt.Sprintf("%d|%s", c.CreatedAt.UnixNano(), c.ID.String())
+}
+
+func ParseReportCursor(s string) (ReportCursor, error) {
+	nanos, idStr, ok := strings.Cut(s, "|")
+	if !ok {
+		return ReportCursor{}, ErrInvalidCursor
+	}
+	n, err := strconv.ParseInt(nanos, 10, 64)
+	if err != nil {
+		return ReportCursor{}, ErrInvalidCursor
+	}
+	id, err := uuid.Parse(idStr)
+	if err != nil {
+		return ReportCursor{}, ErrInvalidCursor
+	}
+	return ReportCursor{CreatedAt: time.Unix(0, n).UTC(), ID: id}, nil
+}
 
 // JobRun mirrors job_run rows.
 type JobRun struct {

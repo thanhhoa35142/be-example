@@ -11,6 +11,7 @@ WHERE id = $1;
 -- name: ListJobRuns :many
 SELECT id, job, started_at, finished_at, status, rows_affected, error
 FROM job_run
+WHERE (sqlc.narg('before_id')::bigint IS NULL OR id < sqlc.narg('before_id'))
 ORDER BY id DESC
 LIMIT $1;
 
@@ -79,7 +80,9 @@ SELECT r.id, r.spot_id, s.name, r.type, r.issue_code, r.created_at
 FROM spot_report r
 JOIN spot s ON s.id = r.spot_id
 WHERE r.status = 'pending'
-ORDER BY r.created_at
+  AND (sqlc.narg('after_ts')::timestamptz IS NULL
+       OR (r.created_at, r.id) > (sqlc.narg('after_ts')::timestamptz, sqlc.narg('after_id')::uuid))
+ORDER BY r.created_at, r.id
 LIMIT $1;
 
 -- name: UpdateSpotReportStatus :execrows

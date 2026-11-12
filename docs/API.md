@@ -444,10 +444,10 @@ All `/v1/admin/*` endpoints require `Authorization: Bearer $ADMIN_TOKEN`. When `
 | `GET /v1/admin/overview` | Headline counts: spots, devices (24h active), pending reports, alert rules/deliveries, Plus devices |
 | `GET /v1/admin/freshness` | Newest `fetched_at`/`computed_at`/`updated_at` per pipeline stage — staleness alerting |
 | `GET /v1/admin/metrics` | Analytical counters: score distribution + histogram + cap rate (7d), feedback verdicts, report type/status (30d), crowd sources, subscription statuses, alert delivery outcomes |
-| `GET /v1/admin/jobs?limit=` | Recent `job_run` rows (status ok/failed/skipped, error) |
+| `GET /v1/admin/jobs?limit=&cursor=` | Recent `job_run` rows, keyset-paginated (`cursor` = last run id from `nextCursor`) |
 | `GET /v1/admin/jobs/schedules` | Registered worker job intervals in seconds, including allowed bounds |
 | `PATCH /v1/admin/jobs/{job}/schedule` | Update a job interval: `{"intervalSeconds":3600}` |
-| `GET /v1/admin/reports?limit=` | Pending spot_report moderation queue |
+| `GET /v1/admin/reports?limit=&cursor=` | Pending spot_report moderation queue, keyset-paginated (`cursor` = `nextCursor`) |
 | `PATCH /v1/admin/reports/{id}` | `{"status":"accepted"|"rejected"}` |
 | `GET /v1/admin/scoring-config` | All scoring_config versions; `isActive` marks the effective one |
 | `POST /v1/admin/scoring-config` | New version `{weights, thresholds, activate}` — draft gets `active_from=9999`, activate=true goes live now |

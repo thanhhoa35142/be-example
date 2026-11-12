@@ -12,7 +12,7 @@ type Repository interface {
 	// Job instrumentation
 	StartJobRun(ctx context.Context, job string) (int64, error)
 	FinishJobRun(ctx context.Context, id int64, status string, rowsAffected *int, errText *string) error
-	ListJobRuns(ctx context.Context, limit int) ([]JobRun, error)
+	ListJobRuns(ctx context.Context, limit int, beforeID *int64) ([]JobRun, error)
 	ListJobSchedules(ctx context.Context) ([]JobSchedule, error)
 	GetJobSchedule(ctx context.Context, job string) (JobSchedule, error)
 	UpdateJobSchedule(ctx context.Context, job string, intervalSeconds int64) (JobSchedule, error)
@@ -20,7 +20,7 @@ type Repository interface {
 	// Dashboard reads
 	Overview(ctx context.Context) (Overview, error)
 	Freshness(ctx context.Context) (Freshness, error)
-	ListPendingReports(ctx context.Context, limit int) ([]PendingReport, error)
+	ListPendingReports(ctx context.Context, limit int, after *ReportCursor) ([]PendingReport, error)
 	UpdateReportStatus(ctx context.Context, id uuid.UUID, status string) (bool, error)
 
 	// Analytics

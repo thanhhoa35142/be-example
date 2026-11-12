@@ -132,15 +132,25 @@ func (h *AdminHandler) Events(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": s})
 }
 
-// GET /v1/admin/jobs?limit= — recent job_run rows.
+// GET /v1/admin/jobs?limit=&cursor= — recent job_run rows, keyset-paginated
+// (cursor = last job run id).
 func (h *AdminHandler) Jobs(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
-	jobs, err := h.svc.Jobs(c.Request.Context(), limit)
+	var beforeID *int64
+	if raw := c.Query("cursor"); raw != "" {
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || id <= 0 {
+			httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidQuery, "Invalid cursor", "expected a job run id")
+			return
+		}
+		beforeID = &id
+	}
+	page, err := h.svc.Jobs(c.Request.Context(), limit, beforeID)
 	if err != nil {
 		httpx.WriteError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": gin.H{"items": jobs}})
+	c.JSON(http.StatusOK, gin.H{"data": page})
 }
 
 // GET /v1/admin/jobs/schedules — intervals for registered worker jobs.
@@ -179,15 +189,25 @@ func (h *AdminHandler) UpdateJobSchedule(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": schedule})
 }
 
-// GET /v1/admin/reports?status=pending&limit= — moderation queue.
+// GET /v1/admin/reports?status=pending&limit=&cursor= — moderation queue,
+// keyset-paginated (cursor = "<unixnano>|<reportId>" from nextCursor).
 func (h *AdminHandler) Reports(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
-	reports, err := h.svc.PendingReports(c.Request.Context(), limit)
+	var after *admin.ReportCursor
+	if raw := c.Query("cursor"); raw != "" {
+		cur, err := admin.ParseReportCursor(raw)
+		if err != nil {
+			httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidQuery, "Invalid cursor", "malformed pagination cursor")
+			return
+		}
+		after = &cur
+	}
+	page, err := h.svc.PendingReports(c.Request.Context(), limit, after)
 	if err != nil {
 		httpx.WriteError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": gin.H{"items": reports}})
+	c.JSON(http.StatusOK, gin.H{"data": page})
 }
 
 type moderateRequest struct {
