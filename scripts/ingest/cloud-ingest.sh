@@ -6,11 +6,13 @@
 #
 # selection: group keys and/or pack slugs from packs.tsv, or "all".
 #
-# Pipeline, one Geofabrik extract at a time:
-#   download extract N+1 in the background  ┐ overlapped
-#   ingest every pack of extract N           ┘
+# Pipeline, extracts ingested in file order:
+#   up to PARALLEL_DOWNLOADS extracts download ahead in the background
+#   ingest every pack of extract N as soon as its download lands
 #   delete extract N's raw .pbf + osmium artifacts
-# so peak disk is ~2 raw extracts and download time hides behind ingest.
+# Geofabrik serves ~1 MB/s per connection from CI runners, so downloads
+# (not ingest) are the bottleneck; a few parallel connections multiply
+# throughput. Peak disk ≈ PARALLEL_DOWNLOADS + 1 raw extracts.
 # The worker itself builds the osmium artifacts and deletes the raw .pbf
 # after Prepare (see INGEST_STRATEGY §2 disk model).
 #
@@ -19,7 +21,8 @@
 # workflow fails the job at the very end, after the dump is uploaded).
 #
 # Env: DATABASE_URL, INGEST_EXTRACT_DIR (required); WORKER (default
-# /tmp/worker); OUT_DIR (default .); GEOFABRIK_BASE (default
+# /tmp/worker); OUT_DIR (default .); PARALLEL_DOWNLOADS (default 3 — keep
+# it small, Geofabrik is a free service); GEOFABRIK_BASE (default
 # https://download.geofabrik.de).
 set -euo pipefail
 
@@ -31,6 +34,8 @@ SELECTION=${*:-all}
 WORKER=${WORKER:-/tmp/worker}
 OUT_DIR=${OUT_DIR:-.}
 GEOFABRIK_BASE=${GEOFABRIK_BASE:-https://download.geofabrik.de}
+PARALLEL_DOWNLOADS=${PARALLEL_DOWNLOADS:-3}
+(( PARALLEL_DOWNLOADS >= 1 )) || PARALLEL_DOWNLOADS=1
 
 mkdir -p "$INGEST_EXTRACT_DIR" "$OUT_DIR"
 SELECTED="$OUT_DIR/selected-packs.tsv"
@@ -85,7 +90,7 @@ mapfile -t EXTRACTS < <(cut -f10 "$SELECTED" | awk '!seen[$0]++')
 pbf_path() { echo "$INGEST_EXTRACT_DIR/$(basename "$1").osm.pbf"; }
 
 fetch() { # fetch <extract> — atomic: .part then rename, validated header
-  local extract=$1 dest part
+  local extract=$1 dest part start=$SECONDS
   dest=$(pbf_path "$extract")
   part="$dest.part"
   [ -s "$dest" ] && return 0
@@ -94,6 +99,7 @@ fetch() { # fetch <extract> — atomic: .part then rename, validated header
   # -F pbf: the .part suffix hides the format from osmium
   osmium fileinfo -F pbf "$part" >/dev/null || { rm -f "$part"; return 1; }
   mv "$part" "$dest"
+  echo "downloaded $extract $(du -m "$dest" | cut -f1) MB in $((SECONDS - start))s"
 }
 
 cleanup_extract() { # raw pbf (if the worker left it) + osmium artifacts
@@ -103,20 +109,22 @@ cleanup_extract() { # raw pbf (if the worker left it) + osmium artifacts
 }
 
 # --------------------------------------------------------------- ingest
-next_pid=""
-fetch "${EXTRACTS[0]}" >"$OUT_DIR/fetch-0.log" 2>&1 &
-next_pid=$!
+declare -A FETCH_PID
+start_fetch() { # start_fetch <index> — no-op past the end
+  local j=$1
+  (( j < ${#EXTRACTS[@]} )) || return 0
+  fetch "${EXTRACTS[$j]}" >"$OUT_DIR/fetch-$j.log" 2>&1 &
+  FETCH_PID[$j]=$!
+}
+for (( j = 0; j < PARALLEL_DOWNLOADS; j++ )); do start_fetch "$j"; done
 
 for i in "${!EXTRACTS[@]}"; do
   extract=${EXTRACTS[$i]}
   fetch_ok=1
-  wait "$next_pid" || fetch_ok=0
-
-  # Prefetch the next extract while this one is ingested.
-  if (( i + 1 < ${#EXTRACTS[@]} )); then
-    fetch "${EXTRACTS[$((i + 1))]}" >"$OUT_DIR/fetch-$((i + 1)).log" 2>&1 &
-    next_pid=$!
-  fi
+  wait "${FETCH_PID[$i]}" || fetch_ok=0
+  # Keep PARALLEL_DOWNLOADS transfers in flight while this one is ingested.
+  start_fetch $((i + PARALLEL_DOWNLOADS))
+  [ -s "$OUT_DIR/fetch-$i.log" ] && log "   $(tail -1 "$OUT_DIR/fetch-$i.log")"
 
   mapfile -t slugs < <(awk -F'\t' -v e="$extract" '$10 == e { print $2 }' "$SELECTED")
   if (( ! fetch_ok )); then

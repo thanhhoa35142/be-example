@@ -13,9 +13,9 @@ name: ingest-cloud
 #   "us au gb"              new markets
 #   "berlin paris sydney"   individual packs
 #   "all"                   everything (~40 packs)
-# Private-repo free tier: ~2000 min/month. Extracts are processed one at a
-# time with the next download overlapped, so wall time ≈ total download +
-# osmium time; per-pack ingest is seconds since the 2026-11-13 planner work.
+# Extracts are ingested in order while up to PARALLEL_DOWNLOADS more
+# download ahead, so wall time ≈ total download / parallelism + osmium
+# time; per-pack ingest is seconds since the 2026-11-13 planner work.
 
 on:
   workflow_dispatch:
@@ -55,6 +55,9 @@ jobs:
       INGEST_SOURCE: osmium
       OUT_DIR: ${{ github.workspace }}/out
       WORKER: /tmp/worker
+      # Geofabrik gives ~1 MB/s per connection to CI runners; downloads are
+      # the bottleneck. Keep this small — it is a free community service.
+      PARALLEL_DOWNLOADS: "3"
       PACKS: ${{ inputs.packs }}
 
     steps:
