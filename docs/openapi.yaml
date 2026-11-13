@@ -389,15 +389,23 @@ paths:
             schema: { $ref: "#/components/schemas/WeeklyDigestRequest" }
       responses:
         "200":
-          description: Saved (merged spot ids resolved to their target)
+          description: Saved (merged spot ids resolved to their target; unknown/inactive ids dropped and listed in skippedIds)
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  data: { $ref: "#/components/schemas/WeeklyDigest" }
+                  data:
+                    allOf:
+                      - $ref: "#/components/schemas/WeeklyDigest"
+                      - type: object
+                        properties:
+                          skippedIds:
+                            type: array
+                            description: Requested ids dropped (unknown/inactive spot); always present on PUT, empty when none
+                            items: { type: string, format: uuid }
         "400":
-          description: invalid_body (bad shape, >20 ids, unknown spot) or invalid_id
+          description: invalid_body (bad shape, non-UUID id, >20 ids, or no known active spot left while enabled) or invalid_id
           content:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }

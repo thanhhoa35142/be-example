@@ -37,45 +37,56 @@ func (s *Service) Delete(ctx context.Context, deviceID uuid.UUID) error {
 }
 
 // Upsert creates/replaces the digest. Plus only. Spot ids are resolved
-// (merged → target), de-duplicated and kept in request order.
-func (s *Service) Upsert(ctx context.Context, deviceID uuid.UUID, spotIDs []uuid.UUID, enabled bool) (*Digest, error) {
+// (merged → target), de-duplicated and kept in request order. Unknown or
+// inactive ids are dropped and returned as skipped (request order, never nil);
+// an enabled digest left with no spots is ErrInvalid.
+func (s *Service) Upsert(ctx context.Context, deviceID uuid.UUID, spotIDs []uuid.UUID, enabled bool) (*Digest, []uuid.UUID, error) {
 	if len(spotIDs) > MaxSpots {
-		return nil, fmt.Errorf("%w: at most %d spotIds", ErrInvalid, MaxSpots)
+		return nil, nil, fmt.Errorf("%w: at most %d spotIds", ErrInvalid, MaxSpots)
 	}
 	if len(spotIDs) == 0 && enabled {
-		return nil, fmt.Errorf("%w: spotIds required when enabled", ErrInvalid)
+		return nil, nil, fmt.Errorf("%w: spotIds required when enabled", ErrInvalid)
 	}
 	ok, err := s.repo.DeviceExists(ctx, deviceID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !ok {
-		return nil, ErrDeviceInvalid
+		return nil, nil, ErrDeviceInvalid
 	}
 	plan, err := s.plans.Plan(ctx, deviceID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if plan != "plus" {
-		return nil, fmt.Errorf("%w: %s plan", ErrPlanLimit, plan)
+		return nil, nil, fmt.Errorf("%w: %s plan", ErrPlanLimit, plan)
 	}
 	resolved, err := s.repo.ResolveSpots(ctx, spotIDs)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	out := make([]uuid.UUID, 0, len(spotIDs))
+	skipped := []uuid.UUID{}
 	seen := make(map[uuid.UUID]bool, len(spotIDs))
 	for _, id := range spotIDs {
 		target, ok := resolved[id]
 		if !ok {
-			return nil, fmt.Errorf("%w: unknown spot %s", ErrInvalid, id)
+			skipped = append(skipped, id)
+			continue
 		}
 		if !seen[target] {
 			seen[target] = true
 			out = append(out, target)
 		}
 	}
-	return s.repo.Upsert(ctx, deviceID, out, enabled)
+	if len(out) == 0 && enabled {
+		return nil, nil, fmt.Errorf("%w: no known spots in spotIds", ErrInvalid)
+	}
+	d, err := s.repo.Upsert(ctx, deviceID, out, enabled)
+	if err != nil {
+		return nil, nil, err
+	}
+	return d, skipped, nil
 }
 
 type scoreKey struct {

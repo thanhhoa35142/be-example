@@ -58,12 +58,14 @@ func (h *DigestHandler) Put(c *gin.Context) {
 		}
 		ids = append(ids, id)
 	}
-	d, err := h.svc.Upsert(c.Request.Context(), deviceID, ids, *req.Enabled)
+	d, skipped, err := h.svc.Upsert(c.Request.Context(), deviceID, ids, *req.Enabled)
 	if err != nil {
 		h.writeError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": digestDTO(d)})
+	dto := digestDTO(d)
+	dto["skippedIds"] = skipped // always an array; empty when nothing was dropped
+	c.JSON(http.StatusOK, gin.H{"data": dto})
 }
 
 // GET /v1/devices/:id/digest

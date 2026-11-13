@@ -202,28 +202,41 @@ func TestUpsertValidation(t *testing.T) {
 	svc := NewService(repo, fakePlans{dev: "plus"}, nil, nil)
 	ctx := context.Background()
 
-	d, err := svc.Upsert(ctx, dev, []uuid.UUID{merged, b, a}, true)
+	d, skipped, err := svc.Upsert(ctx, dev, []uuid.UUID{merged, b, a}, true)
 	if err != nil || len(d.SpotIDs) != 2 || d.SpotIDs[0] != a || d.SpotIDs[1] != b {
 		t.Fatalf("merge resolve/dedup: %v %+v", err, d)
 	}
-	if _, err := svc.Upsert(ctx, dev, []uuid.UUID{uuid.New()}, true); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("unknown id: %v", err)
+	if skipped == nil || len(skipped) != 0 {
+		t.Fatalf("skipped should be empty non-nil, got %#v", skipped)
+	}
+	// Unknown ids are dropped and reported; the rest is kept.
+	gone := uuid.New()
+	d, skipped, err = svc.Upsert(ctx, dev, []uuid.UUID{b, gone, a}, true)
+	if err != nil || len(d.SpotIDs) != 2 || len(skipped) != 1 || skipped[0] != gone {
+		t.Fatalf("skip unknown: %v %+v %v", err, d, skipped)
+	}
+	// All unknown + enabled -> invalid; all unknown + disabled -> ok, empty.
+	if _, _, err := svc.Upsert(ctx, dev, []uuid.UUID{gone}, true); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("all unknown enabled: %v", err)
+	}
+	if d, sk, err := svc.Upsert(ctx, dev, []uuid.UUID{gone}, false); err != nil || len(d.SpotIDs) != 0 || len(sk) != 1 {
+		t.Fatalf("all unknown disabled: %v %+v %v", err, d, sk)
 	}
 	many := make([]uuid.UUID, 21)
 	for i := range many {
 		many[i] = uuid.New()
 	}
-	if _, err := svc.Upsert(ctx, dev, many, true); !errors.Is(err, ErrInvalid) {
+	if _, _, err := svc.Upsert(ctx, dev, many, true); !errors.Is(err, ErrInvalid) {
 		t.Fatalf(">20: %v", err)
 	}
-	if _, err := svc.Upsert(ctx, dev, nil, true); !errors.Is(err, ErrInvalid) {
+	if _, _, err := svc.Upsert(ctx, dev, nil, true); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("empty+enabled: %v", err)
 	}
-	if _, err := svc.Upsert(ctx, dev, nil, false); err != nil {
+	if _, _, err := svc.Upsert(ctx, dev, nil, false); err != nil {
 		t.Fatalf("empty+disabled should be ok: %v", err)
 	}
 	free := NewService(repo, fakePlans{dev: "free"}, nil, nil)
-	if _, err := free.Upsert(ctx, dev, []uuid.UUID{a}, true); !errors.Is(err, ErrPlanLimit) {
+	if _, _, err := free.Upsert(ctx, dev, []uuid.UUID{a}, true); !errors.Is(err, ErrPlanLimit) {
 		t.Fatalf("free: %v", err)
 	}
 }

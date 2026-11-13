@@ -472,14 +472,16 @@ Plus devices can opt into one push per week (default **Thursday 18:00 device-loc
 → `200`
 
 ```json
-{"data":{"spotIds":["<uuid>","<uuid>"],"enabled":true,"sendDow":4,"sendHour":18}}
+{"data":{"spotIds":["<uuid>","<uuid>"],"skippedIds":[],"enabled":true,"sendDow":4,"sendHour":18}}
 ```
 
-- `spotIds`: 1–20 spot UUIDs (an empty list is only accepted with `enabled:false`). Merged spot ids are resolved to their merge target like `GET /v1/spots?ids=`; duplicates collapse; the response carries the resolved ids in request order.
+`skippedIds` appears on the `PUT` response only (not on `GET`) and is **always present**: an array of the requested ids that were dropped because the spot is unknown or inactive (request order, duplicates collapse), `[]` when nothing was dropped. A removed spot therefore never fails the update; the app should drop `skippedIds` from its saved list.
+
+- `spotIds`: 1–20 spot UUIDs (an empty list is only accepted with `enabled:false`; after unknown/inactive ids are dropped the kept list must still be non-empty when `enabled:true`). Merged spot ids are resolved to their merge target like `GET /v1/spots?ids=`; duplicates collapse; the response carries the resolved ids in request order.
 - `sendDow` is `time.Weekday` (0 = Sunday), `sendHour` is device-local 0–23. Both are server-defined for now (4 / 18) and not settable.
 - Re-`PUT` keeps the schedule and the last-sent marker (no double send on edit).
 
-Errors: `invalid_id` (400, bad device UUID), `invalid_body` (400: bad JSON, missing `spotIds`/`enabled`, non-UUID id, more than 20 ids, unknown/inactive spot id, empty `spotIds` while enabled), `plan_limit` (403, Free plan), `not_found` (404, unknown device).
+Errors: `invalid_id` (400, bad device UUID), `invalid_body` (400: bad JSON, missing `spotIds`/`enabled`, non-UUID id, more than 20 ids, empty `spotIds` while enabled, or no known/active spot left while enabled; unknown/inactive ids alone are skipped, not an error), `plan_limit` (403, Free plan), `not_found` (404, unknown device).
 
 ### `GET /v1/devices/{id}/digest`
 

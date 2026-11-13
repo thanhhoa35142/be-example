@@ -86,10 +86,16 @@ func TestDigestHandler(t *testing.T) {
 
 	check(do("GET", p, ""), 404, `"code":"not_found"`)
 	check(do("PUT", p, `{"spotIds":["`+merged.String()+`","`+b.String()+`"],"enabled":true}`), 200,
-		`{"data":{"enabled":true,"sendDow":4,"sendHour":18,"spotIds":["`+a.String()+`","`+b.String()+`"]}}`)
+		`{"data":{"enabled":true,"sendDow":4,"sendHour":18,"skippedIds":[],"spotIds":["`+a.String()+`","`+b.String()+`"]}}`)
 	check(do("GET", p, ""), 200, `"sendHour":18`)
 	check(do("PUT", "/v1/devices/"+free.String()+"/digest", `{"spotIds":["`+a.String()+`"],"enabled":true}`), 403, `"code":"plan_limit"`)
-	check(do("PUT", p, `{"spotIds":["`+uuid.NewString()+`"],"enabled":true}`), 400, `"code":"invalid_body"`)
+	gone := uuid.NewString()
+	// Unknown ids are skipped, not fatal.
+	check(do("PUT", p, `{"spotIds":["`+b.String()+`","`+gone+`"],"enabled":true}`), 200,
+		`"skippedIds":["`+gone+`"],"spotIds":["`+b.String()+`"]`)
+	// Nothing left while enabled stays a 400; disabled is fine.
+	check(do("PUT", p, `{"spotIds":["`+gone+`"],"enabled":true}`), 400, `"code":"invalid_body"`)
+	check(do("PUT", p, `{"spotIds":["`+gone+`"],"enabled":false}`), 200, `"skippedIds":["`+gone+`"],"spotIds":[]`)
 	check(do("PUT", p, `{"spotIds":["nope"],"enabled":true}`), 400, `"code":"invalid_body"`)
 	check(do("PUT", p, `{"enabled":true}`), 400, `"code":"invalid_body"`)
 	check(do("PUT", p, `not json`), 400, `"code":"invalid_body"`)

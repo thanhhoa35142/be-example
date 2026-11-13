@@ -77,7 +77,7 @@ func TestRunWeeklyDB(t *testing.T) {
 	repo := persistence.NewDigestRepo(q)
 	snd := &capture{}
 	svc := digest.NewService(repo, entitlement.NewService(persistence.NewEntitlementRepo(q)), snd, slog.Default())
-	if _, err := svc.Upsert(ctx, dev, []uuid.UUID{spotID}, true); err != nil {
+	if _, _, err := svc.Upsert(ctx, dev, []uuid.UUID{spotID}, true); err != nil {
 		t.Fatal(err)
 	}
 
