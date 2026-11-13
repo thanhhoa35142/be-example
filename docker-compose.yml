@@ -52,13 +52,20 @@ services:
     networks: [pickhour]
 
   worker:
-    build: .
-    image: pickhour-backend:latest
+    # Separate debian target: ships osmium-tool for the OSM ingest.
+    build:
+      context: .
+      target: worker
+    image: pickhour-worker:latest
     container_name: picnic-worker
     command: ["/app/worker"]
     environment:
       RUN_MIGRATIONS: "false"
       DATABASE_URL: postgres://picnic:picnic@db:5432/picnic?sslmode=disable
+      INGEST_SOURCE: osmium
+      INGEST_EXTRACT_DIR: /data/extracts
+    volumes:
+      - extracts:/data/extracts
     depends_on:
       db:
         condition: service_healthy
@@ -88,6 +95,7 @@ services:
 
 volumes:
   picnicdata:
+  extracts:
 
 networks:
   pickhour:

@@ -302,7 +302,7 @@ the known-places list now fully activates.
 | D4 | `curated` lock | Yes — importer never mutates curated/hidden/merged |
 | D5 | Close policy | 2 missing runs; blast-radius guard aborts run; `closed_by_report` is admin-only |
 | D6 | Shade input | Deferred — scoring `s_shade` review pending |
-| D7 | osmium-tool | In worker image via `OSMIUM_CMD` wrapper; prod should bake `osmium-tool` into image |
+| D7 | osmium-tool | Baked into the worker image: `docker build --target worker` (debian bookworm-slim, osmium 1.15; alpine has no package). Image defaults `INGEST_SOURCE=osmium`, `INGEST_EXTRACT_DIR=/data/extracts` (mount a volume). Dev may still use `OSMIUM_CMD` + `pickhour-osmium` |
 | D8 | Packs: country extract + clip | Yes — per-`osm_extract` pbf, per-pack bbox stream filter |
 
 ## 10. Implementation status & verified results (2026-11-12)
@@ -343,8 +343,11 @@ geojsonseq → classify → tx → stats):
   re-ingests run from artifacts; only filter changes or artifact loss
   force a re-download via `EnsureExtract`.
 - Overpass path: relations → centroid only; no golden fixtures on it.
-- Production worker image does not yet ship `osmium-tool` (dev runs it
-  via `pickhour-osmium` docker image + `OSMIUM_CMD`).
+- Worker image (`--target worker`) ships `osmium-tool`; verified
+  2026-11-13 on a copy of the cloud dump: `ingest.osm -pack luxembourg`
+  downloaded + prepared + ingested in 84 s, 0 created / 23 updated, counts
+  unchanged (re-links seeded spots). Extract volume sizing for all packs
+  is still unmeasured (artifacts only, raw `.pbf` is deleted).
 - `ingest.extract.refresh` download path implemented but not exercised
   end-to-end on a schedule yet.
 - Amenity `count` column exists; scoring consumption of amenities/
