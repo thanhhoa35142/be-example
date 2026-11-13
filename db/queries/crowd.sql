@@ -32,3 +32,17 @@ ON CONFLICT (spot_id, dow, hour) DO UPDATE SET
     n_reports  = 0,
     updated_at = EXCLUDED.updated_at
 WHERE t_crowd_estimates.source = 'model';
+
+-- name: ListHolidayCountries :many
+SELECT DISTINCT country::text AS country
+FROM t_city_packs
+WHERE status <> 'retired'
+ORDER BY 1;
+
+-- name: UpsertHolidays :execrows
+-- rows: JSON array of {country, date (YYYY-MM-DD), name}; national public
+-- holidays only (region '').
+INSERT INTO t_holidays (country, region, date, kind, name)
+SELECT e->>'country', '', (e->>'date')::date, 'public', e->>'name'
+FROM jsonb_array_elements(sqlc.arg(rows)::jsonb) AS e
+ON CONFLICT (country, region, date, kind) DO UPDATE SET name = EXCLUDED.name;

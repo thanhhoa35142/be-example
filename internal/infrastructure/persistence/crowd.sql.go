@@ -184,6 +184,33 @@ func (q *Queries) ListCrowdWeather(ctx context.Context, arg ListCrowdWeatherPara
 	return items, nil
 }
 
+const listHolidayCountries = `-- name: ListHolidayCountries :many
+SELECT DISTINCT country::text AS country
+FROM t_city_packs
+WHERE status <> 'retired'
+ORDER BY 1
+`
+
+func (q *Queries) ListHolidayCountries(ctx context.Context) ([]string, error) {
+	rows, err := q.db.Query(ctx, listHolidayCountries)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var country string
+		if err := rows.Scan(&country); err != nil {
+			return nil, err
+		}
+		items = append(items, country)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const upsertCrowdEstimate = `-- name: UpsertCrowdEstimate :exec
 INSERT INTO t_crowd_estimates (spot_id, dow, hour, level, source, n_reports, updated_at)
 VALUES ($1, $2, $3, $4, 'model', 0, now())
@@ -210,4 +237,21 @@ func (q *Queries) UpsertCrowdEstimate(ctx context.Context, arg UpsertCrowdEstima
 		arg.Level,
 	)
 	return err
+}
+
+const upsertHolidays = `-- name: UpsertHolidays :execrows
+INSERT INTO t_holidays (country, region, date, kind, name)
+SELECT e->>'country', '', (e->>'date')::date, 'public', e->>'name'
+FROM jsonb_array_elements($1::jsonb) AS e
+ON CONFLICT (country, region, date, kind) DO UPDATE SET name = EXCLUDED.name
+`
+
+// rows: JSON array of {country, date (YYYY-MM-DD), name}; national public
+// holidays only (region ”).
+func (q *Queries) UpsertHolidays(ctx context.Context, rows []byte) (int64, error) {
+	result, err := q.db.Exec(ctx, upsertHolidays, rows)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

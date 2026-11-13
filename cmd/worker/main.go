@@ -20,6 +20,7 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/modules/crowd"
 	"github.com/thanhhoa35142/be-example/internal/modules/entitlement"
 	"github.com/thanhhoa35142/be-example/internal/modules/geo"
+	"github.com/thanhhoa35142/be-example/internal/modules/holidays"
 	"github.com/thanhhoa35142/be-example/internal/modules/ingest"
 	"github.com/thanhhoa35142/be-example/internal/modules/ingest/osm"
 	"github.com/thanhhoa35142/be-example/internal/modules/notifier"
@@ -120,6 +121,7 @@ func main() {
 	}
 	weatherSvc := weather.NewService(persistence.NewWeatherRepo(queries), weatherProvider, cfg.WeatherDailyLimit)
 	crowdSvc := crowd.NewService(persistence.NewCrowdRepo(queries))
+	holidaysSvc := holidays.NewService(persistence.NewHolidaysRepo(queries))
 	adminSvc := admin.NewService(persistence.NewAdminRepo(queries))
 	entitlementSvc := entitlement.NewService(persistence.NewEntitlementRepo(queries))
 	alertsRepo := persistence.NewAlertsRepo(queries)
@@ -274,6 +276,27 @@ func main() {
 					return err
 				}
 				logger.Info("weather done", "provider", weatherProvider.Name(), "cells", stats.Cells, "rows", stats.Fetched, "failed", stats.Failed)
+				return nil
+			},
+		},
+		{
+			// Weekly, offline (rickar/cal): must have run before the next
+			// crowd.refresh to be seen, so it goes ahead of it.
+			name:         "holidays.refresh",
+			initialDelay: 6 * time.Minute,
+			fn: func(ctx context.Context) error {
+				stats, err := holidaysSvc.Refresh(ctx, time.Now())
+				if bag, ok := ctx.Value(jobStatsKey{}).(*jobStatsBag); ok {
+					bag.set("countries", stats.Countries)
+					bag.set("years", stats.Years)
+					bag.set("rows_upserted", stats.Rows)
+					bag.set("uncovered_countries", stats.Uncovered)
+					bag.set("per_country", stats.PerCountry)
+				}
+				if err != nil {
+					return err
+				}
+				logger.Info("holidays done", "countries", stats.Countries, "rows", stats.Rows, "uncovered", stats.Uncovered)
 				return nil
 			},
 		},

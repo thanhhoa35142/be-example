@@ -2,12 +2,14 @@ package persistence
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/thanhhoa35142/be-example/internal/modules/crowd"
+	"github.com/thanhhoa35142/be-example/internal/modules/holidays"
 )
 
 type CrowdRepo struct {
@@ -137,4 +139,30 @@ func (r *CrowdRepo) UpsertCommunity(ctx context.Context, spotID uuid.UUID, dow, 
 
 func (r *CrowdRepo) DeleteStaleCommunity(ctx context.Context) error {
 	return r.q.DeleteStaleCommunityEstimates(ctx)
+}
+
+// HolidaysRepo implements holidays.Repository.
+type HolidaysRepo struct{ q *Queries }
+
+func NewHolidaysRepo(q *Queries) *HolidaysRepo { return &HolidaysRepo{q: q} }
+
+func (r *HolidaysRepo) Countries(ctx context.Context) ([]string, error) {
+	return r.q.ListHolidayCountries(ctx)
+}
+
+func (r *HolidaysRepo) Upsert(ctx context.Context, rows []holidays.Row) (int64, error) {
+	type jsonRow struct {
+		Country string `json:"country"`
+		Date    string `json:"date"`
+		Name    string `json:"name"`
+	}
+	payload := make([]jsonRow, len(rows))
+	for i, row := range rows {
+		payload[i] = jsonRow{row.Country, row.Date.Format("2006-01-02"), row.Name}
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return 0, err
+	}
+	return r.q.UpsertHolidays(ctx, raw)
 }

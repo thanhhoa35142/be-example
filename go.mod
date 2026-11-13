@@ -9,6 +9,7 @@ require (
 	github.com/jackc/pgx/v5 v5.12.0
 	github.com/joho/godotenv v1.5.1
 	github.com/modelcontextprotocol/go-sdk v1.7.0
+	github.com/rickar/cal/v2 v2.1.33
 	github.com/uber/h3-go/v4 v4.5.0
 	golang.org/x/sync v0.22.0
 	golang.org/x/time v0.15.0
