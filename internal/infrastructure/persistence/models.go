@@ -170,6 +170,22 @@ type TIngestFeature struct {
 	SeenAt        time.Time   `json:"seen_at"`
 }
 
+type TIngestStaging struct {
+	PackID        uuid.UUID   `json:"pack_id"`
+	Source        string      `json:"source"`
+	SourceID      string      `json:"source_id"`
+	Role          string      `json:"role"`
+	Kind          pgtype.Text `json:"kind"`
+	Amenity       pgtype.Text `json:"amenity"`
+	Quality       pgtype.Int2 `json:"quality"`
+	ExcludeReason pgtype.Text `json:"exclude_reason"`
+	Version       pgtype.Int4 `json:"version"`
+	Tags          string      `json:"tags"`
+	Geojson       string      `json:"geojson"`
+	ContentHash   string      `json:"content_hash"`
+	RunID         pgtype.Int8 `json:"run_id"`
+}
+
 type TJobRun struct {
 	ID           int64              `json:"id"`
 	Job          string             `json:"job"`
@@ -326,4 +342,16 @@ type TWorkerJobSchedule struct {
 	Enabled         bool      `json:"enabled"`
 	OffsetSeconds   int32     `json:"offset_seconds"`
 	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+type TmpAreaID struct {
+	Source string      `json:"source"`
+	AID    string      `json:"a_id"`
+	ASpot  uuid.UUID   `json:"a_spot"`
+	NormID interface{} `json:"norm_id"`
+}
+
+type TmpDupSpot struct {
+	Twin uuid.UUID `json:"twin"`
+	Keep uuid.UUID `json:"keep"`
 }

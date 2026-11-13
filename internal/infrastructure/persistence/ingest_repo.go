@@ -2,7 +2,6 @@ package persistence
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -119,25 +118,44 @@ func NewIngestStoreTx(tx pgx.Tx, packID uuid.UUID) ingest.Store {
 }
 
 func (s *ingestStore) ClearRaw(ctx context.Context) error {
+	if err := s.q.ClearIngestStaging(ctx, s.packID); err != nil {
+		return err
+	}
 	return s.q.ClearIngestFeatures(ctx, s.packID)
 }
 
-func (s *ingestStore) InsertRaw(ctx context.Context, r ingest.RawRow) error {
-	return s.q.InsertIngestFeature(ctx, InsertIngestFeatureParams{
-		PackID:            s.packID,
-		Source:            r.Source,
-		SourceID:          r.SourceID,
-		Role:              r.Role,
-		Kind:              textOrNull(r.Kind),
-		Amenity:           textOrNull(r.Amenity),
-		Quality:           int2OrNull(r.Quality),
-		ExcludeReason:     textOrNull(r.ExcludeReason),
-		Version:           int4OrNull(r.Version),
-		Column10:          r.TagsJSON,
-		StGeomfromgeojson: string(r.GeoJSON),
-		ContentHash:       r.ContentHash,
-		RunID:             int8OrNull(r.RunID),
-	})
+// CopyRaw COPYs one batch of raw rows into t_ingest_staging.
+func (s *ingestStore) CopyRaw(ctx context.Context, rows []ingest.RawRow) error {
+	params := make([]CopyIngestStagingParams, len(rows))
+	for i, r := range rows {
+		params[i] = CopyIngestStagingParams{
+			PackID:        s.packID,
+			Source:        r.Source,
+			SourceID:      r.SourceID,
+			Role:          r.Role,
+			Kind:          textOrNull(r.Kind),
+			Amenity:       textOrNull(r.Amenity),
+			Quality:       int2OrNull(r.Quality),
+			ExcludeReason: textOrNull(r.ExcludeReason),
+			Version:       int4OrNull(r.Version),
+			Tags:          string(r.TagsJSON),
+			Geojson:       string(r.GeoJSON),
+			ContentHash:   r.ContentHash,
+			RunID:         int8OrNull(r.RunID),
+		}
+	}
+	_, err := s.q.CopyIngestStaging(ctx, params)
+	return err
+}
+
+// MergeRaw moves staged rows into the raw layer (one row per source id,
+// highest-dimension geometry wins) and empties the staging slice.
+func (s *ingestStore) MergeRaw(ctx context.Context) (int64, error) {
+	n, err := s.q.MergeIngestStaging(ctx, s.packID)
+	if err != nil {
+		return 0, err
+	}
+	return n, s.q.ClearIngestStaging(ctx, s.packID)
 }
 
 func (s *ingestStore) Candidates(ctx context.Context) ([]ingest.CandidateRow, error) {
@@ -222,22 +240,6 @@ func (s *ingestStore) OrphanTableClusters(ctx context.Context, epsMerc float64, 
 	return out, nil
 }
 
-func (s *ingestStore) Amenities(ctx context.Context) ([]ingest.AmenityRow, error) {
-	rows, err := s.q.ListAmenityFeatures(ctx, s.packID)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]ingest.AmenityRow, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, ingest.AmenityRow{
-			Amenity: r.Amenity.String,
-			Lon:     f64(r.Lon),
-			Lat:     f64(r.Lat),
-		})
-	}
-	return out, nil
-}
-
 func spotRowFrom(r ListPackSpotsRow) ingest.SpotRow {
 	return ingest.SpotRow{
 		ID:           r.ID,
@@ -306,22 +308,24 @@ func (s *ingestStore) SpotsNear(ctx context.Context, lon, lat, radiusM float64) 
 	return out, nil
 }
 
-func (s *ingestStore) SpotBySource(ctx context.Context, source, sourceID string) (ingest.SourceLink, error) {
-	row, err := s.q.FindSpotBySource(ctx, FindSpotBySourceParams{Source: source, SourceID: sourceID})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return ingest.SourceLink{}, nil
-	}
+// SourceLinks preloads provenance for the planner in one query.
+func (s *ingestStore) SourceLinks(ctx context.Context) (map[[2]string]ingest.SourceLink, error) {
+	rows, err := s.q.ListPackSourceLinks(ctx, s.packID)
 	if err != nil {
-		return ingest.SourceLink{}, err
+		return nil, err
 	}
-	return ingest.SourceLink{
-		SpotID:      row.SpotID,
-		PackID:      row.CityPackID,
-		Version:     int(row.Version.Int32),
-		Via:         row.Via,
-		ContentHash: strOf(row.ContentHash),
-		Found:       true,
-	}, nil
+	out := make(map[[2]string]ingest.SourceLink, len(rows))
+	for _, r := range rows {
+		out[[2]string{r.Source, r.SourceID}] = ingest.SourceLink{
+			SpotID:      r.SpotID,
+			PackID:      r.CityPackID,
+			Version:     int(r.Version.Int32),
+			Via:         r.Via,
+			ContentHash: r.ContentHash.String,
+			Found:       true,
+		}
+	}
+	return out, nil
 }
 
 func (s *ingestStore) cellID(lat, lon float64) int64 {
@@ -356,6 +360,10 @@ func (s *ingestStore) InsertSpot(ctx context.Context, ns ingest.NewSpot) (uuid.U
 }
 
 func (s *ingestStore) UpdateSpot(ctx context.Context, id uuid.UUID, ns ingest.NewSpot) error {
+	cell := ns.CellID
+	if cell == 0 {
+		cell = s.cellID(ns.Lat, ns.Lon)
+	}
 	var area pgtype.Text
 	if ns.AreaGeoJSON != nil {
 		area = pgtype.Text{String: *ns.AreaGeoJSON, Valid: true}
@@ -369,6 +377,7 @@ func (s *ingestStore) UpdateSpot(ctx context.Context, id uuid.UUID, ns ingest.Ne
 		StMakepoint:   ns.Lon,
 		StMakepoint_2: ns.Lat,
 		Area:          area,
+		CellID:        cell,
 	})
 }
 
@@ -380,15 +389,24 @@ func (s *ingestStore) SetStatus(ctx context.Context, id uuid.UUID, status, reaso
 	})
 }
 
-func (s *ingestStore) UpsertSource(ctx context.Context, spotID uuid.UUID, source, sourceID string, version int, via, contentHash string) error {
-	return s.q.UpsertSpotSource(ctx, UpsertSpotSourceParams{
-		SpotID:      spotID,
-		Source:      source,
-		SourceID:    sourceID,
-		Version:     int4OrNull(version),
-		Via:         via,
-		ContentHash: pgtype.Text{String: contentHash, Valid: contentHash != ""},
-	})
+// UpsertSources writes all queued provenance links in one statement.
+func (s *ingestStore) UpsertSources(ctx context.Context, ups []ingest.SourceUpsert) error {
+	if len(ups) == 0 {
+		return nil
+	}
+	p := UpsertSpotSourcesParams{
+		SpotIds:       make([]uuid.UUID, len(ups)),
+		Sources:       make([]string, len(ups)),
+		SourceIds:     make([]string, len(ups)),
+		Versions:      make([]int32, len(ups)),
+		Vias:          make([]string, len(ups)),
+		ContentHashes: make([]string, len(ups)),
+	}
+	for i, u := range ups {
+		p.SpotIds[i], p.Sources[i], p.SourceIds[i] = u.SpotID, u.Source, u.SourceID
+		p.Versions[i], p.Vias[i], p.ContentHashes[i] = int32(u.Version), u.Via, u.ContentHash
+	}
+	return s.q.UpsertSpotSources(ctx, p)
 }
 
 func (s *ingestStore) ResetSightings(ctx context.Context) error {
@@ -438,29 +456,12 @@ func (s *ingestStore) ClearAmenities(ctx context.Context) error {
 	return s.q.ClearPackAmenities(ctx, s.packID)
 }
 
-// AssignAmenity links one amenity feature to the nearest active spot whose
-// area contains it within radiusM meters; no-op when nothing is near.
-func (s *ingestStore) AssignAmenity(ctx context.Context, lat, lon float64, amenity string, radiusM float64) error {
-	row, err := s.q.NearestSpotForPoint(ctx, NearestSpotForPointParams{
-		StMakepoint:   lon,
-		StMakepoint_2: lat,
-		CityPackID:    s.packID,
-		StDwithin:     radiusM,
-	})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	dist := int16(f64(row.DistM) + 0.5)
-	if dist < 0 {
-		dist = 0
-	}
-	return s.q.UpsertSpotAmenity(ctx, UpsertSpotAmenityParams{
-		SpotID:    row.ID,
-		Type:      amenity,
-		DistanceM: dist,
+// AssignAmenities attaches all of the pack's amenity features set-based.
+func (s *ingestStore) AssignAmenities(ctx context.Context, radiusDeg, radiusM float64) (int64, error) {
+	return s.q.AssignPackAmenities(ctx, AssignPackAmenitiesParams{
+		PackID:    s.packID,
+		RadiusDeg: radiusDeg,
+		RadiusM:   radiusM,
 	})
 }
 

@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -87,7 +88,9 @@ func (s *OsmiumSource) workDir() string {
 }
 
 // pbfFor resolves the extract file for a pack: the explicit PBFPath when
-// set, otherwise <WorkDir>/<basename(OSMExtract)>.osm.pbf.
+// set, otherwise <WorkDir>/<basename(OSMExtract)>.osm.pbf. The file may be
+// absent (deleted after Prepare for disk hygiene) — the cached artifacts
+// are then used as-is.
 func (s *OsmiumSource) pbfFor(p Pack) (string, error) {
 	if s.PBFPath != "" {
 		return s.PBFPath, nil
@@ -95,11 +98,58 @@ func (s *OsmiumSource) pbfFor(p Pack) (string, error) {
 	if p.OSMExtract == "" {
 		return "", fmt.Errorf("pack %s has no osm_extract", p.Slug)
 	}
-	pbf := filepath.Join(s.workDir(), path.Base(p.OSMExtract)+".osm.pbf")
-	if _, err := os.Stat(pbf); err != nil {
-		return "", fmt.Errorf("extract %q not found at %s (set OSMIUM_PBF or download it)", p.OSMExtract, pbf)
+	return s.pbfForExtract(p.OSMExtract), nil
+}
+
+func (s *OsmiumSource) pbfForExtract(extract string) string {
+	return filepath.Join(s.workDir(), path.Base(extract)+".osm.pbf")
+}
+
+// artifactNames returns the cached filtered-pbf and export file paths for a
+// raw extract path (artifacts are named after the current filter set).
+func (s *OsmiumSource) artifactNames(pbf string) (filtered, export string) {
+	base := strings.TrimSuffix(filepath.Base(pbf), ".osm.pbf")
+	fv := filterVersion()
+	wd := s.workDir()
+	return filepath.Join(wd, base+".f"+fv+".filtered.osm.pbf"),
+		filepath.Join(wd, base+".f"+fv+".export.geojsonseq")
+}
+
+// ArtifactsReady reports whether the extract's osmium export is cached and
+// not older than the raw .pbf (when the raw file is still on disk). When
+// true, Open needs neither the raw file nor osmium.
+func (s *OsmiumSource) ArtifactsReady(extract string) bool {
+	pbf := s.pbfForExtract(extract)
+	filtered, export := s.artifactNames(pbf)
+	fst, err1 := os.Stat(filtered)
+	est, err2 := os.Stat(export)
+	if err1 != nil || err2 != nil || est.Size() == 0 {
+		return false
 	}
-	return pbf, nil
+	if pst, err := os.Stat(pbf); err == nil {
+		return !fst.ModTime().Before(pst.ModTime()) && !est.ModTime().Before(fst.ModTime())
+	}
+	return true
+}
+
+// Prepare builds (or refreshes) the cached artifacts for one extract and
+// removes artifacts of older filter versions. Callers delete the raw .pbf
+// afterwards, so peak disk is ONE raw extract plus artifacts instead of all
+// raw extracts at once.
+func (s *OsmiumSource) Prepare(ctx context.Context, extract string) error {
+	pbf := s.pbfForExtract(extract)
+	if _, _, err := s.ensureArtifacts(ctx, pbf); err != nil {
+		return err
+	}
+	base := strings.TrimSuffix(filepath.Base(pbf), ".osm.pbf")
+	keepF, keepE := s.artifactNames(pbf)
+	stale, _ := filepath.Glob(filepath.Join(s.workDir(), base+".f*"))
+	for _, f := range stale {
+		if f != keepF && f != keepE {
+			_ = os.Remove(f)
+		}
+	}
+	return nil
 }
 
 // relPath converts an absolute path inside workDir to a relative one so it
@@ -137,12 +187,14 @@ func filterVersion() string {
 // (so a refreshed .pbf invalidates downstream artifacts). osmium writes to
 // "<name>.tmp" and the file is renamed into place only on success, so a
 // killed run never poisons the cache with a truncated artifact.
-func (s *OsmiumSource) ensureArtifact(ctx context.Context, name, inPath string, args func(outRel, inRel string) []string) (string, error) {
-	out := filepath.Join(s.workDir(), name)
+func (s *OsmiumSource) ensureArtifact(ctx context.Context, out, inPath string, args func(outRel, inRel string) []string) (string, error) {
 	if st, err := os.Stat(out); err == nil && st.Size() > 0 {
 		if inSt, ierr := os.Stat(inPath); ierr != nil || !st.ModTime().Before(inSt.ModTime()) {
 			return out, nil
 		}
+	}
+	if _, err := os.Stat(inPath); err != nil {
+		return "", fmt.Errorf("osmium input %s missing and no cached %s (download the extract first)", inPath, filepath.Base(out))
 	}
 	tmp := out + ".tmp"
 	_ = os.Remove(tmp)
@@ -163,54 +215,69 @@ type osmiumFeature struct {
 	Properties map[string]string `json:"properties"`
 }
 
-// geoBBox computes the lon/lat extent of a GeoJSON geometry.
-func geoBBox(g json.RawMessage) (west, south, east, north float64, ok bool) {
-	var v struct {
-		Coordinates json.RawMessage `json:"coordinates"`
-	}
-	if err := json.Unmarshal(g, &v); err != nil {
+// coordinatesKey locates the GeoJSON coordinates array.
+var coordinatesKey = []byte(`"coordinates"`)
+
+// geoBBox computes the lon/lat extent of the first GeoJSON "coordinates"
+// array in b (a geometry object, or a whole osmium feature line — osmium
+// writes geometry before properties). It scans bytes directly instead of
+// unmarshalling into []interface{}: the stream filter runs on every line
+// of a country export and ~90% of lines are outside the pack.
+func geoBBox(b []byte) (west, south, east, north float64, ok bool) {
+	k := bytes.Index(b, coordinatesKey)
+	if k < 0 {
 		return 0, 0, 0, 0, false
 	}
+	b = b[k+len(coordinatesKey):]
+	start := bytes.IndexByte(b, '[')
+	if start < 0 || len(bytes.TrimSpace(bytes.TrimPrefix(bytes.TrimSpace(b[:start]), []byte(":")))) != 0 {
+		return 0, 0, 0, 0, false // key not followed by an array
+	}
+	b = b[start:]
 	west, south, east, north = 180, 90, -180, -90
-	var walk func(x interface{})
-	walk = func(x interface{}) {
-		switch t := x.(type) {
-		case []interface{}:
-			if len(t) == 2 {
-				if lon, ok1 := t[0].(float64); ok1 {
-					if lat, ok2 := t[1].(float64); ok2 {
-						if lon < west {
-							west = lon
-						}
-						if lon > east {
-							east = lon
-						}
-						if lat < south {
-							south = lat
-						}
-						if lat > north {
-							north = lat
-						}
-					}
-				}
-				return
+	depth, idx, pairs := 0, 0, 0
+	var lon float64
+	for i := 0; i < len(b); i++ {
+		switch c := b[i]; {
+		case c == '[':
+			depth++
+			idx = 0
+		case c == ']':
+			depth--
+			if depth == 0 {
+				return west, south, east, north, pairs > 0
 			}
-			for _, e := range t {
-				walk(e)
+		case c == '-' || (c >= '0' && c <= '9'):
+			j := i + 1
+			for j < len(b) && (b[j] == '.' || b[j] == 'e' || b[j] == 'E' || b[j] == '-' || b[j] == '+' || (b[j] >= '0' && b[j] <= '9')) {
+				j++
+			}
+			v, err := strconv.ParseFloat(string(b[i:j]), 64)
+			if err != nil {
+				return 0, 0, 0, 0, false
+			}
+			switch idx {
+			case 0:
+				lon = v
+			case 1:
+				west, east = min(west, lon), max(east, lon)
+				south, north = min(south, v), max(north, v)
+				pairs++
+			}
+			idx++
+			i = j - 1
+		case c == ':' || c == '{' || c == '}':
+			if depth == 0 {
+				return 0, 0, 0, 0, false // malformed: key without array
 			}
 		}
 	}
-	var coords interface{}
-	if err := json.Unmarshal(v.Coordinates, &coords); err != nil {
-		return 0, 0, 0, 0, false
-	}
-	walk(coords)
-	return west, south, east, north, true
+	return 0, 0, 0, 0, false
 }
 
 // intersectsPack reports whether the geometry bbox overlaps the pack
 // bounds (with a small margin for boundary-straddling features).
-func intersectsPack(g json.RawMessage, b Bounds) bool {
+func intersectsPack(g []byte, b Bounds) bool {
 	const margin = 0.01 // ~1km — keeps straddlers, drops clearly-outside
 	w, s, e, n, ok := geoBBox(g)
 	if !ok {
@@ -250,6 +317,16 @@ func (s *osmiumSnapshot) Features() iter.Seq2[RawFeature, error] {
 			if len(raw) > 0 {
 				// geojsonseq prefixes every record with RS (0x1E).
 				raw = bytes.TrimLeft(raw, "\x1e\n\r ")
+				// Cheap byte-level bbox reject first; only lines that can
+				// belong to the pack pay for a full JSON decode. Lines the
+				// scanner cannot read fall through to the decoder (which
+				// counts real parse errors).
+				if len(raw) > 0 && !intersectsPack(raw, s.pack) {
+					if err != nil {
+						return
+					}
+					continue
+				}
 				var feat osmiumFeature
 				if jerr := json.Unmarshal(raw, &feat); jerr != nil {
 					s.parseErrors++
@@ -263,7 +340,7 @@ func (s *osmiumSnapshot) Features() iter.Seq2[RawFeature, error] {
 					}
 					if !yield(RawFeature{
 						Source:   "osm",
-						SourceID: feat.ID,
+						SourceID: NormalizeOsmiumID(feat.ID),
 						Version:  0, // geojsonseq has no version; content_hash covers change detection
 						Tags:     tags,
 						GeoJSON:  feat.Geometry,
@@ -279,6 +356,23 @@ func (s *osmiumSnapshot) Features() iter.Seq2[RawFeature, error] {
 	}
 }
 
+// NormalizeOsmiumID maps osmium's area ids back to the OSM object id so
+// identities match Overpass ("w<id>"/"r<id>") and the LineString twin of a
+// closed way: "a<2n>" → "w<n>", "a<2n+1>" → "r<n>". Other ids pass through.
+func NormalizeOsmiumID(id string) string {
+	if len(id) < 2 || id[0] != 'a' {
+		return id
+	}
+	n, err := strconv.ParseInt(id[1:], 10, 64)
+	if err != nil || n < 0 {
+		return id
+	}
+	if n%2 == 0 {
+		return "w" + strconv.FormatInt(n/2, 10)
+	}
+	return "r" + strconv.FormatInt((n-1)/2, 10)
+}
+
 // Open ensures the filtered pbf + geojsonseq export exist, then returns a
 // snapshot streaming the export file for this pack's bounds.
 func (s *OsmiumSource) Open(ctx context.Context, p Pack) (Snapshot, error) {
@@ -286,24 +380,7 @@ func (s *OsmiumSource) Open(ctx context.Context, p Pack) (Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	base := strings.TrimSuffix(filepath.Base(pbf), ".osm.pbf")
-	fv := filterVersion()
-	filtered, err := s.ensureArtifact(ctx, base+".f"+fv+".filtered.osm.pbf", pbf, func(out, in string) []string {
-		// -f pbf is required: the .tmp suffix hides the format from osmium.
-		args := []string{"tags-filter", "-f", "pbf", "-o", out, "--overwrite", in}
-		return append(args, filterExpressions...)
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	exportPath, err := s.ensureArtifact(ctx, base+".f"+fv+".export.geojsonseq", filtered, func(out, in string) []string {
-		// "polygon" covers Polygon and MultiPolygon; osmium rejects the
-		// multi* names in --geometry-types.
-		return []string{"export", "-f", "geojsonseq", "-u", "type_id",
-			"--geometry-types=point,linestring,polygon",
-			"-o", out, in, "--overwrite"}
-	})
+	_, exportPath, err := s.ensureArtifacts(ctx, pbf)
 	if err != nil {
 		return nil, err
 	}
@@ -318,6 +395,28 @@ func (s *OsmiumSource) Open(ctx context.Context, p Pack) (Snapshot, error) {
 		file:   f,
 		reader: bufio.NewReaderSize(f, 1<<20),
 	}, nil
+}
+
+// ensureArtifacts runs tags-filter + export for one raw extract (cached).
+func (s *OsmiumSource) ensureArtifacts(ctx context.Context, pbf string) (filtered, exportPath string, err error) {
+	filteredName, exportName := s.artifactNames(pbf)
+	filtered, err = s.ensureArtifact(ctx, filteredName, pbf, func(out, in string) []string {
+		// -f pbf is required: the .tmp suffix hides the format from osmium.
+		args := []string{"tags-filter", "-f", "pbf", "-o", out, "--overwrite", in}
+		return append(args, filterExpressions...)
+	})
+	if err != nil {
+		return "", "", err
+	}
+
+	exportPath, err = s.ensureArtifact(ctx, exportName, filtered, func(out, in string) []string {
+		// "polygon" covers Polygon and MultiPolygon; osmium rejects the
+		// multi* names in --geometry-types.
+		return []string{"export", "-f", "geojsonseq", "-u", "type_id",
+			"--geometry-types=point,linestring,polygon",
+			"-o", out, in, "--overwrite"}
+	})
+	return filtered, exportPath, err
 }
 
 func tail(b []byte, n int) string {

@@ -12,38 +12,60 @@ FROM t_city_packs WHERE id = $1;
 -- name: ClearIngestFeatures :exec
 DELETE FROM t_ingest_features WHERE pack_id = $1;
 
--- name: InsertIngestFeature :exec
+-- name: CopyIngestStaging :copyfrom
+-- Raw layer bulk load (COPY). Rows are merged into t_ingest_features by
+-- MergeIngestStaging inside the same tx.
+INSERT INTO t_ingest_staging
+    (pack_id, source, source_id, role, kind, amenity, quality,
+     exclude_reason, version, tags, geojson, content_hash, run_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13);
+
+-- name: MergeIngestStaging :execrows
+-- Parses staged rows set-based and keeps ONE row per (source, source_id):
+-- osmium exports a closed way both as LineString and as (Multi)Polygon —
+-- the higher-dimension geometry wins.
 INSERT INTO t_ingest_features
     (pack_id, source, source_id, role, kind, amenity, quality,
      exclude_reason, version, tags, geom, content_hash, run_id)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
-        $10::jsonb, ST_GeomFromGeoJSON($11), $12, $13);
+SELECT DISTINCT ON (s.source, s.source_id)
+       s.pack_id, s.source, s.source_id, s.role, s.kind, s.amenity, s.quality,
+       s.exclude_reason, s.version, s.tags::jsonb, s.g, s.content_hash, s.run_id
+FROM (SELECT st.*, ST_GeomFromGeoJSON(st.geojson) AS g
+      FROM t_ingest_staging st WHERE st.pack_id = $1) s
+ORDER BY s.source, s.source_id, ST_Dimension(s.g) DESC;
+
+-- name: ClearIngestStaging :exec
+DELETE FROM t_ingest_staging WHERE pack_id = $1;
 
 -- name: ListCandidateFeatures :many
 SELECT source, source_id, kind, quality, version, tags, content_hash,
        ST_AsGeoJSON(geom) AS geojson,
-       ST_X(ST_Centroid(geom)) AS lon,
-       ST_Y(ST_Centroid(geom)) AS lat,
+       -- Anchor: ST_PointOnSurface stays inside concave areas (beach
+       -- strips, U-shaped parks) where ST_Centroid can fall outside.
+       ST_X(ST_PointOnSurface(geom)) AS lon,
+       ST_Y(ST_PointOnSurface(geom)) AS lat,
        CASE WHEN ST_Dimension(geom) >= 2 THEN ST_AsGeoJSON(geom) END AS polygon_geojson
 FROM t_ingest_features
 WHERE pack_id = $1 AND role = 'candidate'
 ORDER BY source_id;
 
--- name: ListAmenityFeatures :many
-SELECT amenity, source, source_id,
-       ST_X(ST_Centroid(geom)) AS lon,
-       ST_Y(ST_Centroid(geom)) AS lat
-FROM t_ingest_features
-WHERE pack_id = $1 AND role = 'amenity';
-
--- name: FindSpotBySource :one
--- Also returns the owning pack: OSM objects straddling pack boundaries are
--- claimed by whichever pack ingested them first; other packs must skip them
--- (the API serves spots by bbox, so one global spot covers both areas).
-SELECT ss.spot_id, ss.version, ss.via, ss.content_hash, sp.city_pack_id
+-- name: ListPackSourceLinks :many
+-- Planner preload (replaces one FindSpotBySource round-trip per candidate):
+-- every source linked to this pack's spots, plus links of this run's
+-- candidates owned by OTHER packs (boundary straddlers — first owner wins,
+-- the API serves spots by bbox so one global spot covers both areas).
+SELECT ss.source, ss.source_id, ss.spot_id, ss.version, ss.via,
+       ss.content_hash, sp.city_pack_id
 FROM t_spot_sources ss
 JOIN t_spots sp ON sp.id = ss.spot_id
-WHERE ss.source = $1 AND ss.source_id = $2;
+WHERE sp.city_pack_id = $1
+UNION ALL
+SELECT ss.source, ss.source_id, ss.spot_id, ss.version, ss.via,
+       ss.content_hash, sp.city_pack_id
+FROM t_ingest_features f
+JOIN t_spot_sources ss ON ss.source = f.source AND ss.source_id = f.source_id
+JOIN t_spots sp ON sp.id = ss.spot_id
+WHERE f.pack_id = $1 AND f.role = 'candidate' AND sp.city_pack_id <> $1;
 
 -- name: ListAbsorbedCandidates :many
 -- Child candidates (site/table) whose centroid falls inside a park/beach
@@ -135,6 +157,8 @@ UPDATE t_spots SET
     quality = $5, geom = ST_SetSRID(ST_MakePoint($6, $7), 4326)::geography,
     area = CASE WHEN sqlc.narg('area')::text IS NOT NULL
                 THEN ST_Multi(ST_GeomFromGeoJSON(sqlc.narg('area'))) ELSE NULL END,
+    -- cell follows the anchor (weather/crowd lookups are by cell)
+    cell_id = sqlc.arg('cell_id'),
     updated_at = now()
 WHERE id = $1;
 
@@ -142,11 +166,20 @@ WHERE id = $1;
 UPDATE t_spots SET status = $2, status_reason = $3, updated_at = now()
 WHERE id = $1;
 
--- name: UpsertSpotSource :exec
+-- name: UpsertSpotSources :exec
+-- Batched provenance upsert (one statement per run instead of per source).
+-- Caller guarantees (source, source_id) uniqueness within the batch.
 INSERT INTO t_spot_sources (spot_id, source, source_id, version, via,
                             content_hash, imported_at, last_seen_at,
                             missing_runs)
-VALUES ($1, $2, $3, $4, $5, $6, now(), now(), 0)
+SELECT u.spot_id, u.source, u.source_id, NULLIF(u.version, 0), u.via,
+       NULLIF(u.content_hash, ''), now(), now(), 0
+FROM (SELECT unnest(@spot_ids::uuid[])       AS spot_id,
+             unnest(@sources::text[])        AS source,
+             unnest(@source_ids::text[])     AS source_id,
+             unnest(@versions::int[])        AS version,
+             unnest(@vias::text[])           AS via,
+             unnest(@content_hashes::text[]) AS content_hash) u
 ON CONFLICT (source, source_id) DO UPDATE SET
     spot_id = EXCLUDED.spot_id,
     version = EXCLUDED.version,
@@ -182,22 +215,36 @@ SELECT count(*) FROM t_spot_reports
 WHERE spot_id = $1 AND status = 'accepted'
   AND created_at > now() - ($2 || ' days')::interval;
 
--- name: NearestSpotForPoint :one
-SELECT s.id, ST_Distance(s.geom, ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography) AS dist_m
-FROM t_spots s
-WHERE s.city_pack_id = $3 AND s.status = 'active'
-  AND s.area IS NOT NULL
-  AND ST_DWithin(s.area::geography,
-                 ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography, $4)
-ORDER BY dist_m
-LIMIT 1;
-
--- name: UpsertSpotAmenity :exec
+-- name: AssignPackAmenities :execrows
+-- Set-based amenity attachment: every amenity feature goes to the nearest
+-- active/pending spot footprint (area polygon, or anchor point for
+-- point-only spots). Index-friendly: geometry-space prefilter/KNN on
+-- ix_t_spots_footprint_gist (@radius_deg = radius widened by 1/cos(lat)),
+-- exact geography distance only for the single winner per amenity.
+-- Manual (non-osm) rows already present win on conflict.
 INSERT INTO t_spot_amenities (spot_id, type, distance_m, source, count)
-VALUES ($1, $2, $3, 'osm', 1)
-ON CONFLICT (spot_id, type) DO UPDATE SET
-    count = t_spot_amenities.count + 1,
-    distance_m = LEAST(t_spot_amenities.distance_m, EXCLUDED.distance_m);
+SELECT m.spot_id, m.amenity,
+       LEAST(round(min(m.dist)), 32767)::smallint, 'osm',
+       LEAST(count(*), 32767)::smallint
+FROM (
+    SELECT a.amenity, n.id AS spot_id,
+           CASE WHEN ST_Intersects(n.fp, a.g) THEN 0
+                ELSE ST_Distance(n.fp::geography, a.g::geography) END AS dist
+    FROM (SELECT f.amenity, ST_PointOnSurface(f.geom) AS g
+          FROM t_ingest_features f
+          WHERE f.pack_id = @pack_id AND f.role = 'amenity'
+            AND f.amenity IS NOT NULL) a
+    CROSS JOIN LATERAL (
+        SELECT s.id, COALESCE(s.area, s.geom::geometry) AS fp
+        FROM t_spots s
+        WHERE s.city_pack_id = @pack_id AND s.status IN ('active','pending')
+          AND ST_DWithin(COALESCE(s.area, s.geom::geometry), a.g, @radius_deg::float8)
+        ORDER BY COALESCE(s.area, s.geom::geometry) <-> a.g
+        LIMIT 1) n
+) m
+WHERE m.dist <= @radius_m::float8
+GROUP BY m.spot_id, m.amenity
+ON CONFLICT (spot_id, type) DO NOTHING;
 
 -- name: ClearPackAmenities :exec
 DELETE FROM t_spot_amenities a

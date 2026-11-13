@@ -14,8 +14,10 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/thanhhoa35142/be-example/internal/modules/geo"
 	"github.com/thanhhoa35142/be-example/internal/modules/ingest/osm"
 )
 
@@ -37,17 +39,24 @@ type Stats struct {
 	Absorbed         int            `json:"absorbed"`
 	Created          int            `json:"created"`
 	Updated          int            `json:"updated"`
+	Unchanged        int            `json:"unchanged"`
+	DuplicateGeoms   int            `json:"duplicate_geoms,omitempty"` // line+area twins collapsed in the raw merge
 	Activated        int            `json:"activated"`
 	Pending          int            `json:"pending"`
 	BelowFloor       int            `json:"below_floor"`
 	Closed           int            `json:"closed"`
 	HiddenVanished   int            `json:"hidden_vanished"`
-	SkippedCurated   int            `json:"skipped_curated"`
+	SkippedCurated   int            `json:"skipped_curated"` // curated/merged/admin-hidden/closed-by-report: data never touched
 	FallbackMatched  int            `json:"fallback_matched"`
-	AmenitiesLinked  int            `json:"amenities_linked"`
+	AmenitiesLinked  int            `json:"amenities_linked"` // (spot, type) rows written
 	OrphanSites      int            `json:"orphan_sites"`
 	ForeignOwned     int            `json:"foreign_owned"`
 	GuardTripped     bool           `json:"guard_tripped,omitempty"`
+	GuardForced      bool           `json:"guard_forced,omitempty"`
+	// StageMs is wall time per pipeline stage (stream_copy, merge, load,
+	// plan, upsert_sources, lifecycle, amenities) — the first place to look
+	// when a pack gets slow.
+	StageMs map[string]int64 `json:"stage_ms,omitempty"`
 }
 
 // RawRow is one classified feature destined for t_ingest_features.
@@ -87,13 +96,6 @@ type AbsorbedRow struct {
 	SourceID       string
 	ParentSource   string
 	ParentSourceID string
-}
-
-// AmenityRow mirrors ListAmenityFeatures.
-type AmenityRow struct {
-	Amenity string
-	Lon     float64
-	Lat     float64
 }
 
 // TableClusterMember is one orphan table inside a DBSCAN cluster.
@@ -160,36 +162,53 @@ type NewSpot struct {
 	AreaGeoJSON  *string // nil → point-only spot
 	Country      string
 	TZ           string
+	CellID       int64 // geo cell of (Lat, Lon); 0 → store computes it
 	Status       string
 	Quality      int
 	StatusReason string
+}
+
+// SourceUpsert is one queued t_spot_sources write (flushed in one batch).
+type SourceUpsert struct {
+	SpotID      uuid.UUID
+	Source      string
+	SourceID    string
+	Version     int
+	Via         string // "primary" | "absorbed"
+	ContentHash string
 }
 
 // Store is the tx-scoped persistence port the planner writes through.
 // Implemented by internal/infrastructure/persistence.
 type Store interface {
 	ClearRaw(ctx context.Context) error
-	InsertRaw(ctx context.Context, r RawRow) error
+	// CopyRaw bulk-loads a batch of raw rows into staging (COPY).
+	CopyRaw(ctx context.Context, rows []RawRow) error
+	// MergeRaw moves staged rows into the raw layer, keeping one row per
+	// (source, source_id) — the highest-dimension geometry wins — and
+	// returns the number of raw rows kept.
+	MergeRaw(ctx context.Context) (int64, error)
 	Candidates(ctx context.Context) ([]CandidateRow, error)
 	Absorbed(ctx context.Context) ([]AbsorbedRow, error)
 	// OrphanTableClusters returns DBSCAN clusters of table-kind candidates
 	// not absorbed into a park/beach. epsMerc is epsilon in Web Mercator
 	// meters (caller adjusts for latitude); minPts is minpoints.
 	OrphanTableClusters(ctx context.Context, epsMerc float64, minPts int) ([]TableCluster, error)
-	Amenities(ctx context.Context) ([]AmenityRow, error)
 	Spots(ctx context.Context) ([]SpotRow, error)
 	// SpotsNear returns pending/active spots within radiusM meters of
 	// (lon, lat), nearest first — used by the name+proximity fallback when
 	// SpotBySource misses (OSM object remaps).
 	SpotsNear(ctx context.Context, lon, lat, radiusM float64) ([]SpotRow, error)
-	SpotBySource(ctx context.Context, source, sourceID string) (SourceLink, error)
+	// SourceLinks preloads provenance: every source of this pack's spots
+	// plus foreign-owned links of this run's candidates.
+	SourceLinks(ctx context.Context) (map[[2]string]SourceLink, error)
 	InsertSpot(ctx context.Context, s NewSpot) (uuid.UUID, error)
 	UpdateSpot(ctx context.Context, id uuid.UUID, s NewSpot) error
 	SetStatus(ctx context.Context, id uuid.UUID, status, reason string) error
-	// UpsertSource links (source, sourceID) to a spot. via is "primary"
-	// (the candidate that IS the spot) or "absorbed" (child evidence);
-	// only primary sources keep a spot alive in missing-source logic.
-	UpsertSource(ctx context.Context, spotID uuid.UUID, source, sourceID string, version int, via, contentHash string) error
+	// UpsertSources links sources to spots in one statement. via is
+	// "primary" (the candidate that IS the spot) or "absorbed" (child
+	// evidence); only primary sources keep a spot alive.
+	UpsertSources(ctx context.Context, ups []SourceUpsert) error
 	ResetSightings(ctx context.Context) error
 	BumpMissing(ctx context.Context) error
 	MissingActive(ctx context.Context, minMissingRuns int) ([]uuid.UUID, error)
@@ -199,7 +218,9 @@ type Store interface {
 	Sourceless(ctx context.Context) ([]SourcelessSpot, error)
 	RecentConfirm(ctx context.Context, spotID uuid.UUID, days int) (bool, error)
 	ClearAmenities(ctx context.Context) error
-	AssignAmenity(ctx context.Context, lat, lon float64, amenity string, radiusM float64) error
+	// AssignAmenities attaches every amenity feature to its nearest
+	// active/pending spot footprint (set-based); returns rows written.
+	AssignAmenities(ctx context.Context, radiusDeg, radiusM float64) (int64, error)
 	TouchImport(ctx context.Context) error
 	// NotifyIngestDone emits pg_notify('pickhour_ingest') inside the tx —
 	// delivered only on commit, so dry-runs and rollbacks stay silent.
@@ -227,7 +248,13 @@ type Service struct {
 	// AmenityRadiusM bounds how far an amenity feature may sit from a spot
 	// anchor/area and still count (PostGIS does the real distance check).
 	AmenityRadiusM float64
+	// ForceGuard lets an operator push through a run the blast-radius guard
+	// would abort (e.g. a real mass removal confirmed by hand).
+	ForceGuard bool
 }
+
+// rawBatchSize bounds the in-memory COPY buffer while streaming features.
+const rawBatchSize = 5000
 
 func (s *Service) policy() osm.Policy {
 	if s.Pol == (osm.Policy{}) {
@@ -260,6 +287,12 @@ func contentHash(c osm.Classified, f osm.RawFeature) string {
 
 // RunPack executes the full pipeline for one pack inside a single
 // transaction. The heavy FeatureSource I/O happens before the tx opens.
+//
+// Round-trips are bounded: the raw layer is COPY'd in batches, provenance
+// is preloaded once, source links are flushed in one batched upsert, and
+// amenities are assigned set-based. Only spot inserts, real spot updates
+// (unchanged spots are skipped) and the name+proximity fallback for
+// unmatched candidates remain per-row.
 func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRun bool) (Stats, error) {
 	var st Stats
 	snap, err := s.Src.Open(ctx, pack)
@@ -268,40 +301,64 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 	}
 	defer snap.Close()
 
+	st.StageMs = map[string]int64{}
+	stageStart := time.Now()
+	mark := func(stage string) {
+		now := time.Now()
+		st.StageMs[stage] = now.Sub(stageStart).Milliseconds()
+		stageStart = now
+	}
 	err = s.Store.WithTx(ctx, pack.ID, dryRun, func(store Store) error {
 		if err := store.ClearRaw(ctx); err != nil {
 			return err
 		}
-		// Stage 1: stream → classify → raw layer (inserted inline so the
-		// feature buffer never materializes in memory).
+		// Stage 1: stream → classify → COPY into staging in bounded batches
+		// (the feature set never materializes in memory) → set-based merge.
 		clf := s.classifier()
+		batch := make([]RawRow, 0, rawBatchSize)
+		flush := func() error {
+			if len(batch) == 0 {
+				return nil
+			}
+			err := store.CopyRaw(ctx, batch)
+			batch = batch[:0]
+			return err
+		}
 		for f, err := range snap.Features() {
 			if err != nil {
 				return fmt.Errorf("feature stream: %w", err)
 			}
 			st.FeaturesRead++
 			c := clf.Classify(f)
-			switch c.Role {
-			case osm.RoleExcluded:
+			if c.Role == osm.RoleExcluded {
 				if st.ExcludedByReason == nil {
 					st.ExcludedByReason = map[string]int{}
 				}
 				st.ExcludedByReason[c.Exclude]++
-			case osm.RoleCandidate:
-				st.Candidates++
-			case osm.RoleAmenity:
 			}
 			tagsJSON, _ := json.Marshal(f.Tags)
-			if err := store.InsertRaw(ctx, RawRow{
+			batch = append(batch, RawRow{
 				Source: f.Source, SourceID: f.SourceID, Version: f.Version,
 				Role: string(c.Role), Kind: c.Kind, Amenity: string(c.Amenity),
 				Quality: c.Quality, ExcludeReason: c.Exclude,
 				TagsJSON: tagsJSON, GeoJSON: f.GeoJSON,
 				ContentHash: contentHash(c, f), RunID: runID,
-			}); err != nil {
-				return fmt.Errorf("insert raw %s/%s: %w", f.Source, f.SourceID, err)
+			})
+			if len(batch) >= rawBatchSize {
+				if err := flush(); err != nil {
+					return fmt.Errorf("copy raw: %w", err)
+				}
 			}
 		}
+		if err := flush(); err != nil {
+			return fmt.Errorf("copy raw: %w", err)
+		}
+		mark("stream_copy")
+		kept, err := store.MergeRaw(ctx)
+		if err != nil {
+			return fmt.Errorf("merge raw: %w", err)
+		}
+		st.DuplicateGeoms = st.FeaturesRead - int(kept)
 		if pe, ok := snap.(interface{ ParseErrors() int }); ok && pe.ParseErrors() > 0 {
 			if st.ExcludedByReason == nil {
 				st.ExcludedByReason = map[string]int{}
@@ -309,7 +366,9 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 			st.ExcludedByReason["parse_error"] = pe.ParseErrors()
 		}
 
-		// Stage 2: load planner inputs.
+		mark("merge")
+
+		// Stage 2: load planner inputs once.
 		absorbed, err := store.Absorbed(ctx)
 		if err != nil {
 			return err
@@ -320,12 +379,16 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 			absorbedSet[[2]string{a.Source, a.SourceID}] = [2]string{a.ParentSource, a.ParentSourceID}
 			childCount[[2]string{a.ParentSource, a.ParentSourceID}]++
 		}
-
 		cands, err := store.Candidates(ctx)
 		if err != nil {
 			return err
 		}
+		st.Candidates = len(cands)
 		spots, err := store.Spots(ctx)
+		if err != nil {
+			return err
+		}
+		links, err := store.SourceLinks(ctx)
 		if err != nil {
 			return err
 		}
@@ -335,223 +398,208 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 			qp = s.Clf.Policy
 		}
 
-		// Index existing spots by their osm source ids.
-		spotBySource := map[[2]string]uuid.UUID{}
+		mark("load")
+
 		spotRow := map[uuid.UUID]SpotRow{}
-		for _, sp := range spots {
-			spotRow[sp.ID] = sp
-		}
-
-		// parentSpot resolves a candidate key to a spot id.
-		parentSpot := map[[2]string]uuid.UUID{}
-		type childLink struct {
-			source, sourceID string
-			version          int
-			contentHash      string
-			parentKey        [2]string
-		}
-		var links []childLink
-
 		activeCount := 0
 		for _, sp := range spots {
+			spotRow[sp.ID] = sp
 			if sp.Status == string(osm.StatusActive) {
 				activeCount++
 			}
 		}
 
+		// Queued provenance writes, deduped by key (last write wins) and
+		// mirrored into links so later lookups in this run see them.
+		var ups []SourceUpsert
+		upIdx := map[[2]string]int{}
+		queue := func(u SourceUpsert) {
+			k := [2]string{u.Source, u.SourceID}
+			if i, ok := upIdx[k]; ok {
+				ups[i] = u
+			} else {
+				upIdx[k] = len(ups)
+				ups = append(ups, u)
+			}
+			links[k] = SourceLink{SpotID: u.SpotID, PackID: pack.ID, Version: u.Version,
+				Via: u.Via, ContentHash: u.ContentHash, Found: true}
+		}
+
+		// apply decides and writes the canonical row for an existing spot.
+		// Returns false when the spot is locked (curated, merged,
+		// admin-hidden, closed by report): its data is never touched.
+		apply := func(spotID uuid.UUID, ns NewSpot, sourceChanged bool) error {
+			sp := spotRow[spotID]
+			if locked(sp) {
+				st.SkippedCurated++
+				return nil
+			}
+			newStatus, reason := pol.NextStatus(osm.Evidence{
+				CurrentStatus:  osm.Status(sp.Status),
+				Quality:        ns.Quality,
+				Trusted:        true,
+				SourceChanged:  sourceChanged,
+				ClosedByReport: sp.StatusReason == osm.ReasonClosedByReport,
+				StatusReason:   sp.StatusReason,
+				SourcePresent:  true,
+			})
+			ns.Status = string(newStatus)
+			if cell, err := geo.CellIDFromLatLng(ns.Lat, ns.Lon); err == nil {
+				ns.CellID = cell
+			}
+			if !sourceChanged && ns.Status == sp.Status && sameSpot(sp, ns) {
+				st.Unchanged++
+				return nil
+			}
+			if err := store.UpdateSpot(ctx, spotID, ns); err != nil {
+				return err
+			}
+			if ns.Status != sp.Status {
+				if err := store.SetStatus(ctx, spotID, ns.Status, reason); err != nil {
+					return fmt.Errorf("status %s→%s for %s: %w", sp.Status, ns.Status, spotID, err)
+				}
+				if ns.Status == string(osm.StatusActive) {
+					st.Activated++
+				}
+			}
+			st.Updated++
+			return nil
+		}
+		create := func(ns NewSpot) (uuid.UUID, bool, error) {
+			status, reason := pol.NewSpotStatus(osm.Evidence{Quality: ns.Quality, Trusted: true})
+			if status == "" {
+				st.BelowFloor++
+				return uuid.UUID{}, false, nil
+			}
+			ns.Status, ns.StatusReason = string(status), reason
+			id, err := store.InsertSpot(ctx, ns)
+			if err != nil {
+				return id, false, err
+			}
+			if status == osm.StatusActive {
+				st.Activated++
+			} else {
+				st.Pending++
+			}
+			st.Created++
+			return id, true, nil
+		}
+
+		parentSpot := map[[2]string]uuid.UUID{} // candidate key → spot id
+		type childLink struct {
+			up        SourceUpsert
+			parentKey [2]string
+		}
+		var lateChildren []childLink
+
 		for _, c := range cands {
 			key := [2]string{c.Source, c.SourceID}
 			parentKey, isAbsorbed := absorbedSet[key]
 
-			// Tables only become spots via orphan clustering (TODO); absorbed
-			// tables/sites attach to their parent below.
+			// Unabsorbed tables only become spots via orphan clustering.
 			if c.Kind == "table" && !isAbsorbed {
 				continue
 			}
 
-			// Quality: tag score + table-evidence bonus for parents.
 			quality := c.Quality
-			if n := childCount[key]; n > 0 {
-				quality += qp.TableEvidence
-				if quality > 100 {
-					quality = 100
-				}
+			if childCount[key] > 0 {
+				quality = min(quality+qp.TableEvidence, 100)
 			}
 
-			// Candidate name is needed early: it drives the spatial+name
-			// fallback when provenance misses.
 			var tags map[string]string
 			_ = json.Unmarshal(c.TagsJSON, &tags)
 			name := tags["name"]
 
-			// Resolve existing spot via provenance.
-			var spotID uuid.UUID
-			var oldVersion int
-			var oldHash string
-			found := false
-			viaFallback := false
-			link, err := store.SpotBySource(ctx, c.Source, c.SourceID)
-			if err != nil {
-				return err
-			}
-			if link.Found {
-				oldVersion, oldHash = link.Version, link.ContentHash
-				// A source still linked as 'absorbed' evidence while its
-				// candidate is no longer absorbed is stale — the object
-				// became its own spot. Treat as unmatched so a new spot is
-				// created and the link moves here with via='primary'.
-				if link.Via == "absorbed" && !isAbsorbed {
-					link.Found = false
-				}
+			link := links[key]
+			oldVersion, oldHash := link.Version, link.ContentHash
+			// A source still linked as 'absorbed' while its candidate is no
+			// longer absorbed became its own spot — treat as unmatched.
+			if link.Found && link.Via == "absorbed" && !isAbsorbed {
+				link.Found = false
 			}
 			if link.Found && link.PackID != pack.ID {
-				// Boundary straddler already claimed by another pack —
-				// that pack owns its lifecycle; the API serves the spot
-				// by bbox so it is visible here anyway.
+				// Boundary straddler owned by another pack.
 				st.ForeignOwned++
 				continue
 			}
-			if link.Found {
-				spotID, found = link.SpotID, true
-				spotBySource[key] = link.SpotID
-			} else if norm := normalizeName(name); norm != "" && !isAbsorbed {
-				// OSM remap fallback: the object was re-created under a new
-				// id. Re-link to an existing pending/active spot of the
-				// same kind within fallbackRadiusM carrying the same name —
-				// but only when exactly one candidate matches.
-				near, err := store.SpotsNear(ctx, c.Lon, c.Lat, fallbackRadiusM)
-				if err != nil {
-					return err
-				}
-				var match uuid.UUID
-				matches := 0
-				for _, sp := range near {
-					if sp.Kind != c.Kind || normalizeName(sp.Name) != norm {
-						continue
-					}
-					match, matches = sp.ID, matches+1
-				}
-				if matches == 1 {
-					spotID, found, viaFallback = match, true, true
-					spotBySource[key] = match
-					st.FallbackMatched++
-				}
-			}
 
 			if isAbsorbed {
-				// Attach this child's source to the parent's spot — resolved
-				// in the second pass once parents have spot ids.
+				up := SourceUpsert{Source: c.Source, SourceID: c.SourceID, Version: c.Version,
+					Via: "absorbed", ContentHash: c.ContentHash}
 				if id, ok := parentSpot[parentKey]; ok {
-					if err := store.UpsertSource(ctx, id, c.Source, c.SourceID, c.Version, "absorbed", c.ContentHash); err != nil {
-						return err
-					}
+					up.SpotID = id
+					queue(up)
 					st.Absorbed++
 				} else {
-					links = append(links, childLink{c.Source, c.SourceID, c.Version, c.ContentHash, parentKey})
+					lateChildren = append(lateChildren, childLink{up, parentKey})
 				}
 				continue
 			}
 
-			var area *string
-			if c.PolygonGeoJSON != nil {
-				area = c.PolygonGeoJSON
-			}
-			namesJSON, _ := json.Marshal(map[string]string{})
-			var attrsJSON []byte = []byte("{}")
-			attrs := map[string]string{}
-			for _, k := range []string{"access", "fee", "reservation", "nudism", "supervised", "capacity", "description", "wikidata", "website"} {
-				if v, ok := tags[k]; ok {
-					attrs[k] = v
+			var spotID uuid.UUID
+			found, viaFallback := false, false
+			if link.Found {
+				if _, ok := spotRow[link.SpotID]; ok {
+					spotID, found = link.SpotID, true
 				}
 			}
-			if len(attrs) > 0 {
-				attrsJSON, _ = json.Marshal(attrs)
-			}
-			names := map[string]string{}
-			for k, v := range tags {
-				if len(k) > 5 && k[:5] == "name:" {
-					names[k[5:]] = v
+			if !found {
+				if norm := normalizeName(name); norm != "" {
+					// OSM remap fallback: same kind + name within
+					// fallbackRadiusM, unique match only.
+					near, err := store.SpotsNear(ctx, c.Lon, c.Lat, fallbackRadiusM)
+					if err != nil {
+						return err
+					}
+					var match uuid.UUID
+					matches := 0
+					for _, sp := range near {
+						if sp.Kind == c.Kind && normalizeName(sp.Name) == norm {
+							match, matches = sp.ID, matches+1
+						}
+					}
+					if matches == 1 {
+						spotID, found, viaFallback = match, true, true
+						st.FallbackMatched++
+					}
 				}
-			}
-			if len(names) > 0 {
-				namesJSON, _ = json.Marshal(names)
 			}
 
 			ns := NewSpot{
-				Kind: c.Kind, Name: name, NamesJSON: namesJSON, AttrsJSON: attrsJSON,
-				Lon: c.Lon, Lat: c.Lat, AreaGeoJSON: area,
-				Country: pack.Country, TZ: pack.TZ,
-				Quality: quality,
+				Kind: c.Kind, Name: name,
+				NamesJSON: namesJSON(tags), AttrsJSON: attrsJSON(tags),
+				Lon: c.Lon, Lat: c.Lat, AreaGeoJSON: c.PolygonGeoJSON,
+				Country: pack.Country, TZ: pack.TZ, Quality: quality,
 			}
-
 			if found {
-				sp := spotRow[spotID]
-				ns.Status = sp.Status
-				ns.StatusReason = sp.StatusReason
-				if sp.Curated {
-					st.SkippedCurated++
-				} else {
-					newStatus, reason := pol.NextStatus(osm.Evidence{
-						CurrentStatus: osm.Status(sp.Status),
-						Quality:       quality,
-						Trusted:       true,
-						SourceChanged: !viaFallback &&
-							(c.Version > oldVersion ||
-								(oldHash != "" && c.ContentHash != "" && c.ContentHash != oldHash)),
-						ClosedByReport: strings.Contains(sp.StatusReason, "report"),
-					})
-					ns.Status = string(newStatus)
-					ns.StatusReason = reason
-				}
-				if err := store.UpdateSpot(ctx, spotID, ns); err != nil {
+				changed := viaFallback || c.Version > oldVersion ||
+					(c.ContentHash != "" && c.ContentHash != oldHash)
+				if err := apply(spotID, ns, changed); err != nil {
 					return err
 				}
-				if !sp.Curated && ns.Status != sp.Status {
-					if err := store.SetStatus(ctx, spotID, ns.Status, ns.StatusReason); err != nil {
-						return err
-					}
-					if ns.Status == string(osm.StatusActive) && sp.Status != string(osm.StatusActive) {
-						st.Activated++
-					}
-				}
-				st.Updated++
 			} else {
-				status, reason := pol.NewSpotStatus(osm.Evidence{
-					Quality: quality, Trusted: true,
-				})
-				if status == "" {
-					st.BelowFloor++
-					continue
-				}
-				ns.Status = string(status)
-				ns.StatusReason = reason
-				id, err := store.InsertSpot(ctx, ns)
+				id, ok, err := create(ns)
 				if err != nil {
 					return fmt.Errorf("insert spot %s/%s: %w", c.Source, c.SourceID, err)
 				}
-				spotID = id
-				if status == osm.StatusActive {
-					st.Activated++
-				} else {
-					st.Pending++
+				if !ok {
+					continue
 				}
-				st.Created++
+				spotID = id
 			}
-			if err := store.UpsertSource(ctx, spotID, c.Source, c.SourceID, c.Version, "primary", c.ContentHash); err != nil {
-				return err
-			}
+			queue(SourceUpsert{SpotID: spotID, Source: c.Source, SourceID: c.SourceID,
+				Version: c.Version, Via: "primary", ContentHash: c.ContentHash})
 			parentSpot[key] = spotID
 		}
 
-		// Second pass: attach absorbed children whose parents resolved late.
-		for _, l := range links {
+		// Absorbed children whose parents resolved after them.
+		for _, l := range lateChildren {
 			id, ok := parentSpot[l.parentKey]
 			if !ok {
-				continue // parent below floor — child stays raw-only
+				continue // parent below floor / foreign — child stays raw-only
 			}
-			if err := store.UpsertSource(ctx, id, l.source, l.sourceID, l.version, "absorbed", l.contentHash); err != nil {
-				return err
-			}
+			l.up.SpotID = id
+			queue(l.up)
 			st.Absorbed++
 		}
 
@@ -561,117 +609,84 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 		if eps <= 0 {
 			eps = osm.DefaultPolicy.OrphanClusterEpsM
 		}
-		centerLat := (pack.Bounds.South + pack.Bounds.North) / 2
-		cosLat := math.Cos(centerLat * math.Pi / 180)
-		if cosLat < 0.2 {
-			cosLat = 0.2 // polar packs: cap the mercator stretch
-		}
+		cosLat := packCosLat(pack)
 		clusters, err := store.OrphanTableClusters(ctx, eps/cosLat, pol.MinTablesForSite)
 		if err != nil {
 			return err
 		}
+		claimed := map[uuid.UUID]bool{} // one cluster per existing site spot
 		for _, cl := range clusters {
-			if cl.Size < pol.MinTablesForSite {
+			// Drop members owned by another pack BEFORE deciding, otherwise
+			// a spot is created with no linkable source and closed again by
+			// the sourceless sweep — a junk row per run.
+			own := cl.Members[:0:0]
+			for _, m := range cl.Members {
+				if l := links[[2]string{m.Source, m.SourceID}]; l.Found && l.PackID != pack.ID {
+					st.ForeignOwned++
+					continue
+				}
+				own = append(own, m)
+			}
+			if len(own) < pol.MinTablesForSite {
 				continue
 			}
-			// Cluster evidence: table-count bonus on top of the tag score.
-			quality := qp.TableEvidence + 10*cl.Size
-			if quality > 100 {
-				quality = 100
+			var lon, lat float64
+			for _, m := range own {
+				lon += m.Lon
+				lat += m.Lat
 			}
+			lon /= float64(len(own))
+			lat /= float64(len(own))
+			quality := min(qp.TableEvidence+10*len(own), 100)
 
-			// Re-find the spot via any member's provenance. Only kind=site
-			// spots are reused — a member still linked to a vanished park
-			// gets re-pointed to the new cluster spot below.
+			// Re-find via any member's provenance (kind=site only, and each
+			// spot only once — a split cluster must not map both halves to
+			// the same spot).
 			var spotID uuid.UUID
-			var sp SpotRow
 			found := false
-			for _, m := range cl.Members {
-				l, err := store.SpotBySource(ctx, m.Source, m.SourceID)
-				if err != nil {
-					return err
-				}
-				if !l.Found {
+			for _, m := range own {
+				l := links[[2]string{m.Source, m.SourceID}]
+				if !l.Found || claimed[l.SpotID] {
 					continue
 				}
-				row, ok2 := spotRow[l.SpotID]
-				if !ok2 || row.Kind != "site" {
-					continue
+				if row, ok := spotRow[l.SpotID]; ok && row.Kind == "site" {
+					spotID, found = l.SpotID, true
+					break
 				}
-				spotID, sp, found = l.SpotID, row, true
-				break
 			}
 
 			ns := NewSpot{
-				Kind: "site", Lon: cl.Lon, Lat: cl.Lat,
+				Kind: "site", Lon: lon, Lat: lat,
 				NamesJSON: []byte("{}"), AttrsJSON: []byte("{}"),
 				Country: pack.Country, TZ: pack.TZ, Quality: quality,
 			}
 			if found {
-				ns.Status = sp.Status
-				ns.StatusReason = sp.StatusReason
-				if sp.Curated {
-					st.SkippedCurated++
-				} else {
-					newStatus, reason := pol.NextStatus(osm.Evidence{
-						CurrentStatus: osm.Status(sp.Status),
-						Quality:       quality, Trusted: true,
-					})
-					ns.Status = string(newStatus)
-					ns.StatusReason = reason
-				}
-				if err := store.UpdateSpot(ctx, spotID, ns); err != nil {
+				if err := apply(spotID, ns, false); err != nil {
 					return err
 				}
-				if !sp.Curated && ns.Status != sp.Status {
-					if err := store.SetStatus(ctx, spotID, ns.Status, ns.StatusReason); err != nil {
-						return err
-					}
-					if ns.Status == string(osm.StatusActive) && sp.Status != string(osm.StatusActive) {
-						st.Activated++
-					}
-				}
-				st.Updated++
 			} else {
-				status, reason := pol.NewSpotStatus(osm.Evidence{
-					Quality: quality, Trusted: true,
-				})
-				if status == "" {
-					continue // below floor — members stay raw-only
-				}
-				ns.Status = string(status)
-				ns.StatusReason = reason
-				id, err := store.InsertSpot(ctx, ns)
+				id, ok, err := create(ns)
 				if err != nil {
 					return fmt.Errorf("insert table-cluster spot: %w", err)
 				}
+				if !ok {
+					continue // below floor — members stay raw-only
+				}
 				spotID = id
-				if status == osm.StatusActive {
-					st.Activated++
-				} else {
-					st.Pending++
-				}
-				st.Created++
 			}
+			claimed[spotID] = true
 			st.OrphanSites++
-			// Every member table becomes a source of the cluster spot so
-			// sightings/missing-runs track each table independently.
-			// Foreign-owned members (claimed by another pack) are skipped —
-			// UpsertSource's ON CONFLICT would otherwise steal the link.
-			for _, m := range cl.Members {
-				l, err := store.SpotBySource(ctx, m.Source, m.SourceID)
-				if err != nil {
-					return err
-				}
-				if l.Found && l.PackID != pack.ID {
-					st.ForeignOwned++
-					continue
-				}
-				if err := store.UpsertSource(ctx, spotID, m.Source, m.SourceID, m.Version, "primary", ""); err != nil {
-					return err
-				}
+			for _, m := range own {
+				queue(SourceUpsert{SpotID: spotID, Source: m.Source, SourceID: m.SourceID,
+					Version: m.Version, Via: "primary"})
 			}
 		}
+
+		mark("plan")
+		if err := store.UpsertSources(ctx, ups); err != nil {
+			return fmt.Errorf("upsert sources: %w", err)
+		}
+		mark("upsert_sources")
 
 		// Stage 3: sightings → missing runs → guarded closes.
 		if err := store.ResetSightings(ctx); err != nil {
@@ -680,22 +695,43 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 		if err := store.BumpMissing(ctx); err != nil {
 			return err
 		}
-		missingActive, err := store.MissingActive(ctx, pol.CloseAfterMissing)
+		// Blast-radius guard, evaluated on what is absent THIS run (not only
+		// on spots past CloseAfterMissing) so a truncated extract aborts on
+		// its first run, before raw layer/amenities are replaced. Sourceless
+		// closes count too.
+		absent, err := store.MissingActive(ctx, 1)
 		if err != nil {
 			return err
 		}
-		if activeCount > 0 && float64(len(missingActive)) > pol.MaxCloseFraction*float64(activeCount) {
-			st.GuardTripped = true
-			st.Closed = len(missingActive)
-			return fmt.Errorf("%w: would close %d of %d active spots", ErrGuardTripped, len(missingActive), activeCount)
+		sourceless, err := store.Sourceless(ctx)
+		if err != nil {
+			return err
+		}
+		destructive := len(absent)
+		for _, sp := range sourceless {
+			if sp.Status == string(osm.StatusActive) {
+				destructive++
+			}
+		}
+		if activeCount > 0 && float64(destructive) > pol.MaxCloseFraction*float64(activeCount) {
+			if !s.ForceGuard {
+				st.GuardTripped = true
+				st.Closed = destructive
+				return fmt.Errorf("%w: %d of %d active spots absent or sourceless", ErrGuardTripped, destructive, activeCount)
+			}
+			st.GuardForced = true
+		}
+		missingActive, err := store.MissingActive(ctx, pol.CloseAfterMissing)
+		if err != nil {
+			return err
 		}
 		for _, id := range missingActive {
 			if ok, err := store.RecentConfirm(ctx, id, pol.ConfirmShieldDays); err != nil {
 				return err
 			} else if ok {
-				continue // shielded — logged via stats omission, stays active
+				continue // shielded — stays active
 			}
-			if err := store.SetStatus(ctx, id, string(osm.StatusClosed), "source_missing"); err != nil {
+			if err := store.SetStatus(ctx, id, string(osm.StatusClosed), osm.ReasonSourceMissing); err != nil {
 				return err
 			}
 			st.Closed++
@@ -705,51 +741,44 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 			return err
 		}
 		for _, id := range missingPending {
-			if err := store.SetStatus(ctx, id, string(osm.StatusHidden), "vanished_before_review"); err != nil {
+			if err := store.SetStatus(ctx, id, string(osm.StatusHidden), osm.ReasonVanished); err != nil {
 				return err
 			}
 			st.HiddenVanished++
 		}
-
 		// Spots whose primary sources all moved to other spots this run
-		// (e.g. a site absorbed into a park) have no identity left — close
-		// them instead of letting them linger active forever.
-		sourceless, err := store.Sourceless(ctx)
-		if err != nil {
-			return err
-		}
+		// have no identity left — close/hide them.
 		for _, sp := range sourceless {
+			next := osm.StatusHidden
 			if sp.Status == string(osm.StatusActive) {
-				if err := store.SetStatus(ctx, sp.ID, string(osm.StatusClosed), "sources_moved"); err != nil {
-					return err
-				}
+				next = osm.StatusClosed
+			}
+			if err := store.SetStatus(ctx, sp.ID, string(next), osm.ReasonSourcesMoved); err != nil {
+				return err
+			}
+			if next == osm.StatusClosed {
 				st.Closed++
 			} else {
-				if err := store.SetStatus(ctx, sp.ID, string(osm.StatusHidden), "sources_moved"); err != nil {
-					return err
-				}
 				st.HiddenVanished++
 			}
 		}
 
-		// Stage 4: amenities attach to the nearest active spot.
+		mark("lifecycle")
+
+		// Stage 4: amenities, set-based.
 		if err := store.ClearAmenities(ctx); err != nil {
-			return err
-		}
-		amenities, err := store.Amenities(ctx)
-		if err != nil {
 			return err
 		}
 		radius := s.AmenityRadiusM
 		if radius <= 0 {
 			radius = 300
 		}
-		for _, a := range amenities {
-			if err := store.AssignAmenity(ctx, a.Lat, a.Lon, a.Amenity, radius); err != nil {
-				return err
-			}
-			st.AmenitiesLinked++
+		n, err := store.AssignAmenities(ctx, radius/(111320*cosLat), radius)
+		if err != nil {
+			return fmt.Errorf("assign amenities: %w", err)
 		}
+		st.AmenitiesLinked = int(n)
+		mark("amenities")
 
 		if err := store.TouchImport(ctx); err != nil {
 			return err
@@ -757,4 +786,60 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 		return store.NotifyIngestDone(ctx)
 	})
 	return st, err
+}
+
+// locked reports spots the importer must never modify (INGEST_STRATEGY D4):
+// curated, merged, hidden by an admin, closed by an accepted report.
+func locked(sp SpotRow) bool {
+	if sp.Curated {
+		return true
+	}
+	switch osm.Status(sp.Status) {
+	case osm.StatusMerged:
+		return true
+	case osm.StatusHidden:
+		return !osm.ImporterHiddenReason(sp.StatusReason)
+	case osm.StatusClosed:
+		return sp.StatusReason == osm.ReasonClosedByReport
+	}
+	return false
+}
+
+// sameSpot reports whether writing ns would leave the canonical row as is
+// (lets unchanged spots skip the UPDATE entirely).
+func sameSpot(sp SpotRow, ns NewSpot) bool {
+	const eps = 1e-7
+	return sp.Quality == ns.Quality && sp.Name == ns.Name &&
+		(ns.CellID == 0 || sp.CellID == ns.CellID) &&
+		math.Abs(sp.Lon-ns.Lon) < eps && math.Abs(sp.Lat-ns.Lat) < eps &&
+		(sp.AreaGeoJSON != nil) == (ns.AreaGeoJSON != nil)
+}
+
+func packCosLat(pack osm.Pack) float64 {
+	centerLat := (pack.Bounds.South + pack.Bounds.North) / 2
+	return math.Max(math.Cos(centerLat*math.Pi/180), 0.2) // polar packs: cap the stretch
+}
+
+var attrKeys = []string{"access", "fee", "reservation", "nudism", "supervised", "capacity", "description", "wikidata", "website"}
+
+func attrsJSON(tags map[string]string) []byte {
+	attrs := map[string]string{}
+	for _, k := range attrKeys {
+		if v, ok := tags[k]; ok {
+			attrs[k] = v
+		}
+	}
+	b, _ := json.Marshal(attrs)
+	return b
+}
+
+func namesJSON(tags map[string]string) []byte {
+	names := map[string]string{}
+	for k, v := range tags {
+		if lang, ok := strings.CutPrefix(k, "name:"); ok && lang != "" {
+			names[lang] = v
+		}
+	}
+	b, _ := json.Marshal(names)
+	return b
 }

@@ -16,6 +16,7 @@ package ingest_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"os"
@@ -315,13 +316,14 @@ func TestGoldenIngest(t *testing.T) {
 		}
 		st2 := runGolden(t, ctx, pool, src, pack, osm.Policy{})
 
-		// Second identical run: nothing created, the park is updated via
-		// provenance, absorbed children re-attach, nothing closes.
+		// Second identical run: nothing created, the park is matched via
+		// provenance and skipped as unchanged (no UPDATE), absorbed children
+		// re-attach, nothing closes.
 		if st2.Created != 0 || st2.Closed != 0 {
 			t.Fatalf("second run: expected created=0 closed=0, got %+v", st2)
 		}
-		if st2.Updated != 1 {
-			t.Fatalf("second run: expected updated=1 (park only), got %+v", st2)
+		if st2.Updated != 0 || st2.Unchanged != 1 {
+			t.Fatalf("second run: expected updated=0 unchanged=1 (park only), got %+v", st2)
 		}
 		if st2.Absorbed != 2 {
 			t.Fatalf("second run: expected absorbed=2, got %+v", st2)
@@ -412,6 +414,124 @@ func TestGoldenIngest(t *testing.T) {
 		spots := goldenSpots(t, pool, pack.ID)
 		if len(spots) != 1 || spots[0].Status != "closed" || spots[0].StatusReason != "source_missing" {
 			t.Fatalf("expected closed/source_missing spot, got %+v", spots)
+		}
+
+		// The source comes back with IDENTICAL content (same hash): the
+		// importer closed it, so it must reopen — hash-only detection used
+		// to leave it closed forever.
+		src.features = parkFixture(slug, 5.25, 52.25)
+		stBack := runGolden(t, ctx, pool, src, pack, pol)
+		spots = goldenSpots(t, pool, pack.ID)
+		if len(spots) != 1 || spots[0].Status != "active" || spots[0].StatusReason != "source_returned" {
+			t.Fatalf("expected reopened active/source_returned spot, got %+v (stats %+v)", spots, stBack)
+		}
+	})
+
+	t.Run("line_area_twin_collapses", func(t *testing.T) {
+		// osmium exports a closed way twice (LineString + Polygon, same id
+		// once normalized). The raw merge must keep only the polygon: one
+		// spot, with its area.
+		slug := "golden-twin"
+		pack := seedGoldenPack(t, pool, slug)
+		lon, lat, d := 5.05, 52.05, 0.002
+		ring := []byte(fmt.Sprintf(
+			`{"type":"LineString","coordinates":[[%.6f,%.6f],[%.6f,%.6f],[%.6f,%.6f],[%.6f,%.6f],[%.6f,%.6f]]}`,
+			lon-d, lat-d, lon+d, lat-d, lon+d, lat+d, lon-d, lat+d, lon-d, lat-d))
+		tags := map[string]string{"leisure": "park", "name": "Twin Park", "access": "yes"}
+		src := &fixtureSource{features: []osm.RawFeature{
+			goldenFeature("w-twin-"+slug, 0, tags, ring),
+			goldenFeature("w-twin-"+slug, 0, tags, goldenPolygon(lon, lat, d)),
+		}}
+		st := runGolden(t, ctx, pool, src, pack, osm.Policy{})
+		if st.DuplicateGeoms != 1 || st.Candidates != 1 || st.Created != 1 {
+			t.Fatalf("expected duplicate_geoms=1 candidates=1 created=1, got %+v", st)
+		}
+		if n := goldenCount(t, pool, `SELECT count(*) FROM t_spots
+			WHERE city_pack_id = $1 AND area IS NOT NULL`, pack.ID); n != 1 {
+			t.Fatalf("expected the single spot to keep its polygon, got %d with area", n)
+		}
+		// Anchor = ST_PointOnSurface → inside the area.
+		if n := goldenCount(t, pool, `SELECT count(*) FROM t_spots
+			WHERE city_pack_id = $1 AND ST_Intersects(area, geom::geometry)`, pack.ID); n != 1 {
+			t.Fatalf("expected anchor inside area")
+		}
+	})
+
+	t.Run("curated_lock", func(t *testing.T) {
+		slug := "golden-curated"
+		pack := seedGoldenPack(t, pool, slug)
+		src := &fixtureSource{features: parkFixture(slug, 5.12, 52.12)}
+		runGolden(t, ctx, pool, src, pack, osm.Policy{})
+		if _, err := pool.Exec(ctx, `UPDATE t_spots SET curated = true, name = 'Admin Name'
+			WHERE city_pack_id = $1`, pack.ID); err != nil {
+			t.Fatal(err)
+		}
+		// Upstream rename must NOT overwrite the curated row.
+		src.features[0].Tags = map[string]string{"leisure": "park", "name": "Upstream Rename", "access": "yes"}
+		st := runGolden(t, ctx, pool, src, pack, osm.Policy{})
+		if st.SkippedCurated != 1 || st.Updated != 0 {
+			t.Fatalf("expected skipped_curated=1 updated=0, got %+v", st)
+		}
+		if n := goldenCount(t, pool, `SELECT count(*) FROM t_spots
+			WHERE city_pack_id = $1 AND name = 'Admin Name'`, pack.ID); n != 1 {
+			t.Fatalf("curated name was overwritten")
+		}
+	})
+
+	t.Run("guard_trips_on_first_absent_run", func(t *testing.T) {
+		slug := "golden-guard"
+		pack := seedGoldenPack(t, pool, slug)
+		src := &fixtureSource{features: parkFixture(slug, 5.22, 52.22)}
+		runGolden(t, ctx, pool, src, pack, osm.Policy{})
+
+		// Truncated extract: the guard must abort on the FIRST absent run
+		// (before raw layer and amenities get replaced), not only once
+		// missing_runs reaches CloseAfterMissing.
+		src.features = nil
+		svc := &ingest.Service{Src: src, Store: persistence.NewIngestRepo(pool)}
+		st, err := svc.RunPack(ctx, pack, 0, false)
+		if !errors.Is(err, ingest.ErrGuardTripped) || !st.GuardTripped {
+			t.Fatalf("expected guard trip, got err=%v stats=%+v", err, st)
+		}
+		if n := goldenCount(t, pool, `SELECT count(*) FROM t_ingest_features
+			WHERE pack_id = $1`, pack.ID); n != 4 {
+			t.Fatalf("raw layer must survive an aborted run, got %d rows", n)
+		}
+		if n := goldenCount(t, pool, `SELECT count(*) FROM t_spot_amenities a
+			JOIN t_spots sp ON sp.id = a.spot_id WHERE sp.city_pack_id = $1`, pack.ID); n != 1 {
+			t.Fatalf("amenities must survive an aborted run, got %d", n)
+		}
+		// Operator override commits.
+		svc.ForceGuard = true
+		if st, err := svc.RunPack(ctx, pack, 0, false); err != nil || !st.GuardForced {
+			t.Fatalf("forced run: err=%v stats=%+v", err, st)
+		}
+	})
+
+	t.Run("amenity_on_point_only_site", func(t *testing.T) {
+		// Orphan-cluster sites have no polygon; they used to never receive
+		// amenities (the query required area IS NOT NULL).
+		slug := "golden-point-amenity"
+		pack := seedGoldenPack(t, pool, slug)
+		lon, lat := 5.32, 52.32
+		var feats []osm.RawFeature
+		for i, o := range [][2]float64{{0, 0}, {0.0002, 0}, {0, 0.0002}, {0.0001, 0.0001}} {
+			feats = append(feats, goldenFeature(fmt.Sprintf("n-pt%d-%s", i, slug), 1,
+				map[string]string{"leisure": "picnic_table"}, goldenPoint(lon+o[0], lat+o[1])))
+		}
+		feats = append(feats,
+			goldenFeature("n-water-"+slug, 1, map[string]string{"amenity": "drinking_water"},
+				goldenPoint(lon+0.0005, lat)), // ~35 m
+			goldenFeature("n-far-"+slug, 1, map[string]string{"amenity": "toilets"},
+				goldenPoint(lon+0.01, lat))) // ~690 m — out of radius
+		st := runGolden(t, ctx, pool, &fixtureSource{features: feats}, pack, osm.Policy{})
+		if st.OrphanSites != 1 || st.AmenitiesLinked != 1 {
+			t.Fatalf("expected orphan_sites=1 amenities_linked=1, got %+v", st)
+		}
+		if n := goldenCount(t, pool, `SELECT count(*) FROM t_spot_amenities a
+			JOIN t_spots sp ON sp.id = a.spot_id
+			WHERE sp.city_pack_id = $1 AND a.type = 'water' AND a.distance_m BETWEEN 20 AND 50`, pack.ID); n != 1 {
+			t.Fatalf("expected water amenity ~35 m from the site")
 		}
 	})
 }

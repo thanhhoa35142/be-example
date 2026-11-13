@@ -46,27 +46,77 @@ type Evidence struct {
 	SourceChanged     bool // content hash changed since last import
 	ClosedByReport    bool // closed via accepted user report → admin only
 	Curated           bool // admin-edited; importer never touches
+	// StatusReason is the spot's current t_spots.status_reason. Hidden and
+	// closed spots are only re-evaluated when the importer itself put them
+	// there (see ImporterHiddenReason / ImporterClosedReason) — admin
+	// decisions stay final.
+	StatusReason string
+	// SourcePresent: the spot's primary source is in this run's snapshot.
+	SourcePresent bool
+}
+
+// Status reasons the importer writes (t_spots.status_reason).
+const (
+	ReasonAutoQuality     = "auto_quality"
+	ReasonAwaitingReview  = "awaiting_review"
+	ReasonBelowFloor      = "below_quality_floor"
+	ReasonVanished        = "vanished_before_review"
+	ReasonSourcesMoved    = "sources_moved"
+	ReasonSourceMissing   = "source_missing"
+	ReasonSourceReturned  = "source_returned"
+	ReasonClosedByReport  = "closed_by_report"
+	ReasonDuplicateMerged = "duplicate_osm_area"
+)
+
+// ImporterHiddenReason reports whether a hidden spot was hidden by the
+// importer (re-evaluable) rather than by an admin (final).
+func ImporterHiddenReason(r string) bool {
+	switch r {
+	case ReasonBelowFloor, ReasonVanished, ReasonSourcesMoved:
+		return true
+	}
+	return false
+}
+
+// ImporterClosedReason reports whether a closed spot was closed by the
+// importer because its source vanished (reopens when the source returns).
+func ImporterClosedReason(r string) bool {
+	return r == ReasonSourceMissing || r == ReasonSourcesMoved
 }
 
 // NextStatus is the pure state-machine decision for one spot (INGEST_STRATEGY §4).
 // Returns the new status and a machine-readable reason for t_spots.status_reason.
 func (p Policy) NextStatus(e Evidence) (Status, string) {
 	// Human/terminal states the importer must never move.
-	switch e.CurrentStatus {
-	case StatusHidden, StatusMerged:
-		return e.CurrentStatus, ""
-	case StatusClosed:
-		if e.ClosedByReport {
-			return StatusClosed, "closed_by_report" // reopen is admin-only
-		}
-		if e.SourceChanged {
-			return StatusActive, "source_returned"
-		}
-		return StatusClosed, ""
-	}
-
 	if e.Curated {
 		return e.CurrentStatus, "curated"
+	}
+	switch e.CurrentStatus {
+	case StatusMerged:
+		return e.CurrentStatus, ""
+	case StatusHidden:
+		// Admin-hidden is final; importer-hidden is re-scored like a new
+		// candidate (quality may have recovered, or the source came back).
+		if !ImporterHiddenReason(e.StatusReason) || !e.SourcePresent {
+			return e.CurrentStatus, ""
+		}
+		if st, reason := p.NewSpotStatus(e); st != "" {
+			return st, reason
+		}
+		return StatusHidden, e.StatusReason
+	case StatusClosed:
+		if e.ClosedByReport {
+			return StatusClosed, ReasonClosedByReport // reopen is admin-only
+		}
+		// Importer closed it because the source vanished: reopen as soon
+		// as the source is back, even with identical content.
+		if e.SourcePresent && ImporterClosedReason(e.StatusReason) {
+			return StatusActive, ReasonSourceReturned
+		}
+		if e.SourceChanged {
+			return StatusActive, ReasonSourceReturned
+		}
+		return StatusClosed, ""
 	}
 
 	switch e.CurrentStatus {

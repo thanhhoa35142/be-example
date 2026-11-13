@@ -9,6 +9,52 @@ import (
 	"context"
 )
 
+// iteratorForCopyIngestStaging implements pgx.CopyFromSource.
+type iteratorForCopyIngestStaging struct {
+	rows                 []CopyIngestStagingParams
+	skippedFirstNextCall bool
+}
+
+func (r *iteratorForCopyIngestStaging) Next() bool {
+	if len(r.rows) == 0 {
+		return false
+	}
+	if !r.skippedFirstNextCall {
+		r.skippedFirstNextCall = true
+		return true
+	}
+	r.rows = r.rows[1:]
+	return len(r.rows) > 0
+}
+
+func (r iteratorForCopyIngestStaging) Values() ([]interface{}, error) {
+	return []interface{}{
+		r.rows[0].PackID,
+		r.rows[0].Source,
+		r.rows[0].SourceID,
+		r.rows[0].Role,
+		r.rows[0].Kind,
+		r.rows[0].Amenity,
+		r.rows[0].Quality,
+		r.rows[0].ExcludeReason,
+		r.rows[0].Version,
+		r.rows[0].Tags,
+		r.rows[0].Geojson,
+		r.rows[0].ContentHash,
+		r.rows[0].RunID,
+	}, nil
+}
+
+func (r iteratorForCopyIngestStaging) Err() error {
+	return nil
+}
+
+// Raw layer bulk load (COPY). Rows are merged into t_ingest_features by
+// MergeIngestStaging inside the same tx.
+func (q *Queries) CopyIngestStaging(ctx context.Context, arg []CopyIngestStagingParams) (int64, error) {
+	return q.db.CopyFrom(ctx, []string{"t_ingest_staging"}, []string{"pack_id", "source", "source_id", "role", "kind", "amenity", "quality", "exclude_reason", "version", "tags", "geojson", "content_hash", "run_id"}, &iteratorForCopyIngestStaging{rows: arg})
+}
+
 // iteratorForUpsertWeatherHourly implements pgx.CopyFromSource.
 type iteratorForUpsertWeatherHourly struct {
 	rows                 []UpsertWeatherHourlyParams

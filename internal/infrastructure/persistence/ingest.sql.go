@@ -12,6 +12,52 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const assignPackAmenities = `-- name: AssignPackAmenities :execrows
+INSERT INTO t_spot_amenities (spot_id, type, distance_m, source, count)
+SELECT m.spot_id, m.amenity,
+       LEAST(round(min(m.dist)), 32767)::smallint, 'osm',
+       LEAST(count(*), 32767)::smallint
+FROM (
+    SELECT a.amenity, n.id AS spot_id,
+           CASE WHEN ST_Intersects(n.fp, a.g) THEN 0
+                ELSE ST_Distance(n.fp::geography, a.g::geography) END AS dist
+    FROM (SELECT f.amenity, ST_PointOnSurface(f.geom) AS g
+          FROM t_ingest_features f
+          WHERE f.pack_id = $1 AND f.role = 'amenity'
+            AND f.amenity IS NOT NULL) a
+    CROSS JOIN LATERAL (
+        SELECT s.id, COALESCE(s.area, s.geom::geometry) AS fp
+        FROM t_spots s
+        WHERE s.city_pack_id = $1 AND s.status IN ('active','pending')
+          AND ST_DWithin(COALESCE(s.area, s.geom::geometry), a.g, $2::float8)
+        ORDER BY COALESCE(s.area, s.geom::geometry) <-> a.g
+        LIMIT 1) n
+) m
+WHERE m.dist <= $3::float8
+GROUP BY m.spot_id, m.amenity
+ON CONFLICT (spot_id, type) DO NOTHING
+`
+
+type AssignPackAmenitiesParams struct {
+	PackID    uuid.UUID `json:"pack_id"`
+	RadiusDeg float64   `json:"radius_deg"`
+	RadiusM   float64   `json:"radius_m"`
+}
+
+// Set-based amenity attachment: every amenity feature goes to the nearest
+// active/pending spot footprint (area polygon, or anchor point for
+// point-only spots). Index-friendly: geometry-space prefilter/KNN on
+// ix_t_spots_footprint_gist (@radius_deg = radius widened by 1/cos(lat)),
+// exact geography distance only for the single winner per amenity.
+// Manual (non-osm) rows already present win on conflict.
+func (q *Queries) AssignPackAmenities(ctx context.Context, arg AssignPackAmenitiesParams) (int64, error) {
+	result, err := q.db.Exec(ctx, assignPackAmenities, arg.PackID, arg.RadiusDeg, arg.RadiusM)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const bumpMissingSources = `-- name: BumpMissingSources :many
 UPDATE t_spot_sources ss SET missing_runs = ss.missing_runs + 1
 FROM t_spots sp
@@ -55,6 +101,15 @@ DELETE FROM t_ingest_features WHERE pack_id = $1
 
 func (q *Queries) ClearIngestFeatures(ctx context.Context, packID uuid.UUID) error {
 	_, err := q.db.Exec(ctx, clearIngestFeatures, packID)
+	return err
+}
+
+const clearIngestStaging = `-- name: ClearIngestStaging :exec
+DELETE FROM t_ingest_staging WHERE pack_id = $1
+`
+
+func (q *Queries) ClearIngestStaging(ctx context.Context, packID uuid.UUID) error {
+	_, err := q.db.Exec(ctx, clearIngestStaging, packID)
 	return err
 }
 
@@ -143,6 +198,22 @@ func (q *Queries) ClusterOrphanTables(ctx context.Context, arg ClusterOrphanTabl
 	return items, nil
 }
 
+type CopyIngestStagingParams struct {
+	PackID        uuid.UUID   `json:"pack_id"`
+	Source        string      `json:"source"`
+	SourceID      string      `json:"source_id"`
+	Role          string      `json:"role"`
+	Kind          pgtype.Text `json:"kind"`
+	Amenity       pgtype.Text `json:"amenity"`
+	Quality       pgtype.Int2 `json:"quality"`
+	ExcludeReason pgtype.Text `json:"exclude_reason"`
+	Version       pgtype.Int4 `json:"version"`
+	Tags          string      `json:"tags"`
+	Geojson       string      `json:"geojson"`
+	ContentHash   string      `json:"content_hash"`
+	RunID         pgtype.Int8 `json:"run_id"`
+}
+
 const countRecentSpotConfirms = `-- name: CountRecentSpotConfirms :one
 SELECT count(*) FROM t_spot_reports
 WHERE spot_id = $1 AND status = 'accepted'
@@ -159,85 +230,6 @@ func (q *Queries) CountRecentSpotConfirms(ctx context.Context, arg CountRecentSp
 	var count int64
 	err := row.Scan(&count)
 	return count, err
-}
-
-const findSpotBySource = `-- name: FindSpotBySource :one
-SELECT ss.spot_id, ss.version, ss.via, ss.content_hash, sp.city_pack_id
-FROM t_spot_sources ss
-JOIN t_spots sp ON sp.id = ss.spot_id
-WHERE ss.source = $1 AND ss.source_id = $2
-`
-
-type FindSpotBySourceParams struct {
-	Source   string `json:"source"`
-	SourceID string `json:"source_id"`
-}
-
-type FindSpotBySourceRow struct {
-	SpotID      uuid.UUID   `json:"spot_id"`
-	Version     pgtype.Int4 `json:"version"`
-	Via         string      `json:"via"`
-	ContentHash pgtype.Text `json:"content_hash"`
-	CityPackID  uuid.UUID   `json:"city_pack_id"`
-}
-
-// Also returns the owning pack: OSM objects straddling pack boundaries are
-// claimed by whichever pack ingested them first; other packs must skip them
-// (the API serves spots by bbox, so one global spot covers both areas).
-func (q *Queries) FindSpotBySource(ctx context.Context, arg FindSpotBySourceParams) (FindSpotBySourceRow, error) {
-	row := q.db.QueryRow(ctx, findSpotBySource, arg.Source, arg.SourceID)
-	var i FindSpotBySourceRow
-	err := row.Scan(
-		&i.SpotID,
-		&i.Version,
-		&i.Via,
-		&i.ContentHash,
-		&i.CityPackID,
-	)
-	return i, err
-}
-
-const insertIngestFeature = `-- name: InsertIngestFeature :exec
-INSERT INTO t_ingest_features
-    (pack_id, source, source_id, role, kind, amenity, quality,
-     exclude_reason, version, tags, geom, content_hash, run_id)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
-        $10::jsonb, ST_GeomFromGeoJSON($11), $12, $13)
-`
-
-type InsertIngestFeatureParams struct {
-	PackID            uuid.UUID   `json:"pack_id"`
-	Source            string      `json:"source"`
-	SourceID          string      `json:"source_id"`
-	Role              string      `json:"role"`
-	Kind              pgtype.Text `json:"kind"`
-	Amenity           pgtype.Text `json:"amenity"`
-	Quality           pgtype.Int2 `json:"quality"`
-	ExcludeReason     pgtype.Text `json:"exclude_reason"`
-	Version           pgtype.Int4 `json:"version"`
-	Column10          []byte      `json:"column_10"`
-	StGeomfromgeojson interface{} `json:"st_geomfromgeojson"`
-	ContentHash       string      `json:"content_hash"`
-	RunID             pgtype.Int8 `json:"run_id"`
-}
-
-func (q *Queries) InsertIngestFeature(ctx context.Context, arg InsertIngestFeatureParams) error {
-	_, err := q.db.Exec(ctx, insertIngestFeature,
-		arg.PackID,
-		arg.Source,
-		arg.SourceID,
-		arg.Role,
-		arg.Kind,
-		arg.Amenity,
-		arg.Quality,
-		arg.ExcludeReason,
-		arg.Version,
-		arg.Column10,
-		arg.StGeomfromgeojson,
-		arg.ContentHash,
-		arg.RunID,
-	)
-	return err
 }
 
 const insertIngestSpot = `-- name: InsertIngestSpot :one
@@ -340,53 +332,13 @@ func (q *Queries) ListAbsorbedCandidates(ctx context.Context, packID uuid.UUID) 
 	return items, nil
 }
 
-const listAmenityFeatures = `-- name: ListAmenityFeatures :many
-SELECT amenity, source, source_id,
-       ST_X(ST_Centroid(geom)) AS lon,
-       ST_Y(ST_Centroid(geom)) AS lat
-FROM t_ingest_features
-WHERE pack_id = $1 AND role = 'amenity'
-`
-
-type ListAmenityFeaturesRow struct {
-	Amenity  pgtype.Text `json:"amenity"`
-	Source   string      `json:"source"`
-	SourceID string      `json:"source_id"`
-	Lon      interface{} `json:"lon"`
-	Lat      interface{} `json:"lat"`
-}
-
-func (q *Queries) ListAmenityFeatures(ctx context.Context, packID uuid.UUID) ([]ListAmenityFeaturesRow, error) {
-	rows, err := q.db.Query(ctx, listAmenityFeatures, packID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []ListAmenityFeaturesRow{}
-	for rows.Next() {
-		var i ListAmenityFeaturesRow
-		if err := rows.Scan(
-			&i.Amenity,
-			&i.Source,
-			&i.SourceID,
-			&i.Lon,
-			&i.Lat,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const listCandidateFeatures = `-- name: ListCandidateFeatures :many
 SELECT source, source_id, kind, quality, version, tags, content_hash,
        ST_AsGeoJSON(geom) AS geojson,
-       ST_X(ST_Centroid(geom)) AS lon,
-       ST_Y(ST_Centroid(geom)) AS lat,
+       -- Anchor: ST_PointOnSurface stays inside concave areas (beach
+       -- strips, U-shaped parks) where ST_Centroid can fall outside.
+       ST_X(ST_PointOnSurface(geom)) AS lon,
+       ST_Y(ST_PointOnSurface(geom)) AS lat,
        CASE WHEN ST_Dimension(geom) >= 2 THEN ST_AsGeoJSON(geom) END AS polygon_geojson
 FROM t_ingest_features
 WHERE pack_id = $1 AND role = 'candidate'
@@ -504,6 +456,63 @@ func (q *Queries) ListIngestPacks(ctx context.Context) ([]ListIngestPacksRow, er
 			&i.Boundary,
 			&i.LastImportAt,
 			&i.ExtractFetchedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPackSourceLinks = `-- name: ListPackSourceLinks :many
+SELECT ss.source, ss.source_id, ss.spot_id, ss.version, ss.via,
+       ss.content_hash, sp.city_pack_id
+FROM t_spot_sources ss
+JOIN t_spots sp ON sp.id = ss.spot_id
+WHERE sp.city_pack_id = $1
+UNION ALL
+SELECT ss.source, ss.source_id, ss.spot_id, ss.version, ss.via,
+       ss.content_hash, sp.city_pack_id
+FROM t_ingest_features f
+JOIN t_spot_sources ss ON ss.source = f.source AND ss.source_id = f.source_id
+JOIN t_spots sp ON sp.id = ss.spot_id
+WHERE f.pack_id = $1 AND f.role = 'candidate' AND sp.city_pack_id <> $1
+`
+
+type ListPackSourceLinksRow struct {
+	Source      string      `json:"source"`
+	SourceID    string      `json:"source_id"`
+	SpotID      uuid.UUID   `json:"spot_id"`
+	Version     pgtype.Int4 `json:"version"`
+	Via         string      `json:"via"`
+	ContentHash pgtype.Text `json:"content_hash"`
+	CityPackID  uuid.UUID   `json:"city_pack_id"`
+}
+
+// Planner preload (replaces one FindSpotBySource round-trip per candidate):
+// every source linked to this pack's spots, plus links of this run's
+// candidates owned by OTHER packs (boundary straddlers — first owner wins,
+// the API serves spots by bbox so one global spot covers both areas).
+func (q *Queries) ListPackSourceLinks(ctx context.Context, cityPackID uuid.UUID) ([]ListPackSourceLinksRow, error) {
+	rows, err := q.db.Query(ctx, listPackSourceLinks, cityPackID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPackSourceLinksRow{}
+	for rows.Next() {
+		var i ListPackSourceLinksRow
+		if err := rows.Scan(
+			&i.Source,
+			&i.SourceID,
+			&i.SpotID,
+			&i.Version,
+			&i.Via,
+			&i.ContentHash,
+			&i.CityPackID,
 		); err != nil {
 			return nil, err
 		}
@@ -830,39 +839,27 @@ func (q *Queries) MarkExtractFetched(ctx context.Context, arg MarkExtractFetched
 	return err
 }
 
-const nearestSpotForPoint = `-- name: NearestSpotForPoint :one
-SELECT s.id, ST_Distance(s.geom, ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography) AS dist_m
-FROM t_spots s
-WHERE s.city_pack_id = $3 AND s.status = 'active'
-  AND s.area IS NOT NULL
-  AND ST_DWithin(s.area::geography,
-                 ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography, $4)
-ORDER BY dist_m
-LIMIT 1
+const mergeIngestStaging = `-- name: MergeIngestStaging :execrows
+INSERT INTO t_ingest_features
+    (pack_id, source, source_id, role, kind, amenity, quality,
+     exclude_reason, version, tags, geom, content_hash, run_id)
+SELECT DISTINCT ON (s.source, s.source_id)
+       s.pack_id, s.source, s.source_id, s.role, s.kind, s.amenity, s.quality,
+       s.exclude_reason, s.version, s.tags::jsonb, s.g, s.content_hash, s.run_id
+FROM (SELECT st.pack_id, st.source, st.source_id, st.role, st.kind, st.amenity, st.quality, st.exclude_reason, st.version, st.tags, st.geojson, st.content_hash, st.run_id, ST_GeomFromGeoJSON(st.geojson) AS g
+      FROM t_ingest_staging st WHERE st.pack_id = $1) s
+ORDER BY s.source, s.source_id, ST_Dimension(s.g) DESC
 `
 
-type NearestSpotForPointParams struct {
-	StMakepoint   interface{} `json:"st_makepoint"`
-	StMakepoint_2 interface{} `json:"st_makepoint_2"`
-	CityPackID    uuid.UUID   `json:"city_pack_id"`
-	StDwithin     interface{} `json:"st_dwithin"`
-}
-
-type NearestSpotForPointRow struct {
-	ID    uuid.UUID   `json:"id"`
-	DistM interface{} `json:"dist_m"`
-}
-
-func (q *Queries) NearestSpotForPoint(ctx context.Context, arg NearestSpotForPointParams) (NearestSpotForPointRow, error) {
-	row := q.db.QueryRow(ctx, nearestSpotForPoint,
-		arg.StMakepoint,
-		arg.StMakepoint_2,
-		arg.CityPackID,
-		arg.StDwithin,
-	)
-	var i NearestSpotForPointRow
-	err := row.Scan(&i.ID, &i.DistM)
-	return i, err
+// Parses staged rows set-based and keeps ONE row per (source, source_id):
+// osmium exports a closed way both as LineString and as (Multi)Polygon —
+// the higher-dimension geometry wins.
+func (q *Queries) MergeIngestStaging(ctx context.Context, packID uuid.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, mergeIngestStaging, packID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const notifyIngestDone = `-- name: NotifyIngestDone :exec
@@ -947,6 +944,8 @@ UPDATE t_spots SET
     quality = $5, geom = ST_SetSRID(ST_MakePoint($6, $7), 4326)::geography,
     area = CASE WHEN $8::text IS NOT NULL
                 THEN ST_Multi(ST_GeomFromGeoJSON($8)) ELSE NULL END,
+    -- cell follows the anchor (weather/crowd lookups are by cell)
+    cell_id = $9,
     updated_at = now()
 WHERE id = $1
 `
@@ -960,6 +959,7 @@ type UpdateIngestSpotParams struct {
 	StMakepoint   interface{} `json:"st_makepoint"`
 	StMakepoint_2 interface{} `json:"st_makepoint_2"`
 	Area          pgtype.Text `json:"area"`
+	CellID        int64       `json:"cell_id"`
 }
 
 func (q *Queries) UpdateIngestSpot(ctx context.Context, arg UpdateIngestSpotParams) error {
@@ -972,34 +972,23 @@ func (q *Queries) UpdateIngestSpot(ctx context.Context, arg UpdateIngestSpotPara
 		arg.StMakepoint,
 		arg.StMakepoint_2,
 		arg.Area,
+		arg.CellID,
 	)
 	return err
 }
 
-const upsertSpotAmenity = `-- name: UpsertSpotAmenity :exec
-INSERT INTO t_spot_amenities (spot_id, type, distance_m, source, count)
-VALUES ($1, $2, $3, 'osm', 1)
-ON CONFLICT (spot_id, type) DO UPDATE SET
-    count = t_spot_amenities.count + 1,
-    distance_m = LEAST(t_spot_amenities.distance_m, EXCLUDED.distance_m)
-`
-
-type UpsertSpotAmenityParams struct {
-	SpotID    uuid.UUID `json:"spot_id"`
-	Type      string    `json:"type"`
-	DistanceM int16     `json:"distance_m"`
-}
-
-func (q *Queries) UpsertSpotAmenity(ctx context.Context, arg UpsertSpotAmenityParams) error {
-	_, err := q.db.Exec(ctx, upsertSpotAmenity, arg.SpotID, arg.Type, arg.DistanceM)
-	return err
-}
-
-const upsertSpotSource = `-- name: UpsertSpotSource :exec
+const upsertSpotSources = `-- name: UpsertSpotSources :exec
 INSERT INTO t_spot_sources (spot_id, source, source_id, version, via,
                             content_hash, imported_at, last_seen_at,
                             missing_runs)
-VALUES ($1, $2, $3, $4, $5, $6, now(), now(), 0)
+SELECT u.spot_id, u.source, u.source_id, NULLIF(u.version, 0), u.via,
+       NULLIF(u.content_hash, ''), now(), now(), 0
+FROM (SELECT unnest($1::uuid[])       AS spot_id,
+             unnest($2::text[])        AS source,
+             unnest($3::text[])     AS source_id,
+             unnest($4::int[])        AS version,
+             unnest($5::text[])           AS via,
+             unnest($6::text[]) AS content_hash) u
 ON CONFLICT (source, source_id) DO UPDATE SET
     spot_id = EXCLUDED.spot_id,
     version = EXCLUDED.version,
@@ -1009,23 +998,25 @@ ON CONFLICT (source, source_id) DO UPDATE SET
     missing_runs = 0
 `
 
-type UpsertSpotSourceParams struct {
-	SpotID      uuid.UUID   `json:"spot_id"`
-	Source      string      `json:"source"`
-	SourceID    string      `json:"source_id"`
-	Version     pgtype.Int4 `json:"version"`
-	Via         string      `json:"via"`
-	ContentHash pgtype.Text `json:"content_hash"`
+type UpsertSpotSourcesParams struct {
+	SpotIds       []uuid.UUID `json:"spot_ids"`
+	Sources       []string    `json:"sources"`
+	SourceIds     []string    `json:"source_ids"`
+	Versions      []int32     `json:"versions"`
+	Vias          []string    `json:"vias"`
+	ContentHashes []string    `json:"content_hashes"`
 }
 
-func (q *Queries) UpsertSpotSource(ctx context.Context, arg UpsertSpotSourceParams) error {
-	_, err := q.db.Exec(ctx, upsertSpotSource,
-		arg.SpotID,
-		arg.Source,
-		arg.SourceID,
-		arg.Version,
-		arg.Via,
-		arg.ContentHash,
+// Batched provenance upsert (one statement per run instead of per source).
+// Caller guarantees (source, source_id) uniqueness within the batch.
+func (q *Queries) UpsertSpotSources(ctx context.Context, arg UpsertSpotSourcesParams) error {
+	_, err := q.db.Exec(ctx, upsertSpotSources,
+		arg.SpotIds,
+		arg.Sources,
+		arg.SourceIds,
+		arg.Versions,
+		arg.Vias,
+		arg.ContentHashes,
 	)
 	return err
 }

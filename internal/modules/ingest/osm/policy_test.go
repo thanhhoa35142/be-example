@@ -20,6 +20,12 @@ func TestNextStatus(t *testing.T) {
 		{"active missing but runs < threshold", Evidence{CurrentStatus: StatusActive, AllSourcesMissing: true, MissingRuns: 1}, StatusActive, ""},
 		{"closed by report stays", Evidence{CurrentStatus: StatusClosed, ClosedByReport: true, SourceChanged: true}, StatusClosed, "closed_by_report"},
 		{"closed by import reopens", Evidence{CurrentStatus: StatusClosed, SourceChanged: true}, StatusActive, "source_returned"},
+		{"admin-hidden stays hidden", Evidence{CurrentStatus: StatusHidden, StatusReason: "moderation", SourcePresent: true, Quality: 100, Trusted: true}, StatusHidden, ""},
+		{"importer-hidden re-activates", Evidence{CurrentStatus: StatusHidden, StatusReason: ReasonBelowFloor, SourcePresent: true, Quality: 70, Trusted: true}, StatusActive, ReasonAutoQuality},
+		{"importer-hidden back to pending", Evidence{CurrentStatus: StatusHidden, StatusReason: ReasonVanished, SourcePresent: true, Quality: 40, Trusted: true}, StatusPending, ReasonAwaitingReview},
+		{"importer-hidden still below floor", Evidence{CurrentStatus: StatusHidden, StatusReason: ReasonBelowFloor, SourcePresent: true, Quality: 20, Trusted: true}, StatusHidden, ReasonBelowFloor},
+		{"source_missing reopens unchanged", Evidence{CurrentStatus: StatusClosed, StatusReason: ReasonSourceMissing, SourcePresent: true}, StatusActive, ReasonSourceReturned},
+		{"admin-closed stays closed", Evidence{CurrentStatus: StatusClosed, StatusReason: "permanently_closed", SourcePresent: true}, StatusClosed, ""},
 		{"curated untouched", Evidence{CurrentStatus: StatusActive, Curated: true, AllSourcesMissing: true, MissingRuns: 9}, StatusActive, "curated"},
 	}
 	for _, tc := range cases {
@@ -42,5 +48,16 @@ func TestNewSpotStatus(t *testing.T) {
 	}
 	if s, r := p.NewSpotStatus(Evidence{Quality: 10}); s != "" || r != "below_quality_floor" {
 		t.Fatalf("low quality → %q/%q, want raw-only", s, r)
+	}
+}
+
+func TestNormalizeOsmiumID(t *testing.T) {
+	for in, want := range map[string]string{
+		"a246": "w123", "a247": "r123", "a0": "w0",
+		"n5": "n5", "w7": "w7", "r9": "r9", "a": "a", "axyz": "axyz",
+	} {
+		if got := NormalizeOsmiumID(in); got != want {
+			t.Errorf("NormalizeOsmiumID(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

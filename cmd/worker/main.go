@@ -71,6 +71,7 @@ func main() {
 	jobName := flag.String("job", "", "run a single job once and exit")
 	packSlug := flag.String("pack", "", "ingest.osm: restrict to one city pack slug")
 	dryRun := flag.Bool("dry-run", false, "ingest.osm: run the full tx then roll back")
+	forceGuard := flag.Bool("force-guard", false, "ingest.osm: commit even if the blast-radius guard trips (use with -pack after review)")
 	flag.Parse()
 
 	cfg, err := config.Load()
@@ -132,6 +133,7 @@ func main() {
 		notifier.NewSender(logger, alertsRepo, apnsClient),
 	)
 
+	var osmiumSrc *osm.OsmiumSource
 	// Ingest: Overpass dev path by default; INGEST_SOURCE=osmium switches to
 	// the production .pbf pipeline behind the same osm.FeatureSource port.
 	ingestRepo := persistence.NewIngestRepo(pool)
@@ -146,11 +148,23 @@ func main() {
 		if cfg.OsmiumCmd != "" {
 			cmd = strings.Fields(cfg.OsmiumCmd)
 		}
-		featureSource = &osm.OsmiumSource{
+		osmiumSrc = &osm.OsmiumSource{
 			PBFPath: cfg.OsmiumPBF,
 			WorkDir: cfg.IngestExtractDir,
 			Cmd:     cmd,
 		}
+		featureSource = osmiumSrc
+	}
+	// Osmium disk hygiene (skipped when OSMIUM_PBF pins a single dev file):
+	// each extract is downloaded → turned into cached artifacts → its raw
+	// .pbf deleted, one extract at a time, so peak disk is ONE raw extract.
+	osmiumMode := osmiumSrc != nil && cfg.OsmiumPBF == ""
+	prepareExtract := func(ctx context.Context, e string) error {
+		if err := osmiumSrc.Prepare(ctx, e); err != nil {
+			return err
+		}
+		ingest.RemoveExtract(cfg.IngestExtractDir, e)
+		return nil
 	}
 	ingestSvc := &ingest.Service{
 		Src:            featureSource,
@@ -158,6 +172,7 @@ func main() {
 		Clf:            osm.Classifier{Policy: osm.DefaultQualityPolicy},
 		Pol:            osm.DefaultPolicy,
 		AmenityRadiusM: 300,
+		ForceGuard:     *forceGuard,
 	}
 
 	runIngest := func(ctx context.Context) error {
@@ -182,54 +197,71 @@ func main() {
 			}
 			todo = append(todo, i)
 		}
-		// Osmium disk hygiene: raw .pbf files are huge and only needed while
-		// artifacts are (re)built. Ensure missing ones exist up front, then
-		// delete them after the run — the ~20%-sized artifacts stay cached.
-		// Skipped when OSMIUM_PBF pins a single dev file.
-		osmiumMode := cfg.IngestSource == "osmium" && cfg.OsmiumPBF == ""
-		var extracts []string
+		// Make sure every extract has artifacts; a broken extract only
+		// skips its own packs.
+		failedExtract := map[string]error{}
 		if osmiumMode {
 			seen := map[string]bool{}
 			for _, i := range todo {
-				if packs[i].OSMExtract != "" && !seen[packs[i].OSMExtract] {
-					seen[packs[i].OSMExtract] = true
-					extracts = append(extracts, packs[i].OSMExtract)
+				e := packs[i].OSMExtract
+				if e == "" || seen[e] || osmiumSrc.ArtifactsReady(e) {
+					continue
+				}
+				seen[e] = true
+				downloaded, err := ingest.EnsureExtract(ctx, nil, cfg.IngestExtractDir, e)
+				if err == nil && downloaded {
+					err = ingestRepo.MarkExtractFetched(ctx, e, time.Now().UTC())
+				}
+				if err == nil {
+					err = prepareExtract(ctx, e)
+				}
+				if err != nil {
+					failedExtract[e] = err
 				}
 			}
-			if err := ingest.EnsureExtracts(ctx, nil, cfg.IngestExtractDir, extracts); err != nil {
-				return fmt.Errorf("ensure extracts: %w", err)
-			}
 		}
+		// One failing pack (guard trip, bad geometry…) must not starve the
+		// packs after it: keep going and report every failure.
+		var errs []error
 		for _, i := range todo {
+			if err := ctx.Err(); err != nil {
+				errs = append(errs, err)
+				break
+			}
+			if err, bad := failedExtract[packs[i].OSMExtract]; bad {
+				errs = append(errs, fmt.Errorf("pack %s: extract: %w", packs[i].Slug, err))
+				continue
+			}
 			bounds, err := ingestRepo.PackBounds(ctx, packs[i].ID)
 			if err != nil {
-				return fmt.Errorf("pack %s bounds: %w", packs[i].Slug, err)
+				errs = append(errs, fmt.Errorf("pack %s bounds: %w", packs[i].Slug, err))
+				continue
 			}
 			packs[i].Bounds = bounds
+			started := time.Now()
 			st, err := ingestSvc.RunPack(ctx, packs[i], jobRunID(ctx), *dryRun)
-			if err != nil {
-				return fmt.Errorf("pack %s: %w", packs[i].Slug, err)
-			}
 			if bag, ok := ctx.Value(jobStatsKey{}).(*jobStatsBag); ok {
 				existing, _ := bag.m["packs"].([]any)
-				bag.set("packs", append(existing, map[string]any{
-					"pack": packs[i].Slug, "stats": st,
-				}))
+				entry := map[string]any{"pack": packs[i].Slug, "stats": st,
+					"duration_ms": time.Since(started).Milliseconds()}
+				if err != nil {
+					entry["error"] = err.Error()
+				}
+				bag.set("packs", append(existing, entry))
+			}
+			if err != nil {
+				logger.Error("ingest pack failed", "pack", packs[i].Slug, "error", err)
+				errs = append(errs, fmt.Errorf("pack %s: %w", packs[i].Slug, err))
+				continue
 			}
 			logger.Info("ingest pack done", "pack", packs[i].Slug, "dry_run", *dryRun,
+				"duration", time.Since(started).Round(time.Millisecond),
 				"features", st.FeaturesRead, "created", st.Created, "updated", st.Updated,
-				"activated", st.Activated, "pending", st.Pending, "closed", st.Closed,
-				"absorbed", st.Absorbed, "amenities", st.AmenitiesLinked)
+				"unchanged", st.Unchanged, "activated", st.Activated, "pending", st.Pending,
+				"closed", st.Closed, "absorbed", st.Absorbed, "amenities", st.AmenitiesLinked,
+				"stage_ms", st.StageMs)
 		}
-		// Cleanup only on full scheduled runs: -pack one-shots may share an
-		// extract with packs that haven't run yet, and deleting the .pbf
-		// between them would force a re-download.
-		if osmiumMode && !*dryRun && *packSlug == "" {
-			for _, e := range extracts {
-				ingest.RemoveExtract(cfg.IngestExtractDir, e)
-			}
-		}
-		return nil
+		return errors.Join(errs...)
 	}
 
 	registry := []job{
@@ -307,17 +339,20 @@ func main() {
 				if err != nil {
 					return err
 				}
-				fetched, err := ingest.RefreshExtracts(ctx, nil, cfg.IngestExtractDir, extracts, 7*24*time.Hour, false)
-				if err != nil {
-					return err
-				}
-				for _, e := range fetched {
-					if err := ingestRepo.MarkExtractFetched(ctx, e, time.Now().UTC()); err != nil {
-						return err
-					}
-				}
-				logger.Info("extract refresh done", "extracts", len(extracts), "fetched", len(fetched))
-				return nil
+				fetched, err := ingest.RefreshExtracts(ctx, nil, cfg.IngestExtractDir, extracts, 7*24*time.Hour, false,
+					func(e string) error {
+						// Stamp first: the download succeeded even if the
+						// artifact build below fails (ingest retries it).
+						if err := ingestRepo.MarkExtractFetched(ctx, e, time.Now().UTC()); err != nil {
+							return err
+						}
+						if osmiumMode {
+							return prepareExtract(ctx, e)
+						}
+						return nil
+					})
+				logger.Info("extract refresh done", "extracts", len(extracts), "fetched", len(fetched), "error", err)
+				return err
 			},
 		},
 		{
