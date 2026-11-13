@@ -423,7 +423,7 @@ Alert rules fire a push when the best score in an area meets `minScore` during a
 ### `GET /v1/alerts?deviceId={uuid}`
 
 ```json
-{"data":{"items":[{"id":"...","deviceId":"...","spotId":"...","h3Cell":null,"radiusM":null,"minScore":50,"daysMask":127,"startLocal":"08:00","endLocal":"10:00","tz":"Europe/Amsterdam","enabled":true}]}}
+{"data":{"items":[{"id":"...","deviceId":"...","spotId":"...","h3Cell":null,"areaCenter":null,"radiusM":null,"minScore":50,"daysMask":127,"startLocal":"08:00","endLocal":"10:00","tz":"Europe/Amsterdam","enabled":true}]}}
 ```
 
 ### `POST /v1/alerts` — create (201)
@@ -432,7 +432,23 @@ Alert rules fire a push when the best score in an area meets `minScore` during a
 {"deviceId":"...","spotId":"...","minScore":50,"daysMask":127,"startLocal":"08:00","endLocal":"10:00","tz":"Europe/Amsterdam"}
 ```
 
-Area: exactly one of `spotId` **or** `h3Cell`+`radiusM` (meters, ≤50 km). Errors: `invalid_body` (bad shape/range), `plan_limit` (403, Free cap), `not_found` (unknown device).
+Target: exactly one of `spotId`, `h3Cell` or `area` (anything else → `400 invalid_body`). `h3Cell` and `area` also need `radiusM` (meters, 1..50000); `radiusM` with `spotId` is rejected.
+
+Coarse area (no H3 library needed on the client):
+
+```json
+{"deviceId":"...","area":{"lat":52.36,"lon":4.88},"radiusM":3000,"minScore":50,"daysMask":127,"startLocal":"08:00","endLocal":"10:00","tz":"Europe/Amsterdam"}
+```
+
+`lat` ∈ [-90, 90], `lon` ∈ [-180, 180], both required. The server rounds both to 2 decimals (~1 km), converts the point to an H3 cell at **resolution 7** (`geo.H3Resolution`, ~1.2 km edge, same as `spot.cell_id`) and stores **only the cell** — the raw coordinates are never stored or logged and are not echoed back. Evaluation measures `radiusM` from the cell **center**, which can sit up to ~1.2 km from the submitted point.
+
+Responses (list/create/update) always keep `h3Cell` and add `areaCenter`: `{"lat":52.359,"lon":4.88}` (cell center, 3 decimals) for area rules (`h3Cell` or `area` input), and `null` for spot rules. An area-rule response looks like:
+
+```json
+{"data":{"id":"...","deviceId":"...","spotId":null,"h3Cell":608432992271990783,"areaCenter":{"lat":52.359,"lon":4.88},"radiusM":3000,"minScore":50,"daysMask":127,"startLocal":"08:00","endLocal":"10:00","tz":"Europe/Amsterdam","enabled":true}}
+```
+
+Area rules count toward the Free plan limit (1 rule total). When an area rule fires, the push names the best-scoring active spot within `radiusM` of the cell center at that hour (ties: nearest, then id); payload `spotId` is that spot. Errors: `invalid_body` (bad shape/range), `plan_limit` (403, Free cap), `not_found` (unknown device).
 
 ### `PUT /v1/alerts/{id}` / `DELETE /v1/alerts/{id}?deviceId=...`
 

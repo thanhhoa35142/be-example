@@ -50,12 +50,17 @@ JOIN t_spot_scores ss ON ss.spot_id = s.id AND ss.ts_hour = $2
 WHERE s.id = $1;
 
 -- name: BestScoredSpotNear :one
+-- Best-scoring active spot within radius_m of a point at one hour; ties go to
+-- the nearest, then the lowest id (deterministic).
 SELECT s.id, s.name, ss.score
 FROM t_spots s
-JOIN t_spot_scores ss ON ss.spot_id = s.id AND ss.ts_hour = $3
-WHERE ST_DWithin(s.geom::geography,
-                 ST_SetSRID(ST_MakePoint($2, $1), 4326)::geography, $4)
-ORDER BY ss.score DESC NULLS LAST
+JOIN t_spot_scores ss ON ss.spot_id = s.id AND ss.ts_hour = sqlc.arg(ts_hour)
+WHERE s.status = 'active'
+  AND ST_DWithin(s.geom, ST_SetSRID(ST_MakePoint(sqlc.arg(lon)::float8, sqlc.arg(lat)::float8), 4326)::geography,
+                 sqlc.arg(radius_m)::float8)
+ORDER BY ss.score DESC,
+         ST_Distance(s.geom, ST_SetSRID(ST_MakePoint(sqlc.arg(lon)::float8, sqlc.arg(lat)::float8), 4326)::geography),
+         s.id
 LIMIT 1;
 
 -- name: SweepStaleDeliveries :exec

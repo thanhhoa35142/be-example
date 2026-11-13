@@ -6,9 +6,11 @@ package alerts
 import (
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/thanhhoa35142/be-example/internal/modules/geo"
 )
 
 var (
@@ -43,10 +45,31 @@ type Rule struct {
 	Enabled    bool
 }
 
-// RuleInput is the create/update payload.
+// AreaCenter returns the center of the rule's H3 cell (area rules only).
+func (r Rule) AreaCenter() (lat, lon float64, ok bool) {
+	if r.H3Cell == nil {
+		return 0, 0, false
+	}
+	lat, lon, err := geo.CellCenter(int64(*r.H3Cell))
+	if err != nil {
+		return 0, 0, false
+	}
+	return lat, lon, true
+}
+
+// LatLon is a coarse client-supplied point. It is never stored: normalize
+// rounds it to 2 decimals (~1 km) and converts it to an H3 cell.
+type LatLon struct {
+	Lat float64
+	Lon float64
+}
+
+// RuleInput is the create/update payload. Exactly one of SpotID, H3Cell or
+// Area must be set.
 type RuleInput struct {
 	SpotID     *uuid.UUID
 	H3Cell     *uint64
+	Area       *LatLon
 	RadiusM    *int
 	MinScore   int
 	DaysMask   int
@@ -91,14 +114,32 @@ func parseHHMM(s string) (time.Duration, error) {
 
 // normalize validates and fills defaults for a RuleInput.
 func normalize(in RuleInput) (RuleInput, error) {
-	if in.SpotID == nil && in.H3Cell == nil {
-		return in, fmt.Errorf("%w: spotId or h3Cell required", ErrInvalidRule)
+	shapes := 0
+	if in.SpotID != nil {
+		shapes++
 	}
-	if in.SpotID != nil && in.H3Cell != nil {
-		return in, fmt.Errorf("%w: spotId and h3Cell are mutually exclusive", ErrInvalidRule)
+	if in.H3Cell != nil {
+		shapes++
+	}
+	if in.Area != nil {
+		shapes++
+	}
+	if shapes != 1 {
+		return in, fmt.Errorf("%w: exactly one of spotId, h3Cell or area required", ErrInvalidRule)
+	}
+	if in.Area != nil {
+		cell, err := AreaCell(*in.Area)
+		if err != nil {
+			return in, err
+		}
+		in.H3Cell = &cell
+		in.Area = nil // raw coordinates are dropped here, never stored or logged
 	}
 	if in.H3Cell != nil && (in.RadiusM == nil || *in.RadiusM <= 0 || *in.RadiusM > 50000) {
-		return in, fmt.Errorf("%w: radiusM must be 1..50000 for h3Cell rules", ErrInvalidRule)
+		return in, fmt.Errorf("%w: radiusM must be 1..50000 for area rules", ErrInvalidRule)
+	}
+	if in.SpotID != nil && in.RadiusM != nil {
+		return in, fmt.Errorf("%w: radiusM only applies to area rules", ErrInvalidRule)
 	}
 	if in.MinScore < 0 || in.MinScore > 100 {
 		return in, fmt.Errorf("%w: minScore must be 0..100", ErrInvalidRule)
@@ -110,4 +151,27 @@ func normalize(in RuleInput) (RuleInput, error) {
 		return in, fmt.Errorf("%w: unknown timezone", ErrInvalidRule)
 	}
 	return in, nil
+}
+
+// round2 rounds to 2 decimals (~1.1 km of latitude).
+func round2(v float64) float64 {
+	r := math.Round(v*100) / 100
+	if r == 0 {
+		return 0 // avoid -0
+	}
+	return r
+}
+
+// AreaCell validates a coarse point, rounds it to 2 decimals and converts it
+// to an H3 cell at geo.H3Resolution. The raw value is not retained.
+func AreaCell(p LatLon) (uint64, error) {
+	if math.IsNaN(p.Lat) || math.IsNaN(p.Lon) || math.IsInf(p.Lat, 0) || math.IsInf(p.Lon, 0) ||
+		p.Lat < -90 || p.Lat > 90 || p.Lon < -180 || p.Lon > 180 {
+		return 0, fmt.Errorf("%w: area lat/lon out of range", ErrInvalidRule)
+	}
+	id, err := geo.CellIDFromLatLng(round2(p.Lat), round2(p.Lon))
+	if err != nil {
+		return 0, fmt.Errorf("%w: area not convertible to a cell", ErrInvalidRule)
+	}
+	return uint64(id), nil
 }

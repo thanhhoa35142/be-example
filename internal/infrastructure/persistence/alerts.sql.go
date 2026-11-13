@@ -16,18 +16,21 @@ import (
 const bestScoredSpotNear = `-- name: BestScoredSpotNear :one
 SELECT s.id, s.name, ss.score
 FROM t_spots s
-JOIN t_spot_scores ss ON ss.spot_id = s.id AND ss.ts_hour = $3
-WHERE ST_DWithin(s.geom::geography,
-                 ST_SetSRID(ST_MakePoint($2, $1), 4326)::geography, $4)
-ORDER BY ss.score DESC NULLS LAST
+JOIN t_spot_scores ss ON ss.spot_id = s.id AND ss.ts_hour = $1
+WHERE s.status = 'active'
+  AND ST_DWithin(s.geom, ST_SetSRID(ST_MakePoint($2::float8, $3::float8), 4326)::geography,
+                 $4::float8)
+ORDER BY ss.score DESC,
+         ST_Distance(s.geom, ST_SetSRID(ST_MakePoint($2::float8, $3::float8), 4326)::geography),
+         s.id
 LIMIT 1
 `
 
 type BestScoredSpotNearParams struct {
-	StMakepoint   interface{} `json:"st_makepoint"`
-	StMakepoint_2 interface{} `json:"st_makepoint_2"`
-	TsHour        time.Time   `json:"ts_hour"`
-	StDwithin     interface{} `json:"st_dwithin"`
+	TsHour  time.Time `json:"ts_hour"`
+	Lon     float64   `json:"lon"`
+	Lat     float64   `json:"lat"`
+	RadiusM float64   `json:"radius_m"`
 }
 
 type BestScoredSpotNearRow struct {
@@ -36,12 +39,14 @@ type BestScoredSpotNearRow struct {
 	Score int16       `json:"score"`
 }
 
+// Best-scoring active spot within radius_m of a point at one hour; ties go to
+// the nearest, then the lowest id (deterministic).
 func (q *Queries) BestScoredSpotNear(ctx context.Context, arg BestScoredSpotNearParams) (BestScoredSpotNearRow, error) {
 	row := q.db.QueryRow(ctx, bestScoredSpotNear,
-		arg.StMakepoint,
-		arg.StMakepoint_2,
 		arg.TsHour,
-		arg.StDwithin,
+		arg.Lon,
+		arg.Lat,
+		arg.RadiusM,
 	)
 	var i BestScoredSpotNearRow
 	err := row.Scan(&i.ID, &i.Name, &i.Score)

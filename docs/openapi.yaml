@@ -744,6 +744,13 @@ components:
         deviceId: { type: string, format: uuid }
         spotId: { type: string, format: uuid, nullable: true }
         h3Cell: { type: integer, format: int64, nullable: true }
+        areaCenter:
+          type: object
+          nullable: true
+          description: "H3 cell center (3 decimals) for area rules; null for spot rules"
+          properties:
+            lat: { type: number }
+            lon: { type: number }
         radiusM: { type: integer, nullable: true }
         minScore: { type: integer, minimum: 0, maximum: 100 }
         daysMask: { type: integer, minimum: 1, maximum: 127, description: "bit i = weekday i (0=Sunday)" }
@@ -775,9 +782,16 @@ components:
       required: [deviceId, minScore, daysMask, startLocal, endLocal, tz]
       properties:
         deviceId: { type: string, format: uuid }
-        spotId: { type: string, format: uuid, description: "exactly one of spotId or h3Cell+radiusM" }
-        h3Cell: { type: integer, format: int64 }
-        radiusM: { type: integer, maximum: 50000 }
+        spotId: { type: string, format: uuid, description: "exactly one of spotId, h3Cell or area" }
+        h3Cell: { type: integer, format: int64, description: "needs radiusM" }
+        area:
+          type: object
+          description: "coarse point; server rounds to 2 decimals, converts to an H3 res-7 cell and stores only the cell. Needs radiusM"
+          required: [lat, lon]
+          properties:
+            lat: { type: number, minimum: -90, maximum: 90, example: 52.36 }
+            lon: { type: number, minimum: -180, maximum: 180, example: 4.88 }
+        radiusM: { type: integer, minimum: 1, maximum: 50000, description: "required with h3Cell/area; rejected with spotId" }
         minScore: { type: integer, minimum: 0, maximum: 100 }
         daysMask: { type: integer, minimum: 1, maximum: 127 }
         startLocal: { type: string, pattern: "^\\d{2}:\\d{2}$" }

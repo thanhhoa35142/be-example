@@ -164,10 +164,10 @@ func (r *AlertsRepo) SpotScoreAt(ctx context.Context, spotID uuid.UUID, tsHour t
 
 func (r *AlertsRepo) BestScoredSpotNear(ctx context.Context, lat, lon float64, radiusM int, tsHour time.Time) (*alerts.Delivery, error) {
 	row, err := r.q.BestScoredSpotNear(ctx, BestScoredSpotNearParams{
-		StMakepoint:   lat,
-		StMakepoint_2: lon,
-		TsHour:        tsHour,
-		StDwithin:     radiusM,
+		Lat:     lat,
+		Lon:     lon,
+		TsHour:  tsHour,
+		RadiusM: float64(radiusM),
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
