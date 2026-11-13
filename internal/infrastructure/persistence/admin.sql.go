@@ -594,25 +594,37 @@ func (q *Queries) ListScoringConfigs(ctx context.Context) ([]TScoringConfig, err
 }
 
 const maxCrowdUpdatedAt = `-- name: MaxCrowdUpdatedAt :one
-SELECT COALESCE(max(updated_at), '1970-01-01'::timestamptz) FROM t_crowd_estimates
+SELECT GREATEST(
+    COALESCE((SELECT max(updated_at) FROM t_crowd_estimates), '1970-01-01'::timestamptz),
+    COALESCE((SELECT max(finished_at) FROM t_job_runs
+              WHERE job = 'crowd.refresh' AND status = 'succeeded'), '1970-01-01'::timestamptz)
+)::timestamptz AS ts
 `
 
-func (q *Queries) MaxCrowdUpdatedAt(ctx context.Context) (interface{}, error) {
+// Unchanged model rows are not rewritten, so also count the last successful
+// crowd.refresh run.
+func (q *Queries) MaxCrowdUpdatedAt(ctx context.Context) (time.Time, error) {
 	row := q.db.QueryRow(ctx, maxCrowdUpdatedAt)
-	var coalesce interface{}
-	err := row.Scan(&coalesce)
-	return coalesce, err
+	var ts time.Time
+	err := row.Scan(&ts)
+	return ts, err
 }
 
 const maxScoreComputedAt = `-- name: MaxScoreComputedAt :one
-SELECT COALESCE(max(computed_at), '1970-01-01'::timestamptz) FROM t_spot_scores
+SELECT GREATEST(
+    COALESCE((SELECT max(computed_at) FROM t_spot_scores), '1970-01-01'::timestamptz),
+    COALESCE((SELECT max(finished_at) FROM t_job_runs
+              WHERE job = 'scoring.recompute' AND status = 'succeeded'), '1970-01-01'::timestamptz)
+)::timestamptz AS ts
 `
 
-func (q *Queries) MaxScoreComputedAt(ctx context.Context) (interface{}, error) {
+// Unchanged score rows are not rewritten, so also count the last successful
+// scoring.recompute run as proof the pipeline is alive.
+func (q *Queries) MaxScoreComputedAt(ctx context.Context) (time.Time, error) {
 	row := q.db.QueryRow(ctx, maxScoreComputedAt)
-	var coalesce interface{}
-	err := row.Scan(&coalesce)
-	return coalesce, err
+	var ts time.Time
+	err := row.Scan(&ts)
+	return ts, err
 }
 
 const maxWeatherFetchedAt = `-- name: MaxWeatherFetchedAt :one

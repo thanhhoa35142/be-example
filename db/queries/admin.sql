@@ -77,10 +77,22 @@ WHERE s.status IN ('active', 'grace', 'billing_retry');
 SELECT COALESCE(max(fetched_at), '1970-01-01'::timestamptz) FROM t_weather_hourly_forecasts;
 
 -- name: MaxScoreComputedAt :one
-SELECT COALESCE(max(computed_at), '1970-01-01'::timestamptz) FROM t_spot_scores;
+-- Unchanged score rows are not rewritten, so also count the last successful
+-- scoring.recompute run as proof the pipeline is alive.
+SELECT GREATEST(
+    COALESCE((SELECT max(computed_at) FROM t_spot_scores), '1970-01-01'::timestamptz),
+    COALESCE((SELECT max(finished_at) FROM t_job_runs
+              WHERE job = 'scoring.recompute' AND status = 'succeeded'), '1970-01-01'::timestamptz)
+)::timestamptz AS ts;
 
 -- name: MaxCrowdUpdatedAt :one
-SELECT COALESCE(max(updated_at), '1970-01-01'::timestamptz) FROM t_crowd_estimates;
+-- Unchanged model rows are not rewritten, so also count the last successful
+-- crowd.refresh run.
+SELECT GREATEST(
+    COALESCE((SELECT max(updated_at) FROM t_crowd_estimates), '1970-01-01'::timestamptz),
+    COALESCE((SELECT max(finished_at) FROM t_job_runs
+              WHERE job = 'crowd.refresh' AND status = 'succeeded'), '1970-01-01'::timestamptz)
+)::timestamptz AS ts;
 
 -- name: ListPendingSpotReports :many
 SELECT r.id, r.spot_id, s.name, r.type, r.issue_code, r.created_at

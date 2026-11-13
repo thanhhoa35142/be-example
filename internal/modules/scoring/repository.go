@@ -55,7 +55,6 @@ type ScoreWrite struct {
 	CapReason     *string
 	Reasons       []Reason
 	Confidence    int
-	ComputedAt    time.Time
 }
 
 // Repository is the port the scoring module depends on.
@@ -66,5 +65,8 @@ type Repository interface {
 	AmenitiesForSpots(ctx context.Context, spotIDs []uuid.UUID) ([]AmenityRow, error)
 	WeatherForCells(ctx context.Context, cellIDs []int64, from, to time.Time) ([]WeatherRow, error)
 	CrowdForSpots(ctx context.Context, spotIDs []uuid.UUID) ([]CrowdRow, error)
-	UpsertScore(ctx context.Context, w ScoreWrite) (int64, error)
+	// UpsertScores writes a batch under one config version. Rows whose values
+	// are unchanged are left untouched; computedAt is stamped only on rows
+	// that are inserted or whose value changed. Returns how many rows that was.
+	UpsertScores(ctx context.Context, configVersion int16, rows []ScoreWrite, computedAt time.Time) (int64, error)
 }

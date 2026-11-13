@@ -31,15 +31,22 @@ func NewService(repo Repository) *Service {
 	return &Service{repo: repo}
 }
 
+// writeBatchSize is the number of score rows per upsert statement.
+const writeBatchSize = 10000
+
 type Stats struct {
-	Spots   int
-	Hours   int
+	Spots int
+	Hours int // spot-hours scored
+	// Written is how many rows were actually inserted or changed; the rest
+	// (Hours - Written) were identical and left untouched.
 	Written int
-	Skipped int
+	Skipped int // spot-hours with no data to score
 }
 
 // Recompute recalculates spot_score for every active spot over the next
-// ForecastHorizon hours. The upsert only writes changed rows.
+// ForecastHorizon hours. Writes are batched (writeBatchSize rows per
+// statement) and the upsert only touches rows whose value changed, so
+// t_spot_scores.computed_at means "last time the value changed".
 func (s *Service) Recompute(ctx context.Context) (Stats, error) {
 	cfg, err := s.repo.ActiveConfig(ctx)
 	if err != nil {
@@ -90,6 +97,20 @@ func (s *Service) Recompute(ctx context.Context) (Stats, error) {
 	stats := Stats{Spots: len(spots)}
 	computedAt := now
 
+	batch := make([]ScoreWrite, 0, writeBatchSize)
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		n, err := s.repo.UpsertScores(ctx, cfg.Version, batch, computedAt)
+		if err != nil {
+			return err
+		}
+		stats.Written += int(n)
+		batch = batch[:0]
+		return nil
+	}
+
 	for _, sp := range spots {
 		loc := time.UTC
 		if l, err := time.LoadLocation(sp.TZ); err == nil {
@@ -116,27 +137,29 @@ func (s *Service) Recompute(ctx context.Context) (Stats, error) {
 				continue
 			}
 
-			n, err := s.repo.UpsertScore(ctx, ScoreWrite{
-				SpotID:        sp.ID,
-				TSHour:        ts,
-				ConfigVersion: cfg.Version,
-				Score:         res.Score,
-				SWeather:      res.Components.Weather,
-				SCrowd:        res.Components.Crowd,
-				SAmenity:      res.Components.Amenity,
-				SShade:        res.Components.Shade,
-				SFresh:        res.Components.Fresh,
-				CapReason:     res.CapReason,
-				Reasons:       res.Reasons,
-				Confidence:    res.Confidence,
-				ComputedAt:    computedAt,
+			batch = append(batch, ScoreWrite{
+				SpotID:     sp.ID,
+				TSHour:     ts,
+				Score:      res.Score,
+				SWeather:   res.Components.Weather,
+				SCrowd:     res.Components.Crowd,
+				SAmenity:   res.Components.Amenity,
+				SShade:     res.Components.Shade,
+				SFresh:     res.Components.Fresh,
+				CapReason:  res.CapReason,
+				Reasons:    res.Reasons,
+				Confidence: res.Confidence,
 			})
-			if err != nil {
-				return stats, err
-			}
 			stats.Hours++
-			stats.Written += int(n)
+			if len(batch) >= writeBatchSize {
+				if err := flush(); err != nil {
+					return stats, err
+				}
+			}
 		}
+	}
+	if err := flush(); err != nil {
+		return stats, err
 	}
 	return stats, nil
 }

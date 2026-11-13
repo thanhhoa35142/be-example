@@ -205,12 +205,26 @@ func (q *Queries) ListWeatherForCells(ctx context.Context, arg ListWeatherForCel
 	return items, nil
 }
 
-const upsertSpotScore = `-- name: UpsertSpotScore :execrows
+const upsertSpotScoresBatch = `-- name: UpsertSpotScoresBatch :execrows
 INSERT INTO t_spot_scores (
     spot_id, ts_hour, config_version, score,
     s_weather, s_crowd, s_amenity, s_shade, s_fresh,
     cap_reason, reasons, confidence, computed_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+)
+SELECT ($1::uuid[])[i], ($2::timestamptz[])[i],
+       $3::smallint, ($4::smallint[])[i],
+       NULLIF(($5::smallint[])[i], -1),
+       NULLIF(($6::smallint[])[i], -1),
+       NULLIF(($7::smallint[])[i], -1),
+       NULLIF(($8::smallint[])[i], -1),
+       NULLIF(($9::smallint[])[i], -1),
+       NULLIF(cr.v, ''),
+       rs.v::jsonb,
+       ($10::smallint[])[i],
+       $11::timestamptz
+FROM generate_series(1, cardinality($1::uuid[])) AS i
+JOIN unnest($12::text[]) WITH ORDINALITY AS cr(v, n) ON cr.n = i
+JOIN unnest($13::text[]) WITH ORDINALITY AS rs(v, n) ON rs.n = i
 ON CONFLICT (spot_id, ts_hour) DO UPDATE SET
     config_version = EXCLUDED.config_version,
     score          = EXCLUDED.score,
@@ -223,43 +237,57 @@ ON CONFLICT (spot_id, ts_hour) DO UPDATE SET
     reasons        = EXCLUDED.reasons,
     confidence     = EXCLUDED.confidence,
     computed_at    = EXCLUDED.computed_at
-WHERE t_spot_scores.score          IS DISTINCT FROM EXCLUDED.score
-   OR t_spot_scores.reasons        IS DISTINCT FROM EXCLUDED.reasons
-   OR t_spot_scores.confidence     IS DISTINCT FROM EXCLUDED.confidence
-   OR t_spot_scores.computed_at    IS DISTINCT FROM EXCLUDED.computed_at
+WHERE (t_spot_scores.config_version, t_spot_scores.score,
+       t_spot_scores.s_weather, t_spot_scores.s_crowd, t_spot_scores.s_amenity,
+       t_spot_scores.s_shade, t_spot_scores.s_fresh,
+       t_spot_scores.cap_reason, t_spot_scores.reasons, t_spot_scores.confidence)
+      IS DISTINCT FROM
+      (EXCLUDED.config_version, EXCLUDED.score,
+       EXCLUDED.s_weather, EXCLUDED.s_crowd, EXCLUDED.s_amenity,
+       EXCLUDED.s_shade, EXCLUDED.s_fresh,
+       EXCLUDED.cap_reason, EXCLUDED.reasons, EXCLUDED.confidence)
 `
 
-type UpsertSpotScoreParams struct {
-	SpotID        uuid.UUID   `json:"spot_id"`
-	TsHour        time.Time   `json:"ts_hour"`
+type UpsertSpotScoresBatchParams struct {
+	SpotIds       []uuid.UUID `json:"spot_ids"`
+	TsHours       []time.Time `json:"ts_hours"`
 	ConfigVersion int16       `json:"config_version"`
-	Score         int16       `json:"score"`
-	SWeather      pgtype.Int2 `json:"s_weather"`
-	SCrowd        pgtype.Int2 `json:"s_crowd"`
-	SAmenity      pgtype.Int2 `json:"s_amenity"`
-	SShade        pgtype.Int2 `json:"s_shade"`
-	SFresh        pgtype.Int2 `json:"s_fresh"`
-	CapReason     pgtype.Text `json:"cap_reason"`
-	Reasons       []byte      `json:"reasons"`
-	Confidence    int16       `json:"confidence"`
+	Scores        []int16     `json:"scores"`
+	SWeather      []int16     `json:"s_weather"`
+	SCrowd        []int16     `json:"s_crowd"`
+	SAmenity      []int16     `json:"s_amenity"`
+	SShade        []int16     `json:"s_shade"`
+	SFresh        []int16     `json:"s_fresh"`
+	Confidences   []int16     `json:"confidences"`
 	ComputedAt    time.Time   `json:"computed_at"`
+	CapReasons    []string    `json:"cap_reasons"`
+	Reasons       []string    `json:"reasons"`
 }
 
-func (q *Queries) UpsertSpotScore(ctx context.Context, arg UpsertSpotScoreParams) (int64, error) {
-	result, err := q.db.Exec(ctx, upsertSpotScore,
-		arg.SpotID,
-		arg.TsHour,
+// Batched upsert (one statement per ~10k rows). Nullable columns arrive as
+// sentinels because sqlc array params cannot carry NULL: -1 for the smallint
+// components, ” for cap_reason. reasons arrive as JSON text.
+// Unchanged rows are NOT rewritten (no new tuple version, no WAL, no index
+// churn): computed_at therefore means "last time the score value changed",
+// not "last time the job looked at it". The returned count is rows
+// inserted or actually changed.
+// Variable-length arrays (text) are joined via WITH ORDINALITY: arr[i] on them
+// is O(i) per access, i.e. quadratic per batch. Fixed-width arrays subscript in O(1).
+func (q *Queries) UpsertSpotScoresBatch(ctx context.Context, arg UpsertSpotScoresBatchParams) (int64, error) {
+	result, err := q.db.Exec(ctx, upsertSpotScoresBatch,
+		arg.SpotIds,
+		arg.TsHours,
 		arg.ConfigVersion,
-		arg.Score,
+		arg.Scores,
 		arg.SWeather,
 		arg.SCrowd,
 		arg.SAmenity,
 		arg.SShade,
 		arg.SFresh,
-		arg.CapReason,
-		arg.Reasons,
-		arg.Confidence,
+		arg.Confidences,
 		arg.ComputedAt,
+		arg.CapReasons,
+		arg.Reasons,
 	)
 	if err != nil {
 		return 0, err
