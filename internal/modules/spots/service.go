@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/thanhhoa35142/be-example/internal/modules/geo"
 )
 
 const (
@@ -14,7 +15,27 @@ const (
 
 	// ForecastDays is the spec'd 7-day hourly forecast window.
 	ForecastDays = 7
+
+	// MaxBatchIDs caps GET /v1/spots?ids=.
+	MaxBatchIDs = 50
+	// MaxScoreHours caps the hourly series (GET /v1/spots?hours=).
+	MaxScoreHours = 24
 )
+
+// WeatherSourceCode maps a stored provider name to the public attribution
+// code the app renders ("Apple Weather" / "Open-Meteo"); nil for none/unknown.
+func WeatherSourceCode(provider string) *string {
+	var code string
+	switch provider {
+	case "weatherkit":
+		code = "weatherkit"
+	case "open-meteo", "openmeteo":
+		code = "openmeteo"
+	default:
+		return nil
+	}
+	return &code
+}
 
 type Service struct {
 	repo Repository
@@ -27,15 +48,48 @@ func NewService(repo Repository) *Service {
 // ListInBBox returns active spots in the viewport with the score at the
 // requested hour (quantized to the hour for edge-cache friendliness).
 func (s *Service) ListInBBox(ctx context.Context, bbox BBox, when *time.Time) ([]SpotWithScore, error) {
-	if err := validateBBox(bbox); err != nil {
-		return nil, err
+	return s.List(ctx, ListQuery{BBox: &bbox, When: when})
+}
+
+// List serves GET /v1/spots: by viewport or by ids, optionally with the
+// simplified outline and an hourly score series.
+func (s *Service) List(ctx context.Context, q ListQuery) ([]SpotWithScore, error) {
+	if (q.BBox == nil) == (len(q.IDs) == 0) {
+		return nil, ErrInvalidQuery
 	}
-	ts := time.Now().UTC()
-	if when != nil {
-		ts = when.UTC()
+	if q.BBox != nil {
+		if err := validateBBox(*q.BBox); err != nil {
+			return nil, err
+		}
+	}
+	if len(q.IDs) > MaxBatchIDs || q.Hours < 0 || q.Hours > MaxScoreHours {
+		return nil, ErrInvalidQuery
+	}
+	now := time.Now().UTC()
+	ts := now
+	switch {
+	case q.When != nil:
+		ts = q.When.UTC()
+	case q.From != nil:
+		ts = q.From.UTC()
 	}
 	ts = ts.Truncate(time.Hour)
-	return s.repo.ListInBBox(ctx, bbox, ts)
+
+	var from, to time.Time // empty range unless an hourly series is wanted
+	if q.Hours > 0 {
+		from = now
+		if q.From != nil {
+			from = q.From.UTC()
+		}
+		from = from.Truncate(time.Hour)
+		to = from.Add(time.Duration(q.Hours) * time.Hour)
+	}
+	return s.repo.List(ctx, q, ts, from, to)
+}
+
+// ListPacks returns the city packs the app can use (beta/live).
+func (s *Service) ListPacks(ctx context.Context) ([]Pack, error) {
+	return s.repo.ListPacks(ctx)
 }
 
 func (s *Service) Get(ctx context.Context, id uuid.UUID) (SpotDetail, error) {
@@ -62,6 +116,12 @@ func (s *Service) Get(ctx context.Context, id uuid.UUID) (SpotDetail, error) {
 	if err != nil {
 		return SpotDetail{}, err
 	}
+	// Weather rows live on the coarser weather grid, like the scorer reads them.
+	provider, err := s.repo.WeatherProvider(ctx, geo.WeatherCellID(detail.CellID))
+	if err != nil {
+		return SpotDetail{}, err
+	}
+	detail.WeatherSource = WeatherSourceCode(provider)
 	return detail, nil
 }
 

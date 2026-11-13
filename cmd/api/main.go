@@ -20,6 +20,7 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/modules/devices"
 	"github.com/thanhhoa35142/be-example/internal/modules/entitlement"
 	"github.com/thanhhoa35142/be-example/internal/modules/events"
+	"github.com/thanhhoa35142/be-example/internal/modules/geo"
 	"github.com/thanhhoa35142/be-example/internal/modules/notifier"
 	"github.com/thanhhoa35142/be-example/internal/modules/recommendations"
 	"github.com/thanhhoa35142/be-example/internal/modules/reports"
@@ -33,6 +34,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
+
+	geo.WeatherResolution = cfg.WeatherH3Res
 
 	ctx := context.Background()
 

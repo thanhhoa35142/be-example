@@ -46,8 +46,8 @@ Every non-GeoJSON success response is wrapped:
 | `invalid_id` | 400 | Path/body ID is not a UUID |
 | `invalid_bbox` | 400 | `bbox` malformed or out of WGS84 bounds |
 | `bbox_too_large` | 400 | Viewport > ~0.5° — zoom in |
-| `invalid_when` | 400 | `when` is not RFC3339 |
-| `invalid_query` | 400 | lat/lon/radius/limit out of range |
+| `invalid_when` | 400 | `when` / `from` is not RFC3339 |
+| `invalid_query` | 400 | lat/lon/radius/limit out of range; on `/v1/spots`: both or neither of `bbox`/`ids`, bad/too many `ids`, `hours` outside 1–24, unknown `include` |
 | `invalid_body` | 400 | JSON body malformed or missing fields |
 | `invalid_report` | 400 | report type/level/verdict out of domain |
 | `not_found` | 404 | spot or device does not exist |
@@ -78,17 +78,23 @@ Liveness/readiness probes. No auth.
 
 ---
 
-### `GET /v1/spots?bbox=&when=`
+### `GET /v1/spots?bbox=&when=` (also `ids=`, `from=&hours=`, `include=area`)
 
-Spots inside a viewport with their score at a given hour.
+Spots inside a viewport — or a batch of known spots (Saved screen) — with their score at a given hour.
 **Returns raw GeoJSON `FeatureCollection` (NOT wrapped in `data`)** — feed directly to a GeoJSON decoder / map layer.
 
-Query params:
+Query params (exactly one of `bbox` / `ids`):
 
 | param | required | format | notes |
 |---|---|---|---|
-| `bbox` | yes | `west,south,east,north` | WGS84 degrees; each axis ≤ 0.5° |
-| `when` | no | RFC3339 | score hour; truncated to the hour server-side; default = now |
+| `bbox` | one of | `west,south,east,north` | WGS84 degrees; each axis ≤ 0.5°. Malformed → `invalid_bbox` |
+| `ids` | one of | `uuid,uuid,...` | 1–50 spot ids. Malformed uuid / >50 → `invalid_query`. Unknown or non-active ids are omitted; a merged id is resolved to its merge target (so `properties.id` may differ from the id you asked for — update your stored id). Duplicates collapse |
+| `when` | no | RFC3339 | hour for `properties.score`; truncated to the hour server-side; default = `from`, else now |
+| `from` | no | RFC3339 | start of the hourly series (truncated to the hour); default = now. Malformed → `invalid_when` |
+| `hours` | no | int 1–24 | adds `properties.scores` (below); out of range → `invalid_query`. Without it `scores` is absent |
+| `include` | no | `area` | comma-separated; adds `properties.area`. Unknown value → `invalid_query` |
+
+Both or neither of `bbox` / `ids` → `400 invalid_query`. `hours` works with either selector. The `ids` variant has no viewport size cap.
 
 ```json
 {
@@ -132,6 +138,19 @@ Query params:
 | `score.confidence` | int 1–3 | 3 = high; model-only crowd caps at 2 |
 | `score.capReason` | string \| null | e.g. `rain`, `heat`, `cold` when hard-capped |
 | `score.reasons` | array ≤3 | `{code, params?}` — **translate client-side** |
+| `scores` | array | only with `hours`: `{tsHour, score, capReason}` for `hours` consecutive hours from `from` (truncated to the hour), ascending; hours without a computed score are omitted; `[]` if none. `capReason` is `null` or e.g. `rain`. Built in one query — use it for the map time-lapse instead of one request per hour |
+| `area` | GeoJSON MultiPolygon \| null | only with `include=area`: park outline simplified server-side (~5 m, `ST_SimplifyPreserveTopology`, coordinates rounded to 6 decimals); `null` for point spots. `geometry` stays the Point |
+
+Time-lapse / outline example (`GET /v1/spots?bbox=4.85,52.35,4.90,52.37&from=2026-11-13T06:00:00Z&hours=3&include=area`), one feature's extra properties:
+
+```json
+"area": { "type": "MultiPolygon", "coordinates": [[[[4.855018, 52.356319], [4.855804, 52.354848], "..."]]] },
+"scores": [
+  { "tsHour": "2026-11-13T06:00:00Z", "score": 56, "capReason": null },
+  { "tsHour": "2026-11-13T07:00:00Z", "score": 55, "capReason": null },
+  { "tsHour": "2026-11-13T08:00:00Z", "score": 54, "capReason": null }
+]
+```
 
 ---
 
@@ -158,7 +177,8 @@ Spot detail.
     ],
     "sources": [
       { "source": "osm", "sourceId": "node/12345", "version": 1, "importedAt": "2026-11-11T13:39:58Z" }
-    ]
+    ],
+    "weatherSource": "openmeteo"
   }
 }
 ```
@@ -169,6 +189,7 @@ Spot detail.
 | `area` | optional GeoJSON MultiPolygon (park outline); absent for point spots |
 | `amenities[].type` | `toilet`, `parking`, `water`, `bbq`, `playground`, `dog_area`, ... |
 | `lastVerifiedAt` | show as "data verified …" in UI |
+| `weatherSource` | `"weatherkit"` \| `"openmeteo"` \| `null` — provider of the forecast behind this spot's scores (null = no weather yet). **Attribution is required**: render "Apple Weather" (link to https://weatherkit.apple.com/legal-attribution.html) or "Open-Meteo" (link to https://open-meteo.com/) |
 
 Merged spot → `301` with `Location: /v1/spots/{newId}` — follow it.
 
@@ -202,6 +223,25 @@ Hourly scores for the next **7 days** (168 points).
 | `components` | per-component 0–100; absent key = missing data (don't render as 0) |
 | `capReason` | `rain` \| `heat` \| `cold` — score was hard-capped |
 | `reasons` | max 3 codes; `params` optional numbers for interpolation |
+
+---
+
+### `GET /v1/packs`
+
+City packs the app can use (status `beta` or `live`; drafts/retired are hidden), ordered by country then name. Served with `Cache-Control: public, max-age=3600`.
+
+```json
+{"data":{"items":[
+  {"slug":"amsterdam","name":"Amsterdam","country":"NL","tz":"Europe/Amsterdam",
+   "center":[4.89,52.37],"bbox":[4.73,52.28,5.07,52.43],"activeSpots":662}
+]}}
+```
+
+| field | notes |
+|---|---|
+| `center` | `[lon, lat]` of a point guaranteed inside the pack boundary |
+| `bbox` | `[west, south, east, north]` of the boundary envelope (WGS84, 4 decimals) |
+| `activeSpots` | spots with status `active` |
 
 ---
 
@@ -459,7 +499,7 @@ All `/v1/admin/*` endpoints require `Authorization: Bearer $ADMIN_TOKEN`. When `
 | `POST /v1/admin/scoring-config/{version}/activate` | Make a stored version effective |
 
 Workers write `job_run` automatically (start → ok/failed/skipped).
-Job schedules are stored in the database; running workers reload changes within 30 seconds. Jobs still run once at worker startup. Allowed interval ranges: `weather.refresh` 900–3600s, `crowd.refresh` 3600–2592000s, `crowd.aggregate` 60–86400s, `scoring.recompute` 300–21600s, and `alerts.evaluate` 60–3600s.
+Job schedules are stored in the database; running workers reload changes within 30 seconds. Jobs still run once at worker startup. Allowed interval ranges: `weather.refresh` 900–3600s, `crowd.refresh` 3600–2592000s, `crowd.aggregate` 60–86400s, `scoring.recompute` 300–21600s, `alerts.evaluate` 60–3600s, and `holidays.refresh` 86400–2592000s (default weekly; offline national public holidays for every pack country, current + next year, into `t_holidays`).
 
 ### `POST /v1/events` — product analytics batch
 

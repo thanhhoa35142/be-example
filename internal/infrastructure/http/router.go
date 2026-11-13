@@ -39,6 +39,7 @@ func NewRouter(pool *pgxpool.Pool, h Handlers) *gin.Engine {
 			spots.GET("", h.Spots.List)
 			spots.GET("/:id", h.Spots.Get)
 			spots.GET("/:id/forecast", h.Spots.Forecast)
+			v1.GET("/packs", h.Spots.Packs)
 		}
 		if h.Recommendations != nil {
 			v1.GET("/recommendations", h.Recommendations.List)

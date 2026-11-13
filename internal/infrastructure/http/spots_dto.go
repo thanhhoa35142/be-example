@@ -2,6 +2,7 @@ package http
 
 import (
 	"encoding/json"
+	"math"
 	"time"
 
 	"github.com/thanhhoa35142/be-example/internal/modules/spots"
@@ -23,27 +24,46 @@ type geoJSONFeatureCollection struct {
 	Features []geoJSONFeature `json:"features"`
 }
 
-func toFeatureCollection(items []spots.SpotWithScore, when time.Time) geoJSONFeatureCollection {
+// toFeatureCollection renders the viewport/batch result. withArea / withScores
+// add the optional `area` / `scores` properties (absent otherwise); both are
+// pre-serialized JSON from the query, so `area` is an explicit null for point
+// spots and `scores` is [] when no hour has a score.
+func toFeatureCollection(items []spots.SpotWithScore, when time.Time, withArea, withScores bool) geoJSONFeatureCollection {
 	features := make([]geoJSONFeature, 0, len(items))
 	for _, item := range items {
+		props := map[string]any{
+			"id":             item.ID,
+			"kind":           item.Kind,
+			"name":           item.Name,
+			"names":          item.Names,
+			"country":        item.Country,
+			"city":           item.City,
+			"tz":             item.TZ,
+			"lastVerifiedAt": utcPtr(item.LastVerifiedAt),
+			"when":           when.UTC().Format(time.RFC3339),
+			"score":          scoreProps(item.Score),
+		}
+		if withArea {
+			if len(item.Area) > 0 {
+				props["area"] = item.Area
+			} else {
+				props["area"] = nil
+			}
+		}
+		if withScores {
+			if len(item.HourlyScores) > 0 {
+				props["scores"] = item.HourlyScores
+			} else {
+				props["scores"] = json.RawMessage("[]")
+			}
+		}
 		features = append(features, geoJSONFeature{
 			Type: "Feature",
 			Geometry: geoJSONPoint{
 				Type:        "Point",
 				Coordinates: []float64{item.Lon, item.Lat},
 			},
-			Properties: map[string]any{
-				"id":             item.ID,
-				"kind":           item.Kind,
-				"name":           item.Name,
-				"names":          item.Names,
-				"country":        item.Country,
-				"city":           item.City,
-				"tz":             item.TZ,
-				"lastVerifiedAt": utcPtr(item.LastVerifiedAt),
-				"when":           when.UTC().Format(time.RFC3339),
-				"score":          scoreProps(item.Score),
-			},
+			Properties: props,
 		})
 	}
 	return geoJSONFeatureCollection{Type: "FeatureCollection", Features: features}
@@ -84,6 +104,8 @@ type detailResponse struct {
 	LastVerifiedAt *time.Time      `json:"lastVerifiedAt"`
 	Amenities      []spots.Amenity `json:"amenities"`
 	Sources        []spots.Source  `json:"sources"`
+	// WeatherSource: "weatherkit" | "openmeteo" | null (no weather yet).
+	WeatherSource *string `json:"weatherSource"`
 }
 
 func toDetailResponse(d spots.SpotDetail) detailResponse {
@@ -105,5 +127,31 @@ func toDetailResponse(d spots.SpotDetail) detailResponse {
 		LastVerifiedAt: utcPtr(d.LastVerifiedAt),
 		Amenities:      d.Amenities,
 		Sources:        sources,
+		WeatherSource:  d.WeatherSource,
 	}
 }
+
+type packItem struct {
+	Slug        string     `json:"slug"`
+	Name        string     `json:"name"`
+	Country     string     `json:"country"`
+	TZ          string     `json:"tz"`
+	Center      [2]float64 `json:"center"`
+	BBox        [4]float64 `json:"bbox"`
+	ActiveSpots int        `json:"activeSpots"`
+}
+
+func toPackItems(packs []spots.Pack) []packItem {
+	out := make([]packItem, 0, len(packs))
+	for _, p := range packs {
+		out = append(out, packItem{
+			Slug: p.Slug, Name: p.Name, Country: p.Country, TZ: p.TZ,
+			Center:      [2]float64{round4(p.Center[0]), round4(p.Center[1])},
+			BBox:        [4]float64{round4(p.BBox[0]), round4(p.BBox[1]), round4(p.BBox[2]), round4(p.BBox[3])},
+			ActiveSpots: p.ActiveSpots,
+		})
+	}
+	return out
+}
+
+func round4(v float64) float64 { return math.Round(v*1e4) / 1e4 }

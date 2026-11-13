@@ -59,6 +59,23 @@ type ScoreSnapshot struct {
 type SpotWithScore struct {
 	Spot
 	Score *ScoreSnapshot
+	// Area is the simplified outline (GeoJSON MultiPolygon), only loaded when
+	// ListQuery.IncludeArea is set; nil for point spots.
+	Area json.RawMessage
+	// HourlyScores is a pre-serialized JSON array of {tsHour, score, capReason},
+	// only loaded when ListQuery.Hours > 0; nil when no hour has a score.
+	HourlyScores json.RawMessage
+}
+
+// ListQuery selects spots either by viewport or by id (exactly one of BBox /
+// IDs). Scores are read at When (default From, default now).
+type ListQuery struct {
+	BBox        *BBox
+	IDs         []uuid.UUID
+	When        *time.Time
+	From        *time.Time // start of the hourly series; used with Hours
+	Hours       int        // 0 = no hourly series, else 1..MaxScoreHours
+	IncludeArea bool
 }
 
 type Components struct {
@@ -93,9 +110,24 @@ type Source struct {
 
 type SpotDetail struct {
 	Spot
-	Status      string          `json:"-"`
-	MergedInto  *uuid.UUID      `json:"-"`
-	AreaGeoJSON json.RawMessage `json:"area,omitempty"`
-	Amenities   []Amenity       `json:"amenities"`
-	Sources     []Source        `json:"sources"`
+	Status string `json:"-"`
+	CellID int64  `json:"-"`
+	// WeatherSource is the provider of the weather behind the scores
+	// ("weatherkit" | "openmeteo"); nil when the spot has no weather yet.
+	WeatherSource *string         `json:"-"`
+	MergedInto    *uuid.UUID      `json:"-"`
+	AreaGeoJSON   json.RawMessage `json:"area,omitempty"`
+	Amenities     []Amenity       `json:"amenities"`
+	Sources       []Source        `json:"sources"`
+}
+
+// Pack is a city pack as listed to the app.
+type Pack struct {
+	Slug        string
+	Name        string
+	Country     string
+	TZ          string
+	Center      [2]float64 // lon, lat
+	BBox        [4]float64 // west, south, east, north
+	ActiveSpots int
 }

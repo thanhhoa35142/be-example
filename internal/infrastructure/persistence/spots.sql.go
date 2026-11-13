@@ -69,6 +69,25 @@ func (q *Queries) GetSpotByID(ctx context.Context, id uuid.UUID) (GetSpotByIDRow
 	return i, err
 }
 
+const getSpotWeatherProvider = `-- name: GetSpotWeatherProvider :one
+SELECT provider
+FROM t_weather_hourly_forecasts
+WHERE cell_id = $1
+ORDER BY (ts >= date_trunc('hour', now())) DESC,
+         CASE WHEN ts >= date_trunc('hour', now()) THEN ts END ASC,
+         fetched_at DESC
+LIMIT 1
+`
+
+// Provider of the forecast rows scoring reads for this weather cell: the row
+// at the current hour, else the next one, else the latest fetched.
+func (q *Queries) GetSpotWeatherProvider(ctx context.Context, cellID int64) (string, error) {
+	row := q.db.QueryRow(ctx, getSpotWeatherProvider, cellID)
+	var provider string
+	err := row.Scan(&provider)
+	return provider, err
+}
+
 const listCityPacks = `-- name: ListCityPacks :many
 SELECT id, slug, name, country, tz, status, osm_extract, last_import_at
 FROM t_city_packs
@@ -105,6 +124,67 @@ func (q *Queries) ListCityPacks(ctx context.Context) ([]ListCityPacksRow, error)
 			&i.Status,
 			&i.OsmExtract,
 			&i.LastImportAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPackSummaries = `-- name: ListPackSummaries :many
+SELECT p.slug, p.name, p.country, p.tz,
+       ST_X(ST_PointOnSurface(p.boundary))::float8 AS center_lon,
+       ST_Y(ST_PointOnSurface(p.boundary))::float8 AS center_lat,
+       ST_XMin(p.boundary)::float8 AS west,
+       ST_YMin(p.boundary)::float8 AS south,
+       ST_XMax(p.boundary)::float8 AS east,
+       ST_YMax(p.boundary)::float8 AS north,
+       (SELECT count(*) FROM t_spots s
+         WHERE s.city_pack_id = p.id AND s.status = 'active')::int AS active_spots
+FROM t_city_packs p
+WHERE p.status IN ('beta', 'live')
+ORDER BY p.country, p.name
+`
+
+type ListPackSummariesRow struct {
+	Slug        string  `json:"slug"`
+	Name        string  `json:"name"`
+	Country     string  `json:"country"`
+	Tz          string  `json:"tz"`
+	CenterLon   float64 `json:"center_lon"`
+	CenterLat   float64 `json:"center_lat"`
+	West        float64 `json:"west"`
+	South       float64 `json:"south"`
+	East        float64 `json:"east"`
+	North       float64 `json:"north"`
+	ActiveSpots int32   `json:"active_spots"`
+}
+
+func (q *Queries) ListPackSummaries(ctx context.Context) ([]ListPackSummariesRow, error) {
+	rows, err := q.db.Query(ctx, listPackSummaries)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPackSummariesRow{}
+	for rows.Next() {
+		var i ListPackSummariesRow
+		if err := rows.Scan(
+			&i.Slug,
+			&i.Name,
+			&i.Country,
+			&i.Tz,
+			&i.CenterLon,
+			&i.CenterLat,
+			&i.West,
+			&i.South,
+			&i.East,
+			&i.North,
+			&i.ActiveSpots,
 		); err != nil {
 			return nil, err
 		}
@@ -188,31 +268,150 @@ func (q *Queries) ListSpotSources(ctx context.Context, spotID uuid.UUID) ([]List
 	return items, nil
 }
 
+const listSpotsByIDs = `-- name: ListSpotsByIDs :many
+WITH wanted AS (
+    SELECT DISTINCT COALESCE(m.merged_into, m.id) AS id
+    FROM t_spots m
+    WHERE m.id = ANY($5::uuid[])
+)
+SELECT s.id, s.city_pack_id, s.kind, s.name, s.names,
+       ST_X(s.geom::geometry)::float8 AS lon,
+       ST_Y(s.geom::geometry)::float8 AS lat,
+       s.country, s.city, s.tz, s.last_verified_at,
+       (CASE WHEN $1::bool AND s.area IS NOT NULL
+            THEN ST_AsGeoJSON(ST_Multi(ST_SimplifyPreserveTopology(s.area, 0.00005)), 6)::jsonb
+       END)::jsonb AS area_geojson,
+       sc.score, sc.confidence, sc.cap_reason, sc.reasons, sc.computed_at,
+       (SELECT jsonb_agg(jsonb_build_object(
+                  'tsHour', to_char(h.ts_hour AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+                  'score', h.score,
+                  'capReason', h.cap_reason) ORDER BY h.ts_hour)
+          FROM t_spot_scores h
+         WHERE h.spot_id = s.id
+           AND h.ts_hour >= $2::timestamptz
+           AND h.ts_hour <  $3::timestamptz)::jsonb AS hourly_scores
+FROM t_spots s
+JOIN wanted w ON w.id = s.id
+LEFT JOIN t_spot_scores sc
+  ON sc.spot_id = s.id AND sc.ts_hour = $4::timestamptz
+WHERE s.status = 'active'
+`
+
+type ListSpotsByIDsParams struct {
+	IncludeArea bool        `json:"include_area"`
+	ScoresFrom  time.Time   `json:"scores_from"`
+	ScoresTo    time.Time   `json:"scores_to"`
+	TsHour      time.Time   `json:"ts_hour"`
+	Ids         []uuid.UUID `json:"ids"`
+}
+
+type ListSpotsByIDsRow struct {
+	ID             uuid.UUID          `json:"id"`
+	CityPackID     uuid.UUID          `json:"city_pack_id"`
+	Kind           string             `json:"kind"`
+	Name           pgtype.Text        `json:"name"`
+	Names          []byte             `json:"names"`
+	Lon            float64            `json:"lon"`
+	Lat            float64            `json:"lat"`
+	Country        string             `json:"country"`
+	City           pgtype.Text        `json:"city"`
+	Tz             string             `json:"tz"`
+	LastVerifiedAt pgtype.Timestamptz `json:"last_verified_at"`
+	AreaGeojson    []byte             `json:"area_geojson"`
+	Score          pgtype.Int2        `json:"score"`
+	Confidence     pgtype.Int2        `json:"confidence"`
+	CapReason      pgtype.Text        `json:"cap_reason"`
+	Reasons        []byte             `json:"reasons"`
+	ComputedAt     pgtype.Timestamptz `json:"computed_at"`
+	HourlyScores   []byte             `json:"hourly_scores"`
+}
+
+// Same row shape as ListSpotsInBBox. Merged ids resolve one hop to their
+// merge target; unknown / non-active ids are dropped. Duplicates collapse.
+func (q *Queries) ListSpotsByIDs(ctx context.Context, arg ListSpotsByIDsParams) ([]ListSpotsByIDsRow, error) {
+	rows, err := q.db.Query(ctx, listSpotsByIDs,
+		arg.IncludeArea,
+		arg.ScoresFrom,
+		arg.ScoresTo,
+		arg.TsHour,
+		arg.Ids,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListSpotsByIDsRow{}
+	for rows.Next() {
+		var i ListSpotsByIDsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.CityPackID,
+			&i.Kind,
+			&i.Name,
+			&i.Names,
+			&i.Lon,
+			&i.Lat,
+			&i.Country,
+			&i.City,
+			&i.Tz,
+			&i.LastVerifiedAt,
+			&i.AreaGeojson,
+			&i.Score,
+			&i.Confidence,
+			&i.CapReason,
+			&i.Reasons,
+			&i.ComputedAt,
+			&i.HourlyScores,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listSpotsInBBox = `-- name: ListSpotsInBBox :many
 SELECT s.id, s.city_pack_id, s.kind, s.name, s.names,
        ST_X(s.geom::geometry)::float8 AS lon,
        ST_Y(s.geom::geometry)::float8 AS lat,
        s.country, s.city, s.tz, s.last_verified_at,
-       sc.score, sc.confidence, sc.cap_reason, sc.reasons, sc.computed_at
+       (CASE WHEN $1::bool AND s.area IS NOT NULL
+            THEN ST_AsGeoJSON(ST_Multi(ST_SimplifyPreserveTopology(s.area, 0.00005)), 6)::jsonb
+       END)::jsonb AS area_geojson,
+       sc.score, sc.confidence, sc.cap_reason, sc.reasons, sc.computed_at,
+       (SELECT jsonb_agg(jsonb_build_object(
+                  'tsHour', to_char(h.ts_hour AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+                  'score', h.score,
+                  'capReason', h.cap_reason) ORDER BY h.ts_hour)
+          FROM t_spot_scores h
+         WHERE h.spot_id = s.id
+           AND h.ts_hour >= $2::timestamptz
+           AND h.ts_hour <  $3::timestamptz)::jsonb AS hourly_scores
 FROM t_spots s
 LEFT JOIN t_spot_scores sc
-  ON sc.spot_id = s.id AND sc.ts_hour = $1::timestamptz
+  ON sc.spot_id = s.id AND sc.ts_hour = $4::timestamptz
 WHERE s.status = 'active'
   AND s.geom::geometry && ST_MakeEnvelope(
-      $2::float8,
-      $3::float8,
-      $4::float8,
       $5::float8,
+      $6::float8,
+      $7::float8,
+      $8::float8,
       4326
   )
 `
 
 type ListSpotsInBBoxParams struct {
-	TsHour time.Time `json:"ts_hour"`
-	West   float64   `json:"west"`
-	South  float64   `json:"south"`
-	East   float64   `json:"east"`
-	North  float64   `json:"north"`
+	IncludeArea bool      `json:"include_area"`
+	ScoresFrom  time.Time `json:"scores_from"`
+	ScoresTo    time.Time `json:"scores_to"`
+	TsHour      time.Time `json:"ts_hour"`
+	West        float64   `json:"west"`
+	South       float64   `json:"south"`
+	East        float64   `json:"east"`
+	North       float64   `json:"north"`
 }
 
 type ListSpotsInBBoxRow struct {
@@ -227,15 +426,22 @@ type ListSpotsInBBoxRow struct {
 	City           pgtype.Text        `json:"city"`
 	Tz             string             `json:"tz"`
 	LastVerifiedAt pgtype.Timestamptz `json:"last_verified_at"`
+	AreaGeojson    []byte             `json:"area_geojson"`
 	Score          pgtype.Int2        `json:"score"`
 	Confidence     pgtype.Int2        `json:"confidence"`
 	CapReason      pgtype.Text        `json:"cap_reason"`
 	Reasons        []byte             `json:"reasons"`
 	ComputedAt     pgtype.Timestamptz `json:"computed_at"`
+	HourlyScores   []byte             `json:"hourly_scores"`
 }
 
+// include_area adds the park outline simplified to ~5 m (0.00005 deg),
+// coordinates rounded to 6 decimals. NULL for point spots.
 func (q *Queries) ListSpotsInBBox(ctx context.Context, arg ListSpotsInBBoxParams) ([]ListSpotsInBBoxRow, error) {
 	rows, err := q.db.Query(ctx, listSpotsInBBox,
+		arg.IncludeArea,
+		arg.ScoresFrom,
+		arg.ScoresTo,
 		arg.TsHour,
 		arg.West,
 		arg.South,
@@ -261,11 +467,13 @@ func (q *Queries) ListSpotsInBBox(ctx context.Context, arg ListSpotsInBBoxParams
 			&i.City,
 			&i.Tz,
 			&i.LastVerifiedAt,
+			&i.AreaGeojson,
 			&i.Score,
 			&i.Confidence,
 			&i.CapReason,
 			&i.Reasons,
 			&i.ComputedAt,
+			&i.HourlyScores,
 		); err != nil {
 			return nil, err
 		}

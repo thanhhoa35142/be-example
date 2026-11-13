@@ -10,6 +10,8 @@ var (
 	ErrNotFound     = errors.New("spot not found")
 	ErrInvalidBBox  = errors.New("invalid bbox")
 	ErrBboxTooLarge = errors.New("bbox too large")
+	// ErrInvalidQuery covers ids / hours / selector problems on GET /v1/spots.
+	ErrInvalidQuery = errors.New("invalid query")
 )
 
 // MergedError is returned when a spot was merged into another during re-import.
