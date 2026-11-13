@@ -301,7 +301,7 @@ the known-places list now fully activates.
 | D3 | Auto-activate | `AutoActivate=60`, `KeepPending=35`; pending visible to admin review |
 | D4 | `curated` lock | Yes — importer never mutates curated/hidden/merged |
 | D5 | Close policy | 2 missing runs; blast-radius guard aborts run; `closed_by_report` is admin-only |
-| D6 | Shade input | Deferred — scoring `s_shade` review pending |
+| D6 | Shade input | Planned — see `SHADE_PLAN.md` |
 | D7 | osmium-tool | Baked into the worker image: `docker build --target worker` (debian bookworm-slim, osmium 1.15; alpine has no package). Image defaults `INGEST_SOURCE=osmium`, `INGEST_EXTRACT_DIR=/data/extracts` (mount a volume). Dev may still use `OSMIUM_CMD` + `pickhour-osmium` |
 | D8 | Packs: country extract + clip | Yes — per-`osm_extract` pbf, per-pack bbox stream filter |
 
