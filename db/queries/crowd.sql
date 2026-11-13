@@ -23,15 +23,23 @@ WHERE country::text = ANY($1::text[])
   AND date >= $2
   AND date <= $3;
 
--- name: UpsertCrowdEstimate :exec
+-- name: UpsertCrowdEstimatesBatch :execrows
+-- Batched model upsert (~10k rows per statement). Never overwrites community
+-- or provider rows, and skips model rows whose level is unchanged, so
+-- updated_at means "last time the model level changed" (the freshness
+-- endpoint also considers the last successful crowd.refresh run).
 INSERT INTO t_crowd_estimates (spot_id, dow, hour, level, source, n_reports, updated_at)
-VALUES ($1, $2, $3, $4, 'model', 0, now())
+SELECT (sqlc.arg(spot_ids)::uuid[])[i], (sqlc.arg(dows)::smallint[])[i],
+       (sqlc.arg(hours)::smallint[])[i], (sqlc.arg(levels)::smallint[])[i],
+       'model', 0, now()
+FROM generate_series(1, cardinality(sqlc.arg(spot_ids)::uuid[])) AS i
 ON CONFLICT (spot_id, dow, hour) DO UPDATE SET
     level      = EXCLUDED.level,
     source     = EXCLUDED.source,
     n_reports  = 0,
     updated_at = EXCLUDED.updated_at
-WHERE t_crowd_estimates.source = 'model';
+WHERE t_crowd_estimates.source = 'model'
+  AND t_crowd_estimates.level IS DISTINCT FROM EXCLUDED.level;
 
 -- name: ListHolidayCountries :many
 SELECT DISTINCT country::text AS country

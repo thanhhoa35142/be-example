@@ -316,7 +316,7 @@ func main() {
 				if err != nil {
 					return err
 				}
-				logger.Info("crowd done", "spots", stats.Spots, "written", stats.Written, "skipped", stats.Skipped)
+				logger.Info("crowd done", "spots", stats.Spots, "slots", stats.Slots, "written", stats.Written, "skipped", stats.Skipped)
 				return nil
 			},
 		},
@@ -340,7 +340,7 @@ func main() {
 				if err != nil {
 					return err
 				}
-				logger.Info("scoring done", "spots", stats.Spots, "hours", stats.Hours, "written", stats.Written, "skipped", stats.Skipped)
+				logger.Info("scoring done", "spots", stats.Spots, "hours", stats.Hours, "written", stats.Written, "unchanged", stats.Hours-stats.Written, "skipped", stats.Skipped)
 				return nil
 			},
 		},

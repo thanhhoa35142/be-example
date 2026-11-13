@@ -415,6 +415,54 @@ actor APIClient { ... }
 
 ---
 
+## 9. Batch upsert cho job tính toán lớn (scoring / crowd)
+
+### Bài toán
+
+`scoring.recompute` (15k spot × 168 giờ ≈ 2.5M dòng) và `crowd.refresh`
+(15k × 7 × 24 ≈ 2.5M dòng) ghi **từng dòng một**: ~150-180 dòng/s trên
+Docker → ~4.5 giờ/lần, dài hơn chu kỳ job (scoring 1 giờ, crowd 24 giờ).
+Thời gian nằm gần như hoàn toàn ở round-trip ghi (CPU worker < 10%), không
+phải ở tính toán hay đọc (đọc đã gom 1 query/loại, không có N+1).
+
+### Cách làm
+
+- **1 statement / 10k dòng**, vẫn thuần sqlc: truyền các cột dưới dạng mảng,
+  `INSERT ... SELECT (arr)[i] ... FROM generate_series(1, cardinality(arr)) i
+  ON CONFLICT DO UPDATE ... WHERE (cột cũ...) IS DISTINCT FROM (EXCLUDED...)`.
+  sqlc không hiểu `unnest(a, b, c)` nhiều mảng → dùng subscript `arr[i]`.
+- **Dòng không đổi thì không ghi** (không tuple mới, không WAL): mệnh đề
+  `WHERE ... IS DISTINCT FROM` chỉ so sánh cột giá trị, **không** so
+  `computed_at`/`updated_at`. Hệ quả ngữ nghĩa: `computed_at` = "lần cuối
+  giá trị đổi", không phải "lần cuối job chạy". Freshness (`/v1/admin/freshness`)
+  lấy `GREATEST(max(computed_at), finished_at của lần chạy thành công gần nhất)`
+  từ `t_job_runs` nên không báo stale giả.
+- NULL trong mảng sqlc (`[]int16`) không biểu diễn được → dùng sentinel
+  (`-1` → `NULLIF(x, -1)`, `''` → `NULLIF(x, '')`).
+
+### Gotcha
+
+1. **`arr[i]` trên mảng độ dài biến đổi (`text[]`) là O(i)** → bình phương
+   theo kích thước batch. Với `reasons text[]` 10k phần tử, 1 batch mất
+   ~1 s và job full-run 311 s chỉ vì chuyện này. Mảng độ rộng cố định
+   (`uuid`, `smallint`, `timestamptz`) subscript O(1). Cách sửa: join
+   `unnest(arr) WITH ORDINALITY ... ON n = i` cho mảng text → 112 s.
+2. Kiểm chứng "cùng điểm số": snapshot bảng trước, chạy code mới trên cùng
+   input, `IS DISTINCT FROM` full-row diff = 0 dòng.
+3. Đo trên **bản copy** của DB (`createdb -T`), không đụng DB seed.
+
+### Số liệu (Docker local, 15 091 spot active, 2 535 288 dòng)
+
+| Job | Trước | Sau |
+|---|---|---|
+| scoring, 200 spot (33 600 dòng) | 211 s, 159 dòng/s, ghi 33 600 | ~5 s (gồm khởi động), ghi 33 600 lần đầu, **0** lần sau |
+| scoring, full, lần đầu (bảng rỗng) | ≈ 4.4 giờ (ngoại suy) | 251 s (10k dòng/s) |
+| scoring, full, steady-state (không đổi) | ≈ 4.4 giờ | 112 s, ghi **0** dòng |
+| crowd, 200 spot (33 600 dòng) | 189 s, 178 dòng/s | 0.75 s, ghi 8 730 (đổi) / 0 lần sau |
+| crowd, full | > 5 phút (bị dừng), ≈ 3.9 giờ ngoại suy | 40-43 s, ghi 43 992 (đổi) / 0 lần sau |
+
+---
+
 ## Checklist áp dụng cho dự án mới
 
 - [ ] Nhiều Go binaries? → 1 multi-stage Dockerfile, compose services
@@ -429,3 +477,6 @@ actor APIClient { ... }
 - [ ] List lớn? → keyset pagination `limit+1` + `nextCursor`.
 - [ ] React state từ localStorage? → `useSyncExternalStore`, không
       setState-in-effect.
+- [ ] Job ghi hàng triệu dòng? → batch `INSERT ... ON CONFLICT ... WHERE
+      IS DISTINCT FROM` (10k/statement), tránh `arr[i]` trên `text[]`
+      (O(n²)), đo trên bản copy DB.

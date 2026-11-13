@@ -19,9 +19,13 @@ func NewService(repo Repository) *Service {
 	return &Service{repo: repo, now: time.Now}
 }
 
+// writeBatchSize is the number of estimate rows per upsert statement.
+const writeBatchSize = 10000
+
 type Stats struct {
 	Spots   int
-	Written int
+	Slots   int // model slots computed
+	Written int // rows actually inserted or changed (unchanged rows are skipped)
 	Skipped int
 }
 
@@ -104,17 +108,38 @@ func (s *Service) Refresh(ctx context.Context) (Stats, error) {
 
 	var st Stats
 	st.Spots = len(ests)
+	batch := make([]ModelEstimate, 0, writeBatchSize)
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		n, err := s.repo.UpsertModelBatch(ctx, batch)
+		if err != nil {
+			return fmt.Errorf("upsert crowd batch: %w", err)
+		}
+		st.Written += int(n)
+		batch = batch[:0]
+		return nil
+	}
 	for _, e := range ests {
 		peak := peaks[peakKey{kind: e.spot.Kind, city: e.spot.CityPackID}]
 		for dow := 0; dow < 7; dow++ {
 			for hour := 0; hour < 24; hour++ {
-				level := Normalize(e.raw[dow][hour], peak)
-				if err := s.repo.Upsert(ctx, e.spot.ID, dow, hour, level); err != nil {
-					return st, fmt.Errorf("upsert spot %s dow %d hour %d: %w", e.spot.ID, dow, hour, err)
+				batch = append(batch, ModelEstimate{
+					SpotID: e.spot.ID, Dow: dow, Hour: hour,
+					Level: Normalize(e.raw[dow][hour], peak),
+				})
+				st.Slots++
+				if len(batch) >= writeBatchSize {
+					if err := flush(); err != nil {
+						return st, err
+					}
 				}
-				st.Written++
 			}
 		}
+	}
+	if err := flush(); err != nil {
+		return st, err
 	}
 	st.Skipped = len(spots) - len(ests)
 	return st, nil

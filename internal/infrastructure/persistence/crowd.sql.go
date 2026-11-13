@@ -211,32 +211,43 @@ func (q *Queries) ListHolidayCountries(ctx context.Context) ([]string, error) {
 	return items, nil
 }
 
-const upsertCrowdEstimate = `-- name: UpsertCrowdEstimate :exec
+const upsertCrowdEstimatesBatch = `-- name: UpsertCrowdEstimatesBatch :execrows
 INSERT INTO t_crowd_estimates (spot_id, dow, hour, level, source, n_reports, updated_at)
-VALUES ($1, $2, $3, $4, 'model', 0, now())
+SELECT ($1::uuid[])[i], ($2::smallint[])[i],
+       ($3::smallint[])[i], ($4::smallint[])[i],
+       'model', 0, now()
+FROM generate_series(1, cardinality($1::uuid[])) AS i
 ON CONFLICT (spot_id, dow, hour) DO UPDATE SET
     level      = EXCLUDED.level,
     source     = EXCLUDED.source,
     n_reports  = 0,
     updated_at = EXCLUDED.updated_at
 WHERE t_crowd_estimates.source = 'model'
+  AND t_crowd_estimates.level IS DISTINCT FROM EXCLUDED.level
 `
 
-type UpsertCrowdEstimateParams struct {
-	SpotID uuid.UUID `json:"spot_id"`
-	Dow    int16     `json:"dow"`
-	Hour   int16     `json:"hour"`
-	Level  int16     `json:"level"`
+type UpsertCrowdEstimatesBatchParams struct {
+	SpotIds []uuid.UUID `json:"spot_ids"`
+	Dows    []int16     `json:"dows"`
+	Hours   []int16     `json:"hours"`
+	Levels  []int16     `json:"levels"`
 }
 
-func (q *Queries) UpsertCrowdEstimate(ctx context.Context, arg UpsertCrowdEstimateParams) error {
-	_, err := q.db.Exec(ctx, upsertCrowdEstimate,
-		arg.SpotID,
-		arg.Dow,
-		arg.Hour,
-		arg.Level,
+// Batched model upsert (~10k rows per statement). Never overwrites community
+// or provider rows, and skips model rows whose level is unchanged, so
+// updated_at means "last time the model level changed" (the freshness
+// endpoint also considers the last successful crowd.refresh run).
+func (q *Queries) UpsertCrowdEstimatesBatch(ctx context.Context, arg UpsertCrowdEstimatesBatchParams) (int64, error) {
+	result, err := q.db.Exec(ctx, upsertCrowdEstimatesBatch,
+		arg.SpotIds,
+		arg.Dows,
+		arg.Hours,
+		arg.Levels,
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const upsertHolidays = `-- name: UpsertHolidays :execrows

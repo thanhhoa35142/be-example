@@ -101,10 +101,17 @@ func (r *CrowdRepo) Holidays(ctx context.Context, countries []string, from, to t
 	return holidays, nil
 }
 
-func (r *CrowdRepo) Upsert(ctx context.Context, spotID uuid.UUID, dow, hour int, level int) error {
-	return r.q.UpsertCrowdEstimate(ctx, UpsertCrowdEstimateParams{
-		SpotID: spotID, Dow: int16(dow), Hour: int16(hour), Level: int16(level),
-	})
+func (r *CrowdRepo) UpsertModelBatch(ctx context.Context, rows []crowd.ModelEstimate) (int64, error) {
+	p := UpsertCrowdEstimatesBatchParams{
+		SpotIds: make([]uuid.UUID, len(rows)),
+		Dows:    make([]int16, len(rows)),
+		Hours:   make([]int16, len(rows)),
+		Levels:  make([]int16, len(rows)),
+	}
+	for i, r := range rows {
+		p.SpotIds[i], p.Dows[i], p.Hours[i], p.Levels[i] = r.SpotID, int16(r.Dow), int16(r.Hour), int16(r.Level)
+	}
+	return r.q.UpsertCrowdEstimatesBatch(ctx, p)
 }
 
 func (r *CrowdRepo) CommunityStats(ctx context.Context, minReports int) ([]crowd.CommunitySlot, error) {
