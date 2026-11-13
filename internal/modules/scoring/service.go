@@ -107,6 +107,7 @@ func (s *Service) Recompute(ctx context.Context) (Stats, error) {
 				Weather:          weatherAt(weatherIdx, weatherCell, ts),
 				Crowd:            crowdAt(crowdIdx, sp.ID, int(local.Weekday()), local.Hour()),
 				AmenityScore:     amenScore,
+				SunElevationDeg:  sunElevationMidHour(sp.Lat, sp.Lon, ts),
 				DaysSinceUpdated: daysSince,
 			}
 			res := Score(in, cfg)
@@ -239,4 +240,11 @@ func indexAmenities(rows []AmenityRow) map[uuid.UUID]*int {
 		m[id] = amenityScoreFor(rs)
 	}
 	return m
+}
+
+// sunElevationMidHour is the solar elevation at ts+30min (the middle of the
+// scored hour) at the spot.
+func sunElevationMidHour(lat, lon float64, tsHour time.Time) *float64 {
+	e := geo.SunElevationDeg(lat, lon, tsHour.Add(30*time.Minute))
+	return &e
 }

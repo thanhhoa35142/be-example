@@ -25,6 +25,9 @@ type Inputs struct {
 	AmenityScore     *int // 0-100, precomputed from spot_amenity
 	ShadeScore       *int // 0-100, reserved (sun/shade model not built yet)
 	DaysSinceUpdated int  // days since last_verified_at; large when unknown
+	// SunElevationDeg is the solar elevation at the middle of the hour at the
+	// spot; nil skips the daylight caps.
+	SunElevationDeg *float64
 }
 
 // Components holds the per-component sub-scores; nil means missing data.
@@ -90,16 +93,9 @@ func Score(in Inputs, cfg Config) Result {
 	res.HasData = true
 	res.Score = int(math.Round(total / wsum))
 
-	// Hard caps.
-	if r := capReason(in, cfg); r != nil {
+	// Hard caps: the lowest applicable cap wins and supplies the reason.
+	if r, capVal := hardCap(in, cfg); r != nil {
 		res.CapReason = r
-		capVal := cfg.Thresholds.RainScoreCap
-		switch *r {
-		case "heat":
-			capVal = cfg.Thresholds.HeatScoreCap
-		case "cold":
-			capVal = cfg.Thresholds.ColdScoreCap
-		}
 		if res.Score > capVal {
 			res.Score = capVal
 		}
@@ -110,13 +106,64 @@ func Score(in Inputs, cfg Config) Result {
 	return res
 }
 
-// capReason returns "rain" | "heat" | "cold" when a hard cap applies.
-func capReason(in Inputs, cfg Config) *string {
+// Cap reasons.
+const (
+	CapRain     = "rain"
+	CapHeat     = "heat"
+	CapCold     = "cold"
+	CapDark     = "dark"
+	CapTwilight = "twilight"
+)
+
+// hardCap returns the reason and value of the lowest applicable hard cap
+// (rain | heat | cold | dark | twilight), or nil when none applies. Ties go to
+// the weather cap, which is evaluated first (rain, then heat, then cold).
+func hardCap(in Inputs, cfg Config) (*string, int) {
+	var reason *string
+	capVal := 0
+	consider := func(r string, v int) {
+		if reason == nil || v < capVal {
+			reason, capVal = strPtr(r), v
+		}
+	}
+	if r := weatherCapReason(in, cfg); r != nil {
+		switch *r {
+		case CapHeat:
+			consider(*r, cfg.Thresholds.HeatScoreCap)
+		case CapCold:
+			consider(*r, cfg.Thresholds.ColdScoreCap)
+		default:
+			consider(*r, cfg.Thresholds.RainScoreCap)
+		}
+	}
+	if r, v := daylightCap(in.SunElevationDeg, cfg.Thresholds); r != "" {
+		consider(r, v)
+	}
+	return reason, capVal
+}
+
+// daylightCap maps the sun elevation to a cap: below DarkElevationDeg it is
+// dark, below TwilightElevationDeg it is twilight. Returns "" when no cap.
+func daylightCap(elev *float64, th Thresholds) (string, int) {
+	if elev == nil {
+		return "", 0
+	}
+	switch {
+	case th.DarkScoreCap > 0 && *elev < th.DarkElevationDeg:
+		return CapDark, th.DarkScoreCap
+	case th.TwilightScoreCap > 0 && *elev < th.TwilightElevationDeg:
+		return CapTwilight, th.TwilightScoreCap
+	}
+	return "", 0
+}
+
+// weatherCapReason returns "rain" | "heat" | "cold" when a weather cap applies.
+func weatherCapReason(in Inputs, cfg Config) *string {
 	if in.Weather == nil {
 		return nil
 	}
 	if in.Weather.PrecipProb != nil && *in.Weather.PrecipProb >= cfg.Thresholds.RainProbThreshold {
-		return strPtr("rain")
+		return strPtr(CapRain)
 	}
 	t := in.Weather.FeelsLikeC
 	if t == nil {
@@ -126,10 +173,10 @@ func capReason(in Inputs, cfg Config) *string {
 		return nil
 	}
 	if *t >= cfg.Thresholds.HeatCapC {
-		return strPtr("heat")
+		return strPtr(CapHeat)
 	}
 	if *t <= cfg.Thresholds.ColdCapC {
-		return strPtr("cold")
+		return strPtr(CapCold)
 	}
 	return nil
 }

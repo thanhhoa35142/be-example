@@ -143,7 +143,7 @@ The `kinds` / `amenities` / `minScore` filters apply to both selectors (for `ids
 | `score.confidence` | int 1–3 | 3 = high; model-only crowd caps at 2 |
 | `score.capReason` | string \| null | e.g. `rain`, `heat`, `cold` when hard-capped |
 | `score.reasons` | array ≤3 | `{code, params?}` — **translate client-side** |
-| `scores` | array | only with `hours`: `{tsHour, score, capReason}` for `hours` consecutive hours from `from` (truncated to the hour), ascending; hours without a computed score are omitted; `[]` if none. `capReason` is `null` or e.g. `rain`. Built in one query — use it for the map time-lapse instead of one request per hour |
+| `scores` | array | only with `hours`: `{tsHour, score, capReason}` for `hours` consecutive hours from `from` (truncated to the hour), ascending; hours without a computed score are omitted; `[]` if none. `capReason` is `null` or e.g. `rain`, `dark`. Built in one query — use it for the map time-lapse instead of one request per hour |
 | `area` | GeoJSON MultiPolygon \| null | only with `include=area`: park outline simplified server-side (~5 m, `ST_SimplifyPreserveTopology`, coordinates rounded to 6 decimals); `null` for point spots. `geometry` stays the Point |
 
 Time-lapse / outline example (`GET /v1/spots?bbox=4.85,52.35,4.90,52.37&from=2026-11-13T06:00:00Z&hours=3&include=area`), one feature's extra properties:
@@ -226,7 +226,7 @@ Hourly scores for the next **7 days** (168 points).
 | field | notes |
 |---|---|
 | `components` | per-component 0–100; absent key = missing data (don't render as 0) |
-| `capReason` | `rain` \| `heat` \| `cold` — score was hard-capped |
+| `capReason` | `rain` \| `heat` \| `cold` \| `dark` \| `twilight` — score was hard-capped |
 | `reasons` | max 3 codes; `params` optional numbers for interpolation |
 
 ---
@@ -400,7 +400,7 @@ Servers send codes + params; the app renders localized strings.
 
 | code | params | meaning |
 |---|---|---|
-| `cap.rain` / `cap.heat` / `cap.cold` | — | score hard-capped (emitted first when a cap applies) |
+| `cap.rain` / `cap.heat` / `cap.cold` / `cap.dark` / `cap.twilight` | — | score hard-capped (emitted first when a cap applies). `cap.dark`: sun more than 6° below the horizon at mid-hour (cap 10); `cap.twilight`: civil twilight, sun -6°..0° (cap 40). Lowest applicable cap wins |
 | `weather.rain_risk` | `prob` (0–100) | rain expected |
 | `weather.hot` / `weather.cold` | `temp` (°C, 0.1) | extreme temperature |
 | `weather.clear` | `temp` (°C, 0.1) | clear skies |

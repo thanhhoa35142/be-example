@@ -546,7 +546,7 @@ components:
       properties:
         score: { type: integer, minimum: 0, maximum: 100 }
         confidence: { type: integer, minimum: 1, maximum: 3 }
-        capReason: { type: string, nullable: true, enum: [rain, heat, cold, null] }
+        capReason: { type: string, nullable: true, enum: [rain, heat, cold, dark, twilight, null] }
         reasons:
           type: array
           maxItems: 3

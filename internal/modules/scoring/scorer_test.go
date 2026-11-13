@@ -128,3 +128,78 @@ func TestReasonsMaxThree(t *testing.T) {
 		t.Fatal("expected at least one reason")
 	}
 }
+
+func daylightConfig() Config {
+	c := testConfig()
+	c.Version = 2
+	c.Thresholds.DarkElevationDeg, c.Thresholds.DarkScoreCap = -6, 10
+	c.Thresholds.TwilightElevationDeg, c.Thresholds.TwilightScoreCap = 0, 40
+	return c
+}
+
+func goodDay(elev *float64, precip int) Inputs {
+	return Inputs{
+		Weather:         &WeatherInput{FeelsLikeC: f64(22), PrecipProb: i(precip)},
+		Crowd:           &CrowdInput{Level: 5, Source: "community"},
+		AmenityScore:    i(90),
+		SunElevationDeg: elev,
+	}
+}
+
+func TestScoreDaylightCaps(t *testing.T) {
+	cases := []struct {
+		name   string
+		elev   float64
+		reason string
+		max    int
+	}{
+		{"day", 30, "", 100},
+		{"horizon", 0, "", 100},
+		{"civil twilight", -3, "twilight", 40},
+		{"edge -6", -6, "twilight", 40},
+		{"dark", -6.01, "dark", 10},
+		{"night", -40, "dark", 10},
+	}
+	for _, tc := range cases {
+		res := Score(goodDay(f64(tc.elev), 5), daylightConfig())
+		got := ""
+		if res.CapReason != nil {
+			got = *res.CapReason
+		}
+		if got != tc.reason || res.Score > tc.max {
+			t.Errorf("%s: reason=%q score=%d, want reason=%q max=%d", tc.name, got, res.Score, tc.reason, tc.max)
+		}
+		if tc.reason != "" && (len(res.Reasons) == 0 || res.Reasons[0].Code != "cap."+tc.reason) {
+			t.Errorf("%s: first reason = %v", tc.name, res.Reasons)
+		}
+	}
+}
+
+func TestScoreDaylightLowerCapWins(t *testing.T) {
+	// rain cap 40 vs twilight cap 40: tie keeps the weather reason.
+	res := Score(goodDay(f64(-3), 80), daylightConfig())
+	if res.CapReason == nil || *res.CapReason != "rain" {
+		t.Fatalf("tie: want rain, got %v", res.CapReason)
+	}
+	// dark (10) beats rain (40).
+	res = Score(goodDay(f64(-20), 80), daylightConfig())
+	if res.CapReason == nil || *res.CapReason != "dark" || res.Score > 10 {
+		t.Fatalf("want dark<=10, got %v %d", res.CapReason, res.Score)
+	}
+	// heat cap 30 beats twilight 40.
+	in := goodDay(f64(-3), 5)
+	in.Weather.FeelsLikeC = f64(38)
+	res = Score(in, daylightConfig())
+	if res.CapReason == nil || *res.CapReason != "heat" {
+		t.Fatalf("want heat, got %v", res.CapReason)
+	}
+}
+
+func TestScoreDaylightDisabledInV1AndNilElevation(t *testing.T) {
+	if res := Score(goodDay(f64(-40), 5), testConfig()); res.CapReason != nil {
+		t.Fatalf("v1 config must not cap darkness, got %v", *res.CapReason)
+	}
+	if res := Score(goodDay(nil, 5), daylightConfig()); res.CapReason != nil {
+		t.Fatalf("nil elevation must not cap, got %v", *res.CapReason)
+	}
+}

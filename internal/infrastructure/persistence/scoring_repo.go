@@ -38,6 +38,8 @@ func (r *ScoringRepository) ActiveSpots(ctx context.Context) ([]scoring.SpotForS
 			Kind:           row.Kind,
 			CellID:         row.CellID,
 			TZ:             row.Tz,
+			Lat:            row.Lat,
+			Lon:            row.Lon,
 			LastVerifiedAt: timePtr(row.LastVerifiedAt),
 		})
 	}

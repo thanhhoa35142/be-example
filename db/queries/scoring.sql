@@ -6,7 +6,8 @@ ORDER BY active_from DESC, version DESC
 LIMIT 1;
 
 -- name: ListActiveSpotsForScoring :many
-SELECT id, kind, cell_id, tz, last_verified_at
+SELECT id, kind, cell_id, tz, last_verified_at,
+       ST_Y(geom::geometry)::float8 AS lat, ST_X(geom::geometry)::float8 AS lon
 FROM t_spots
 WHERE status = 'active';
 

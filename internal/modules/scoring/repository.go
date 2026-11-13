@@ -13,6 +13,7 @@ type SpotForScoring struct {
 	Kind           string
 	CellID         int64
 	TZ             string
+	Lat, Lon       float64
 	LastVerifiedAt *time.Time
 }
 

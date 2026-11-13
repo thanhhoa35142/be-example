@@ -22,6 +22,13 @@ type Thresholds struct {
 	HeatScoreCap      int     `json:"heat_score_cap"`
 	ColdCapC          float64 `json:"cold_cap_c"`
 	ColdScoreCap      int     `json:"cold_score_cap"`
+
+	// Daylight caps (config v2+). The sun elevation at mid-hour is compared
+	// with these; a zero score cap disables that cap (config v1 has none).
+	DarkElevationDeg     float64 `json:"dark_elevation_deg"`     // below this: dark (civil twilight end, -6)
+	DarkScoreCap         int     `json:"dark_score_cap"`         // cap when dark
+	TwilightElevationDeg float64 `json:"twilight_elevation_deg"` // below this (and >= dark): twilight (0)
+	TwilightScoreCap     int     `json:"twilight_score_cap"`     // cap when twilight
 }
 
 // Config is a versioned scoring configuration loaded from scoring_config.

@@ -35,7 +35,8 @@ func (q *Queries) GetActiveScoringConfig(ctx context.Context) (GetActiveScoringC
 }
 
 const listActiveSpotsForScoring = `-- name: ListActiveSpotsForScoring :many
-SELECT id, kind, cell_id, tz, last_verified_at
+SELECT id, kind, cell_id, tz, last_verified_at,
+       ST_Y(geom::geometry)::float8 AS lat, ST_X(geom::geometry)::float8 AS lon
 FROM t_spots
 WHERE status = 'active'
 `
@@ -46,6 +47,8 @@ type ListActiveSpotsForScoringRow struct {
 	CellID         int64              `json:"cell_id"`
 	Tz             string             `json:"tz"`
 	LastVerifiedAt pgtype.Timestamptz `json:"last_verified_at"`
+	Lat            float64            `json:"lat"`
+	Lon            float64            `json:"lon"`
 }
 
 func (q *Queries) ListActiveSpotsForScoring(ctx context.Context) ([]ListActiveSpotsForScoringRow, error) {
@@ -63,6 +66,8 @@ func (q *Queries) ListActiveSpotsForScoring(ctx context.Context) ([]ListActiveSp
 			&i.CellID,
 			&i.Tz,
 			&i.LastVerifiedAt,
+			&i.Lat,
+			&i.Lon,
 		); err != nil {
 			return nil, err
 		}
