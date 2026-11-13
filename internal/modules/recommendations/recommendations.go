@@ -29,6 +29,7 @@ type Query struct {
 	RadiusM float64
 	When    time.Time // already quantized to the hour
 	Limit   int
+	Filter  spots.Filter
 }
 
 // Item is one recommended spot with its score at Query.When.

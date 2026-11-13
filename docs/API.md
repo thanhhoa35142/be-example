@@ -93,8 +93,13 @@ Query params (exactly one of `bbox` / `ids`):
 | `from` | no | RFC3339 | start of the hourly series (truncated to the hour); default = now. Malformed → `invalid_when` |
 | `hours` | no | int 1–24 | adds `properties.scores` (below); out of range → `invalid_query`. Without it `scores` is absent |
 | `include` | no | `area` | comma-separated; adds `properties.area`. Unknown value → `invalid_query` |
+| `kinds` | no | `park,beach,site,table` | comma list; keep spots whose kind is in the list. Unknown value → `invalid_query` |
+| `amenities` | no | `toilet,water,bbq,playground,shelter,parking,bicycle_parking,dog_area` | comma list; keep spots that have **every** listed amenity (AND). Unknown value → `invalid_query` |
+| `minScore` | no | int 0–100 | keep spots whose score at the requested hour (`when`, default now) is ≥ `minScore`; spots with no score at that hour are excluded. Out of range / not an int → `invalid_query` |
 
 Both or neither of `bbox` / `ids` → `400 invalid_query`. `hours` works with either selector. The `ids` variant has no viewport size cap.
+
+The `kinds` / `amenities` / `minScore` filters apply to both selectors (for `ids`, to the resolved target); absent or empty = no filter. Filtering happens in SQL, so the response shape is unchanged — filtered-out spots are simply omitted.
 
 ```json
 {
@@ -245,7 +250,7 @@ City packs the app can use (status `beta` or `live`; drafts/retired are hidden),
 
 ---
 
-### `GET /v1/recommendations?lat=&lon=&radius=&when=&limit=`
+### `GET /v1/recommendations?lat=&lon=&radius=&when=&limit=` (also `kinds=`, `amenities=`, `minScore=`)
 
 Best spots around a point, ranked by score.
 
@@ -255,6 +260,11 @@ Best spots around a point, ranked by score.
 | `radius` | no | 5000 | ≤ 50000 m |
 | `when` | no | now | RFC3339, quantized to hour |
 | `limit` | no | 3 (Free tier) | ≤ 50 |
+| `kinds` | no | `park,beach,site,table` | comma list; keep spots whose kind is in the list. Unknown value → `invalid_query` |
+| `amenities` | no | `toilet,water,bbq,playground,shelter,parking,bicycle_parking,dog_area` | comma list; keep spots that have **every** listed amenity (AND). Unknown value → `invalid_query` |
+| `minScore` | no | int 0–100 | keep spots whose score at `when` is ≥ `minScore`; spots with no score at that hour are excluded. Out of range / not an int → `invalid_query` |
+
+Filters are applied in SQL **before** `limit`, so `limit=3&kinds=park` returns the 3 best matching parks when they exist. Absent or empty = no filter.
 
 ```json
 {
@@ -408,7 +418,7 @@ Unknown codes may appear as the scorer evolves — clients should render a sensi
 
 ## Alerts
 
-Alert rules fire a push when the best score in an area meets `minScore` during a local-time window. Free plan: **1 rule**; Plus: unlimited. Windows may cross midnight (`startLocal` > `endLocal`). `daysMask` bit `i` = weekday `i` (0=Sunday … 6=Saturday); e.g. `127` = every day, `96` = Sat+Sun (`64+32`). Each (rule, window) delivers at most once.
+Alert rules fire a push when the best score in an area meets `minScore` during a local-time window. Free plan: **1 rule**; Plus: unlimited. Windows may cross midnight (`startLocal` > `endLocal`). `daysMask` bit `i` = weekday `i` (0=Sunday … 6=Saturday); e.g. `127` = every day, `65` = Sat+Sun (`64+1`). Each (rule, window) delivers at most once.
 
 ### `GET /v1/alerts?deviceId={uuid}`
 

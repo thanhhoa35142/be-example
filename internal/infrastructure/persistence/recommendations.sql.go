@@ -31,6 +31,12 @@ WHERE s.status = 'active'
       ST_SetSRID(ST_MakePoint($2, $1), 4326)::geography,
       $4
   )
+  AND (COALESCE(cardinality($6::text[]), 0) = 0 OR s.kind = ANY($6::text[]))
+  AND (COALESCE(cardinality($7::text[]), 0) = 0
+       OR (SELECT count(*) FROM t_spot_amenities fa
+            WHERE fa.spot_id = s.id AND fa.type = ANY($7::text[]))
+          = cardinality($7::text[]))
+  AND ($8::int IS NULL OR sc.score >= $8::int)
 ORDER BY sc.score DESC NULLS LAST, distance_m ASC
 LIMIT $5
 `
@@ -41,6 +47,9 @@ type ListRecommendedSpotsParams struct {
 	TsHour        time.Time   `json:"ts_hour"`
 	StDwithin     interface{} `json:"st_dwithin"`
 	Limit         int32       `json:"limit"`
+	Kinds         []string    `json:"kinds"`
+	Amenities     []string    `json:"amenities"`
+	MinScore      pgtype.Int4 `json:"min_score"`
 }
 
 type ListRecommendedSpotsRow struct {
@@ -69,6 +78,9 @@ func (q *Queries) ListRecommendedSpots(ctx context.Context, arg ListRecommendedS
 		arg.TsHour,
 		arg.StDwithin,
 		arg.Limit,
+		arg.Kinds,
+		arg.Amenities,
+		arg.MinScore,
 	)
 	if err != nil {
 		return nil, err

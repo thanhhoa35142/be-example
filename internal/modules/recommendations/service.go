@@ -34,5 +34,5 @@ func (s *Service) Recommend(ctx context.Context, q Query) ([]Item, error) {
 		q.Limit = MaxLimit
 	}
 	q.When = q.When.UTC().Truncate(time.Hour)
-	return s.repo.Nearby(ctx, q.Lat, q.Lon, q.RadiusM, q.When, q.Limit)
+	return s.repo.Nearby(ctx, q.Lat, q.Lon, q.RadiusM, q.When, q.Limit, q.Filter)
 }

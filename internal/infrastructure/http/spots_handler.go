@@ -153,6 +153,11 @@ func parseListQuery(v url.Values) (spots.ListQuery, *queryProblem) {
 			return invalid("unknown include value; supported: area")
 		}
 	}
+	f, err := spots.ParseFilter(v.Get("kinds"), v.Get("amenities"), v.Get("minScore"))
+	if err != nil {
+		return invalid(err.Error())
+	}
+	q.Filter = f
 	return q, nil
 }
 

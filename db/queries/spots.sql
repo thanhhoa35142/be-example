@@ -1,4 +1,6 @@
 -- name: ListSpotsInBBox :many
+-- Filters: empty kinds/amenities and NULL min_score = no filter; amenities are AND;
+-- min_score excludes spots with no score at ts_hour.
 -- include_area adds the park outline simplified to ~5 m (0.00005 deg),
 -- coordinates rounded to 6 decimals. NULL for point spots.
 SELECT s.id, s.city_pack_id, s.kind, s.name, s.names,
@@ -21,6 +23,12 @@ FROM t_spots s
 LEFT JOIN t_spot_scores sc
   ON sc.spot_id = s.id AND sc.ts_hour = sqlc.arg(ts_hour)::timestamptz
 WHERE s.status = 'active'
+  AND (COALESCE(cardinality(sqlc.arg(kinds)::text[]), 0) = 0 OR s.kind = ANY(sqlc.arg(kinds)::text[]))
+  AND (COALESCE(cardinality(sqlc.arg(amenities)::text[]), 0) = 0
+       OR (SELECT count(*) FROM t_spot_amenities fa
+            WHERE fa.spot_id = s.id AND fa.type = ANY(sqlc.arg(amenities)::text[]))
+          = cardinality(sqlc.arg(amenities)::text[]))
+  AND (sqlc.narg(min_score)::int IS NULL OR sc.score >= sqlc.narg(min_score)::int)
   AND s.geom::geometry && ST_MakeEnvelope(
       sqlc.arg(west)::float8,
       sqlc.arg(south)::float8,
@@ -30,6 +38,7 @@ WHERE s.status = 'active'
   );
 
 -- name: ListSpotsByIDs :many
+-- Optional filters (kinds / amenities AND / min_score) apply to the resolved target.
 -- Same row shape as ListSpotsInBBox. Merged ids resolve one hop to their
 -- merge target; unknown / non-active ids are dropped. Duplicates collapse.
 WITH wanted AS (
@@ -57,7 +66,13 @@ FROM t_spots s
 JOIN wanted w ON w.id = s.id
 LEFT JOIN t_spot_scores sc
   ON sc.spot_id = s.id AND sc.ts_hour = sqlc.arg(ts_hour)::timestamptz
-WHERE s.status = 'active';
+WHERE s.status = 'active'
+  AND (COALESCE(cardinality(sqlc.arg(kinds)::text[]), 0) = 0 OR s.kind = ANY(sqlc.arg(kinds)::text[]))
+  AND (COALESCE(cardinality(sqlc.arg(amenities)::text[]), 0) = 0
+       OR (SELECT count(*) FROM t_spot_amenities fa
+            WHERE fa.spot_id = s.id AND fa.type = ANY(sqlc.arg(amenities)::text[]))
+          = cardinality(sqlc.arg(amenities)::text[]))
+  AND (sqlc.narg(min_score)::int IS NULL OR sc.score >= sqlc.narg(min_score)::int);
 
 -- name: GetSpotByID :one
 SELECT s.id, s.city_pack_id, s.kind, s.name, s.names,

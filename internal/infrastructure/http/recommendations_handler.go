@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/thanhhoa35142/be-example/internal/modules/recommendations"
+	"github.com/thanhhoa35142/be-example/internal/modules/spots"
 	"github.com/thanhhoa35142/be-example/internal/platform/httpx"
 )
 
@@ -57,6 +58,13 @@ func (h *RecommendationsHandler) List(c *gin.Context) {
 		}
 		q.Limit = v
 	}
+
+	f, err := spots.ParseFilter(c.Query("kinds"), c.Query("amenities"), c.Query("minScore"))
+	if err != nil {
+		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidQuery, "Invalid query", err.Error())
+		return
+	}
+	q.Filter = f
 
 	items, err := h.svc.Recommend(c.Request.Context(), q)
 	if err != nil {

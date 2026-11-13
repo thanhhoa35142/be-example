@@ -21,6 +21,7 @@ func NewSpotsRepository(q *Queries) *SpotsRepository {
 }
 
 func (r *SpotsRepository) List(ctx context.Context, q spots.ListQuery, tsHour, seriesFrom, seriesTo time.Time) ([]spots.SpotWithScore, error) {
+	f := q.Filter.Normalized()
 	if q.BBox != nil {
 		rows, err := r.queries.ListSpotsInBBox(ctx, ListSpotsInBBoxParams{
 			IncludeArea: q.IncludeArea,
@@ -31,6 +32,9 @@ func (r *SpotsRepository) List(ctx context.Context, q spots.ListQuery, tsHour, s
 			South:       q.BBox.South,
 			East:        q.BBox.East,
 			North:       q.BBox.North,
+			Kinds:       f.Kinds,
+			Amenities:   f.Amenities,
+			MinScore:    minScoreParam(f.MinScore),
 		})
 		if err != nil {
 			return nil, err
@@ -50,6 +54,9 @@ func (r *SpotsRepository) List(ctx context.Context, q spots.ListQuery, tsHour, s
 		ScoresFrom:  seriesFrom,
 		ScoresTo:    seriesTo,
 		TsHour:      tsHour,
+		Kinds:       f.Kinds,
+		Amenities:   f.Amenities,
+		MinScore:    minScoreParam(f.MinScore),
 	})
 	if err != nil {
 		return nil, err
@@ -61,6 +68,13 @@ func (r *SpotsRepository) List(ctx context.Context, q spots.ListQuery, tsHour, s
 			row.Score, row.Confidence, row.CapReason, row.Reasons, row.ComputedAt))
 	}
 	return out, nil
+}
+
+func minScoreParam(v *int) pgtype.Int4 {
+	if v == nil {
+		return pgtype.Int4{}
+	}
+	return pgtype.Int4{Int32: int32(*v), Valid: true}
 }
 
 func (r *SpotsRepository) WeatherProvider(ctx context.Context, weatherCellID int64) (string, error) {

@@ -272,7 +272,7 @@ const listSpotsByIDs = `-- name: ListSpotsByIDs :many
 WITH wanted AS (
     SELECT DISTINCT COALESCE(m.merged_into, m.id) AS id
     FROM t_spots m
-    WHERE m.id = ANY($5::uuid[])
+    WHERE m.id = ANY($8::uuid[])
 )
 SELECT s.id, s.city_pack_id, s.kind, s.name, s.names,
        ST_X(s.geom::geometry)::float8 AS lon,
@@ -295,6 +295,12 @@ JOIN wanted w ON w.id = s.id
 LEFT JOIN t_spot_scores sc
   ON sc.spot_id = s.id AND sc.ts_hour = $4::timestamptz
 WHERE s.status = 'active'
+  AND (COALESCE(cardinality($5::text[]), 0) = 0 OR s.kind = ANY($5::text[]))
+  AND (COALESCE(cardinality($6::text[]), 0) = 0
+       OR (SELECT count(*) FROM t_spot_amenities fa
+            WHERE fa.spot_id = s.id AND fa.type = ANY($6::text[]))
+          = cardinality($6::text[]))
+  AND ($7::int IS NULL OR sc.score >= $7::int)
 `
 
 type ListSpotsByIDsParams struct {
@@ -302,6 +308,9 @@ type ListSpotsByIDsParams struct {
 	ScoresFrom  time.Time   `json:"scores_from"`
 	ScoresTo    time.Time   `json:"scores_to"`
 	TsHour      time.Time   `json:"ts_hour"`
+	Kinds       []string    `json:"kinds"`
+	Amenities   []string    `json:"amenities"`
+	MinScore    pgtype.Int4 `json:"min_score"`
 	Ids         []uuid.UUID `json:"ids"`
 }
 
@@ -326,6 +335,7 @@ type ListSpotsByIDsRow struct {
 	HourlyScores   []byte             `json:"hourly_scores"`
 }
 
+// Optional filters (kinds / amenities AND / min_score) apply to the resolved target.
 // Same row shape as ListSpotsInBBox. Merged ids resolve one hop to their
 // merge target; unknown / non-active ids are dropped. Duplicates collapse.
 func (q *Queries) ListSpotsByIDs(ctx context.Context, arg ListSpotsByIDsParams) ([]ListSpotsByIDsRow, error) {
@@ -334,6 +344,9 @@ func (q *Queries) ListSpotsByIDs(ctx context.Context, arg ListSpotsByIDsParams) 
 		arg.ScoresFrom,
 		arg.ScoresTo,
 		arg.TsHour,
+		arg.Kinds,
+		arg.Amenities,
+		arg.MinScore,
 		arg.Ids,
 	)
 	if err != nil {
@@ -394,24 +407,33 @@ FROM t_spots s
 LEFT JOIN t_spot_scores sc
   ON sc.spot_id = s.id AND sc.ts_hour = $4::timestamptz
 WHERE s.status = 'active'
+  AND (COALESCE(cardinality($5::text[]), 0) = 0 OR s.kind = ANY($5::text[]))
+  AND (COALESCE(cardinality($6::text[]), 0) = 0
+       OR (SELECT count(*) FROM t_spot_amenities fa
+            WHERE fa.spot_id = s.id AND fa.type = ANY($6::text[]))
+          = cardinality($6::text[]))
+  AND ($7::int IS NULL OR sc.score >= $7::int)
   AND s.geom::geometry && ST_MakeEnvelope(
-      $5::float8,
-      $6::float8,
-      $7::float8,
       $8::float8,
+      $9::float8,
+      $10::float8,
+      $11::float8,
       4326
   )
 `
 
 type ListSpotsInBBoxParams struct {
-	IncludeArea bool      `json:"include_area"`
-	ScoresFrom  time.Time `json:"scores_from"`
-	ScoresTo    time.Time `json:"scores_to"`
-	TsHour      time.Time `json:"ts_hour"`
-	West        float64   `json:"west"`
-	South       float64   `json:"south"`
-	East        float64   `json:"east"`
-	North       float64   `json:"north"`
+	IncludeArea bool        `json:"include_area"`
+	ScoresFrom  time.Time   `json:"scores_from"`
+	ScoresTo    time.Time   `json:"scores_to"`
+	TsHour      time.Time   `json:"ts_hour"`
+	Kinds       []string    `json:"kinds"`
+	Amenities   []string    `json:"amenities"`
+	MinScore    pgtype.Int4 `json:"min_score"`
+	West        float64     `json:"west"`
+	South       float64     `json:"south"`
+	East        float64     `json:"east"`
+	North       float64     `json:"north"`
 }
 
 type ListSpotsInBBoxRow struct {
@@ -435,6 +457,8 @@ type ListSpotsInBBoxRow struct {
 	HourlyScores   []byte             `json:"hourly_scores"`
 }
 
+// Filters: empty kinds/amenities and NULL min_score = no filter; amenities are AND;
+// min_score excludes spots with no score at ts_hour.
 // include_area adds the park outline simplified to ~5 m (0.00005 deg),
 // coordinates rounded to 6 decimals. NULL for point spots.
 func (q *Queries) ListSpotsInBBox(ctx context.Context, arg ListSpotsInBBoxParams) ([]ListSpotsInBBoxRow, error) {
@@ -443,6 +467,9 @@ func (q *Queries) ListSpotsInBBox(ctx context.Context, arg ListSpotsInBBoxParams
 		arg.ScoresFrom,
 		arg.ScoresTo,
 		arg.TsHour,
+		arg.Kinds,
+		arg.Amenities,
+		arg.MinScore,
 		arg.West,
 		arg.South,
 		arg.East,

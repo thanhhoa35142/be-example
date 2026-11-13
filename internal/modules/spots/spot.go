@@ -76,6 +76,7 @@ type ListQuery struct {
 	From        *time.Time // start of the hourly series; used with Hours
 	Hours       int        // 0 = no hourly series, else 1..MaxScoreHours
 	IncludeArea bool
+	Filter      Filter
 }
 
 type Components struct {

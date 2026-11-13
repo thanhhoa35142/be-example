@@ -16,5 +16,11 @@ WHERE s.status = 'active'
       ST_SetSRID(ST_MakePoint($2, $1), 4326)::geography,
       $4
   )
+  AND (COALESCE(cardinality(sqlc.arg(kinds)::text[]), 0) = 0 OR s.kind = ANY(sqlc.arg(kinds)::text[]))
+  AND (COALESCE(cardinality(sqlc.arg(amenities)::text[]), 0) = 0
+       OR (SELECT count(*) FROM t_spot_amenities fa
+            WHERE fa.spot_id = s.id AND fa.type = ANY(sqlc.arg(amenities)::text[]))
+          = cardinality(sqlc.arg(amenities)::text[]))
+  AND (sqlc.narg(min_score)::int IS NULL OR sc.score >= sqlc.narg(min_score)::int)
 ORDER BY sc.score DESC NULLS LAST, distance_m ASC
 LIMIT $5;
