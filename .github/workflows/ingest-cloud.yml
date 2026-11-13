@@ -1,20 +1,33 @@
 name: ingest-cloud
 
 # Manual cloud ingest: downloads Geofabrik extracts, runs the osmium
-# pipeline for all city packs, refreshes weather/crowd/scores, then
-# uploads a pg_dump artifact to restore into a scratch local DB.
+# pipeline for the selected city packs, refreshes weather/crowd/scores,
+# then uploads a pg_dump artifact to restore into a local DB
+# (scripts/ingest/restore-local.sh).
 #
 # Usage: Actions → ingest-cloud → Run workflow (branch: dev).
-# Private-repo free tier: ~2000 min/month — a full run is roughly
-# 1.5-3h depending on extract sizes.
+# Packs live in scripts/ingest/packs.tsv (one row per city, smallest
+# Geofabrik region that contains it). Select by group key and/or slug:
+#   "lu be nl at ch"        Benelux + Alps (previous default)
+#   "eu"                    expands to every European group
+#   "us au gb"              new markets
+#   "berlin paris sydney"   individual packs
+#   "all"                   everything (~40 packs)
+# Private-repo free tier: ~2000 min/month. Extracts are processed one at a
+# time with the next download overlapped, so wall time ≈ total download +
+# osmium time; per-pack ingest is seconds since the 2026-11-13 planner work.
 
 on:
   workflow_dispatch:
     inputs:
-      countries:
-        description: "Space-separated Geofabrik country slugs (e.g. 'france' or 'germany spain'). Supported: luxembourg belgium netherlands austria switzerland france germany spain"
+      packs:
+        description: "Groups/slugs from scripts/ingest/packs.tsv, space-separated. Groups: lu be nl at ch de fr es it pt dk se ie cz pl gb us au. Shortcuts: eu, all"
         type: string
-        default: "luxembourg belgium netherlands austria switzerland"
+        default: "lu be nl at ch"
+
+concurrency:
+  group: ingest-cloud
+  cancel-in-progress: false
 
 jobs:
   ingest:
@@ -35,15 +48,41 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+          --shm-size 1g
 
     env:
       DATABASE_URL: "postgres://picnic:picnic@localhost:5432/picnic?sslmode=disable"
       INGEST_SOURCE: osmium
-      INGEST_EXTRACT_DIR: ${{ github.workspace }}/data/extracts
-      COUNTRIES: ${{ inputs.countries }}
+      OUT_DIR: ${{ github.workspace }}/out
+      WORKER: /tmp/worker
+      PACKS: ${{ inputs.packs }}
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Resolve selection
+        run: |
+          sel=""
+          for t in $PACKS; do
+            # "eu" = every European group (keep in sync with packs.tsv)
+            if [ "$t" = eu ]; then t="lu be nl at ch de fr es it pt dk se ie cz pl gb"; fi
+            sel="${sel:+$sel }$t"
+          done
+          [ -n "$sel" ] || { echo "::error::empty selection"; exit 1; }
+          echo "SELECTION=$sel" >> "$GITHUB_ENV"
+          echo "selection: $sel"
+
+      - name: Prepare extract disk
+        # Prefer /mnt (runner's second disk, usually ~70 GB free); the root
+        # disk has ~14 GB. At most ~2 raw extracts + artifacts live at once.
+        run: |
+          dir="$GITHUB_WORKSPACE/data/extracts"
+          if [ -d /mnt ] && [ "$(df --output=avail -BG /mnt | tail -1 | tr -dc 0-9)" -ge 20 ]; then
+            dir=/mnt/extracts
+          fi
+          sudo mkdir -p "$dir" && sudo chown "$USER" "$dir"
+          echo "INGEST_EXTRACT_DIR=$dir" >> "$GITHUB_ENV"
+          df -h / "$dir"
 
       - uses: actions/setup-go@v5
         with:
@@ -56,26 +95,8 @@ jobs:
           sudo apt-get install -y osmium-tool postgresql-client
           osmium --version | head -1
 
-      - name: Download Go modules
-        run: go mod download
-
-      - name: Download Geofabrik extracts
-        run: |
-          mkdir -p "$INGEST_EXTRACT_DIR"
-          cd "$INGEST_EXTRACT_DIR"
-          for c in $COUNTRIES; do
-            curl -fSL --retry 3 -o "$c-latest.osm.pbf" \
-              "https://download.geofabrik.de/europe/$c-latest.osm.pbf" &
-          done
-          wait
-          ls -lh
-
-      - name: Validate extracts
-        run: |
-          cd "$INGEST_EXTRACT_DIR"
-          for f in *.osm.pbf; do
-            echo "== $f"; osmium fileinfo "$f" | head -8
-          done
+      - name: Build worker
+        run: go build -o "$WORKER" ./cmd/worker
 
       - name: Migrate
         run: go run ./cmd/migrate
@@ -90,75 +111,58 @@ jobs:
             -f /out/probe.dump
           ls -lh probe.dump && rm probe.dump
 
-      - name: Create city packs
-        env:
-          PGCONNECT_TIMEOUT: 10
-        run: |
-          # country -> t_city_packs tuple; keep in sync with the slug map
-          # used by the ingest step below.
-          pack_tuple() {
-            case "$1" in
-              luxembourg)  echo "('luxembourg','Luxembourg','LU','Europe/Luxembourg', ST_MakeEnvelope(5.70,49.40,6.55,50.20,4326),'beta','europe/luxembourg-latest','1970-01-01')" ;;
-              belgium)     echo "('brussels','Brussels','BE','Europe/Brussels', ST_MakeEnvelope(4.25,50.75,4.50,50.95,4326),'beta','europe/belgium-latest','1970-01-01')" ;;
-              netherlands) echo "('amsterdam','Amsterdam','NL','Europe/Amsterdam', ST_MakeEnvelope(4.70,52.25,5.10,52.45,4326),'beta','europe/netherlands-latest','1970-01-01'),('rotterdam','Rotterdam','NL','Europe/Amsterdam', ST_MakeEnvelope(4.35,51.85,4.60,52.00,4326),'beta','europe/netherlands-latest','1970-01-01'),('utrecht','Utrecht','NL','Europe/Amsterdam', ST_MakeEnvelope(4.95,52.05,5.20,52.15,4326),'beta','europe/netherlands-latest','1970-01-01'),('denhaag','The Hague','NL','Europe/Amsterdam', ST_MakeEnvelope(4.20,52.00,4.45,52.12,4326),'beta','europe/netherlands-latest','1970-01-01')" ;;
-              austria)     echo "('vienna','Vienna','AT','Europe/Vienna', ST_MakeEnvelope(16.05,48.05,16.65,48.35,4326),'beta','europe/austria-latest','1970-01-01')" ;;
-              switzerland) echo "('zurich','Zurich','CH','Europe/Zurich', ST_MakeEnvelope(8.35,47.30,8.65,47.48,4326),'beta','europe/switzerland-latest','1970-01-01')" ;;
-              france)      echo "('paris','Paris','FR','Europe/Paris', ST_MakeEnvelope(2.20,48.75,2.50,49.00,4326),'beta','europe/france-latest','1970-01-01')" ;;
-              germany)     echo "('berlin','Berlin','DE','Europe/Berlin', ST_MakeEnvelope(13.08,52.34,13.76,52.68,4326),'beta','europe/germany-latest','1970-01-01'),('munich','Munich','DE','Europe/Berlin', ST_MakeEnvelope(11.35,48.06,11.72,48.25,4326),'beta','europe/germany-latest','1970-01-01'),('hamburg','Hamburg','DE','Europe/Berlin', ST_MakeEnvelope(9.75,53.35,10.35,53.60,4326),'beta','europe/germany-latest','1970-01-01')" ;;
-              spain)       echo "('madrid','Madrid','ES','Europe/Madrid', ST_MakeEnvelope(-3.85,40.35,-3.55,40.55,4326),'beta','europe/spain-latest','1970-01-01'),('barcelona','Barcelona','ES','Europe/Madrid', ST_MakeEnvelope(2.05,41.35,2.25,41.45,4326),'beta','europe/spain-latest','1970-01-01'),('seville','Seville','ES','Europe/Madrid', ST_MakeEnvelope(-6.05,37.35,-5.95,37.45,4326),'beta','europe/spain-latest','1970-01-01')" ;;
-              *) echo "unsupported country: $1" >&2; return 1 ;;
-            esac
-          }
-          VALUES=""
-          for c in $COUNTRIES; do
-            T=$(pack_tuple "$c") || exit 1
-            VALUES="${VALUES:+$VALUES,}$T"
-          done
-          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<SQL
-          insert into t_city_packs (slug,name,country,tz,boundary,status,osm_extract,last_import_at) values
-          $VALUES;
-          SQL
-          COUNT=$(psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -tAc "select count(*) from t_city_packs where status in ('beta','live')")
-          echo "packs=$COUNT"
-          [ "$COUNT" -ge 1 ] || { echo "pack insert failed"; exit 1; }
-
       - name: Ingest packs
+        timeout-minutes: 300
+        # Never fails the job by itself: per-pack failures are collected in
+        # out/failures.txt and enforced in the last step, after the dump of
+        # everything that did succeed has been uploaded.
+        env:
+          RUN_MIGRATIONS: "false"
         run: |
-          go build -o /tmp/worker ./cmd/worker
-          slugs_for() {
-            case "$1" in
-              luxembourg)  echo "luxembourg" ;;
-              belgium)     echo "brussels" ;;
-              netherlands) echo "amsterdam rotterdam utrecht denhaag" ;;
-              austria)     echo "vienna" ;;
-              switzerland) echo "zurich" ;;
-              france)      echo "paris" ;;
-              germany)     echo "berlin munich hamburg" ;;
-              spain)       echo "madrid barcelona seville" ;;
-              *) echo "unsupported country: $1" >&2; return 1 ;;
-            esac
-          }
-          for c in $COUNTRIES; do
-            for p in $(slugs_for "$c"); do
-              echo "=== ingest $p ($c) ==="
-              /tmp/worker -job ingest.osm -pack "$p" || exit 1
-            done
-          done
+          chmod +x scripts/ingest/cloud-ingest.sh
+          scripts/ingest/cloud-ingest.sh scripts/ingest/packs.tsv $SELECTION
 
       - name: Weather refresh
-        run: /tmp/worker -job weather.refresh
+        # External provider: a flaky API must not cost the whole run's dump.
+        continue-on-error: true
+        env:
+          RUN_MIGRATIONS: "false"
+        run: $WORKER -job weather.refresh
 
       - name: Crowd refresh
-        run: /tmp/worker -job crowd.refresh
+        # External provider: a flaky API must not cost the whole run's dump.
+        continue-on-error: true
+        env:
+          RUN_MIGRATIONS: "false"
+        run: $WORKER -job crowd.refresh
 
       - name: Scoring recompute
-        run: /tmp/worker -job scoring.recompute
+        env:
+          RUN_MIGRATIONS: "false"
+        run: $WORKER -job scoring.recompute
 
       - name: Collect stats
+        if: always()
         run: |
           {
-            echo "## Ingest results"
-            psql "$DATABASE_URL" -c "select p.slug, p.country, s.status, count(*) from t_spots s join t_city_packs p on p.id=s.city_pack_id group by 1,2,3 order by 1,3"
+            echo "## Selection"
+            echo '`'"$SELECTION"'`'
+            echo
+            echo "## Pack results"
+            echo '```'
+            column -t -s $'\t' "$OUT_DIR/pack-results.tsv" 2>/dev/null || echo "(none)"
+            echo '```'
+            if [ -s "$OUT_DIR/failures.txt" ]; then
+              echo "## Failures"
+              sed 's/^/- /' "$OUT_DIR/failures.txt"
+              echo
+            fi
+            echo "## Spots per pack"
+            echo '```'
+            psql "$DATABASE_URL" -c "select p.slug, p.country, count(*) filter (where s.status='active') active, count(*) filter (where s.status='pending') pending, count(*) filter (where s.status not in ('active','pending')) other, count(*) filter (where s.area is not null) with_area from t_city_packs p left join t_spots s on s.city_pack_id=p.id group by 1,2 order by 2,1"
+            echo
+            echo "## Ingest stats per pack (t_job_runs)"
+            psql "$DATABASE_URL" -c "select x->>'pack' pack, (x->'stats'->>'features_read')::int features, (x->'stats'->>'candidates')::int cand, (x->'stats'->>'created')::int created, (x->'stats'->>'duplicate_geoms')::int dup_geoms, (x->'stats'->>'amenities_linked')::int amenities, (x->>'duration_ms')::int ms, x->'stats'->'stage_ms' stage_ms, x->>'error' error from t_job_runs r, jsonb_array_elements(r.stats->'packs') x where r.job='ingest.osm' order by r.id"
             echo
             echo "## Spot sources by via"
             psql "$DATABASE_URL" -c "select via, count(*) from t_spot_sources group by 1"
@@ -167,27 +171,38 @@ jobs:
             psql "$DATABASE_URL" -c "select count(distinct spot_id) spots, count(*) rows, min(ts_hour), max(ts_hour) from t_spot_scores"
             echo
             echo "## Job runs"
-            psql "$DATABASE_URL" -c "select job, status, started_at::timestamp(0), stats is not null has_stats from t_job_runs order by id desc limit 30"
+            psql "$DATABASE_URL" -c "select job, status, started_at::timestamp(0), finished_at - started_at as duration from t_job_runs order by id desc limit 60"
+            echo '```'
           } | tee ingest-summary.md
+          cat ingest-summary.md >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload ingest summary
+      - name: Upload ingest summary + logs
         # Lands before the dump step so results survive a dump failure.
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ingest-summary
-          path: ingest-summary.md
+          path: |
+            ingest-summary.md
+            out/*.log
+            out/*.tsv
+            out/failures.txt
           retention-days: 30
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: Dump database (excluding raw ingest layer)
         run: |
-          # t_ingest_features is the bulk raw layer (~400k geojson rows) and
-          # is re-derivable by re-running ingest; excluding it keeps the
-          # artifact small enough for the 500MB free storage quota.
+          # t_ingest_features is the bulk raw layer, re-derivable by
+          # re-running ingest; t_ingest_staging is an empty UNLOGGED COPY
+          # target. Exclude their DATA only — the tables themselves must be
+          # in the dump (schema_migrations says they exist; -T would drop
+          # them and break ingest on the restored DB).
           docker run --rm --network host -e PGPASSWORD=picnic \
             -v "$PWD:/out" postgis/postgis:18-3.6 \
             pg_dump -h localhost -U picnic -d picnic -Fc -Z9 \
-            -T t_ingest_features -f /out/pickhour-cloud.dump
+            --exclude-table-data=t_ingest_features \
+            --exclude-table-data=t_ingest_staging \
+            -f /out/pickhour-cloud.dump
           ls -lh pickhour-cloud.dump
 
       - uses: actions/upload-artifact@v4
@@ -198,3 +213,11 @@ jobs:
             ingest-summary.md
           retention-days: 30
           if-no-files-found: error
+
+      - name: Fail on pack failures
+        run: |
+          if [ -s "$OUT_DIR/failures.txt" ]; then
+            echo "::error::$(wc -l < "$OUT_DIR/failures.txt") pack/extract failures — see ingest-summary"
+            cat "$OUT_DIR/failures.txt"
+            exit 1
+          fi
