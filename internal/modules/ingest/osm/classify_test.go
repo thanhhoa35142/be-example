@@ -76,12 +76,20 @@ func TestClassifyQuality(t *testing.T) {
 	poly := `{"type":"Polygon","coordinates":[]}`
 	point := `{"type":"Point","coordinates":[0,0]}`
 
-	// Named polygon park with public access: 30+20+15 = 65 → auto-activates.
+	// Named polygon park with public access: 30+20+5 = 55 from tags alone;
+	// size/amenity terms are added by the planner (QualityPolicy.Bonus).
 	got := c.Classify(feat(map[string]string{
 		"leisure": "park", "name": "X", "access": "yes",
 	}, poly))
-	if got.Quality != 65 {
-		t.Fatalf("quality = %d, want 65", got.Quality)
+	if got.Quality != 55 {
+		t.Fatalf("quality = %d, want 55", got.Quality)
+	}
+	// wikidata is a notability signal: +10.
+	got = c.Classify(feat(map[string]string{
+		"leisure": "park", "name": "X", "wikidata": "Q1",
+	}, poly))
+	if got.Quality != 60 {
+		t.Fatalf("wikidata quality = %d, want 60", got.Quality)
 	}
 	// Unnamed point park: 0 → below floor.
 	got = c.Classify(feat(map[string]string{"leisure": "park"}, point))
@@ -99,5 +107,35 @@ func TestClassifyQuality(t *testing.T) {
 	}, point))
 	if got.Names["en"] != "X park" || got.Names["nl"] != "X park nl" {
 		t.Fatalf("names = %v", got.Names)
+	}
+}
+
+func TestQualityBonus(t *testing.T) {
+	qp := DefaultQualityPolicy
+	for _, c := range []struct {
+		name string
+		ha   float64
+		amen int
+		want int
+	}{
+		{"point", 0, 0, 0},
+		{"pocket park", 0.2, 0, -10},
+		{"small park", 0.7, 0, 0},
+		{"medium park", 2, 0, 5},
+		{"large park", 12, 0, 10},
+		{"medium + 1 amenity", 2, 1, 10},
+		{"amenities capped", 12, 5, 20},
+	} {
+		if got := qp.Bonus(c.ha, c.amen); got != c.want {
+			t.Errorf("%s: Bonus(%v,%d)=%d want %d", c.name, c.ha, c.amen, got, c.want)
+		}
+	}
+	// Calibration anchors: named polygon (50) activates (>=60) when large,
+	// or medium with one picnic amenity; a bare medium park stays pending.
+	named := qp.Named + qp.HasArea
+	if named+qp.Bonus(12, 0) < DefaultPolicy.AutoActivate ||
+		named+qp.Bonus(2, 1) < DefaultPolicy.AutoActivate ||
+		named+qp.Bonus(2, 0) >= DefaultPolicy.AutoActivate {
+		t.Fatal("default quality policy no longer matches its calibration anchors")
 	}
 }

@@ -245,9 +245,10 @@ func TestGoldenIngest(t *testing.T) {
 		if len(spots) != 1 || spots[0].Kind != "park" || spots[0].Status != "active" {
 			t.Fatalf("expected single active park spot, got %+v", spots)
 		}
-		// Park quality: named(30)+area(20)+access(15)+table-evidence(25)=90.
-		if spots[0].Quality != 90 {
-			t.Fatalf("expected park quality 90, got %d", spots[0].Quality)
+		// Park quality: named(30)+area(20)+access(5)+size ~12 ha(10)
+		// +toilet(5)+table-evidence(25)=95.
+		if spots[0].Quality != 95 {
+			t.Fatalf("expected park quality 95, got %d", spots[0].Quality)
 		}
 		if n := goldenCount(t, pool, `
 			SELECT count(*) FROM t_spot_sources ss

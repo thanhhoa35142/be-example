@@ -177,6 +177,7 @@ func (s *ingestStore) Candidates(ctx context.Context) ([]ingest.CandidateRow, er
 			Lon:            f64(r.Lon),
 			Lat:            f64(r.Lat),
 			PolygonGeoJSON: strPtr(r.PolygonGeojson),
+			AreaHa:         r.AreaHa,
 		})
 	}
 	return out, nil
@@ -236,6 +237,18 @@ func (s *ingestStore) OrphanTableClusters(ctx context.Context, epsMerc float64, 
 	for i := range out {
 		out[i].Lon /= float64(out[i].Size)
 		out[i].Lat /= float64(out[i].Size)
+	}
+	return out, nil
+}
+
+func (s *ingestStore) AmenityTypes(ctx context.Context) (map[[2]string]int, error) {
+	rows, err := s.q.ListCandidateAmenityTypes(ctx, s.packID)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[[2]string]int, len(rows))
+	for _, r := range rows {
+		out[[2]string{r.Source, r.SourceID}] = int(r.Types)
 	}
 	return out, nil
 }

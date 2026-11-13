@@ -185,8 +185,24 @@ amenities survive) when active spots whose primary sources are absent
 run, not only at `CloseAfterMissing`, so a truncated extract never
 commits. Operator override: `worker -job ingest.osm -pack <slug> -force-guard`.
 
-**Promotion** — quality 0–100 from facts (name, area, table evidence,
-amenity variety, access tags):
+**Promotion** — quality 0–100 from facts (`osm.DefaultQualityPolicy`,
+recalibrated 2026-11-13 on EU + AU packs):
+
+| Signal | Points | Where |
+|---|---|---|
+| named | 30 | classifier |
+| polygon | 20 | classifier |
+| `wikidata=*` | 10 | classifier |
+| `access=yes/permissive` | 5 (was 15 — almost never tagged on parks: AU 0.3%) | classifier |
+| table evidence (`picnic_table=yes` or absorbed tables) | 25 | planner |
+| size ≥ 5 ha / ≥ 1 ha / < 0.5 ha | +10 / +5 / −10 | planner (`QualityPolicy.Bonus`) |
+| picnic amenity types within ~50 m (toilet, water, bbq, playground, shelter) | +5 each, max 2 | planner |
+
+A named park polygon scores 50 and activates when large, or ≥ 1 ha with
+one picnic amenity, or with tables/wikidata; pocket parks stay pending
+without real picnic evidence. Before recalibration AU had 85% of spots
+pending (Centennial Park, Barangaroo, and Vondelpark in NL were pending);
+the known-places list now fully activates.
 
 - ≥ `AutoActivate` (60) → `active`
 - `KeepPending` (35)..AutoActivate → `pending` (admin review)

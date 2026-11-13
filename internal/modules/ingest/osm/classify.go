@@ -44,21 +44,65 @@ type Classifier struct {
 }
 
 // QualityPolicy tunes the 0-100 quality score (INGEST_STRATEGY §4).
+// Tag-only components are applied by Classify; geometry/neighbourhood
+// components (size, amenities, child tables) by the planner via Bonus.
 type QualityPolicy struct {
-	Named          int // has a name
-	HasArea        int // polygon/multipolygon
-	TableEvidence  int // picnic_table=yes or child tables (set by planner later)
-	PublicAccess   int // explicit access=yes/permissive
-	AmenityVariety int // count of distinct nearby amenity types (planner-side)
+	Named         int // has a name
+	HasArea       int // polygon/multipolygon
+	TableEvidence int // picnic_table=yes or child tables (planner)
+	// PublicAccess: explicit access=yes/permissive. Kept small — mappers
+	// almost never tag access on public parks (AU: 0.3% of parks), so a
+	// large weight only rewards regional tagging habits.
+	PublicAccess int
+	Wikidata     int // wikidata=* — notability signal
+	// Size tiers (planner, polygon area in hectares).
+	AreaLargeHa, AreaLarge   float64
+	AreaMediumHa, AreaMedium float64
+	// Pocket parks below AreaTinyHa lose AreaTinyPenalty points.
+	AreaTinyHa, AreaTinyPenalty float64
+	// AmenityPerType per distinct picnic amenity type (toilet, water, bbq,
+	// playground, shelter) inside/next to the spot, up to AmenityMaxTypes.
+	AmenityPerType, AmenityMaxTypes int
 }
 
-// DefaultQualityPolicy is the starting point; tune on the golden set.
+// DefaultQualityPolicy — calibrated 2026-11-13 on 39 packs (EU + AU):
+// a named park polygon scores 50; it activates (>= 60) when it is either
+// large (>= 5 ha), or >= 1 ha with one picnic amenity, or has tables or a
+// wikidata entry. Every park on the known-places list (Vondelpark,
+// Centennial Park, Kings Park, Stadtpark Wien, …) activates; pocket parks
+// stay pending unless they carry real picnic evidence.
 var DefaultQualityPolicy = QualityPolicy{
-	Named:          30,
-	HasArea:        20,
-	TableEvidence:  25,
-	PublicAccess:   15,
-	AmenityVariety: 10, // scaled by planner: min(distinct,4)*2.5 → capped
+	Named:           30,
+	HasArea:         20,
+	TableEvidence:   25,
+	PublicAccess:    5,
+	Wikidata:        10,
+	AreaLargeHa:     5,
+	AreaLarge:       10,
+	AreaMediumHa:    1,
+	AreaMedium:      5,
+	AreaTinyHa:      0.5,
+	AreaTinyPenalty: 10,
+	AmenityPerType:  5,
+	AmenityMaxTypes: 2,
+}
+
+// Bonus is the planner-side quality delta for a candidate: polygon size
+// tier (areaHa <= 0 means point geometry → no size term) and distinct
+// picnic amenity types nearby. Pure; added on top of Classify's score.
+func (qp QualityPolicy) Bonus(areaHa float64, amenityTypes int) int {
+	b := 0
+	switch {
+	case areaHa <= 0:
+	case areaHa >= qp.AreaLargeHa:
+		b += int(qp.AreaLarge)
+	case areaHa >= qp.AreaMediumHa:
+		b += int(qp.AreaMedium)
+	case areaHa < qp.AreaTinyHa:
+		b -= int(qp.AreaTinyPenalty)
+	}
+	b += min(amenityTypes, qp.AmenityMaxTypes) * qp.AmenityPerType
+	return b
 }
 
 var amenityTags = map[string]AmenityType{
@@ -192,6 +236,9 @@ func (c Classifier) Classify(f RawFeature) Classified {
 	}
 	if f.Tags["access"] == "yes" || f.Tags["access"] == "permissive" {
 		quality += qp.PublicAccess
+	}
+	if f.Tags["wikidata"] != "" {
+		quality += qp.Wikidata
 	}
 	// picnic_table=yes is evidence for the parent spot (planner adds the
 	// TableEvidence component when it counts child tables).

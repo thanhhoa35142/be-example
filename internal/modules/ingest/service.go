@@ -88,6 +88,7 @@ type CandidateRow struct {
 	Lon            float64
 	Lat            float64
 	PolygonGeoJSON *string // non-nil when the geometry is an area
+	AreaHa         float64 // polygon area in hectares (0 for points/lines)
 }
 
 // AbsorbedRow mirrors ListAbsorbedCandidates.
@@ -190,6 +191,9 @@ type Store interface {
 	MergeRaw(ctx context.Context) (int64, error)
 	Candidates(ctx context.Context) ([]CandidateRow, error)
 	Absorbed(ctx context.Context) ([]AbsorbedRow, error)
+	// AmenityTypes returns distinct picnic amenity types near each
+	// candidate (quality input), keyed by (source, source_id).
+	AmenityTypes(ctx context.Context) (map[[2]string]int, error)
 	// OrphanTableClusters returns DBSCAN clusters of table-kind candidates
 	// not absorbed into a park/beach. epsMerc is epsilon in Web Mercator
 	// meters (caller adjusts for latitude); minPts is minpoints.
@@ -392,6 +396,10 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 		if err != nil {
 			return err
 		}
+		amenityTypes, err := store.AmenityTypes(ctx)
+		if err != nil {
+			return err
+		}
 		pol := s.policy()
 		qp := osm.DefaultQualityPolicy
 		if s.Clf.Policy != (osm.QualityPolicy{}) {
@@ -501,10 +509,11 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 				continue
 			}
 
-			quality := c.Quality
+			quality := c.Quality + qp.Bonus(c.AreaHa, amenityTypes[key])
 			if childCount[key] > 0 {
-				quality = min(quality+qp.TableEvidence, 100)
+				quality += qp.TableEvidence
 			}
+			quality = max(0, min(quality, 100))
 
 			var tags map[string]string
 			_ = json.Unmarshal(c.TagsJSON, &tags)

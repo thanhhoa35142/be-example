@@ -44,10 +44,24 @@ SELECT source, source_id, kind, quality, version, tags, content_hash,
        -- strips, U-shaped parks) where ST_Centroid can fall outside.
        ST_X(ST_PointOnSurface(geom)) AS lon,
        ST_Y(ST_PointOnSurface(geom)) AS lat,
-       CASE WHEN ST_Dimension(geom) >= 2 THEN ST_AsGeoJSON(geom) END AS polygon_geojson
+       CASE WHEN ST_Dimension(geom) >= 2 THEN ST_AsGeoJSON(geom) END AS polygon_geojson,
+       CASE WHEN ST_Dimension(geom) >= 2
+            THEN ST_Area(geom::geography) / 10000 ELSE 0 END::float8 AS area_ha
 FROM t_ingest_features
 WHERE pack_id = $1 AND role = 'candidate'
 ORDER BY source_id;
+
+-- name: ListCandidateAmenityTypes :many
+-- Quality input: distinct picnic amenity types inside (or within ~50 m of)
+-- each candidate. Geometry-space prefilter on the raw GiST index.
+SELECT c.source, c.source_id, count(DISTINCT a.amenity)::int AS types
+FROM t_ingest_features c
+JOIN t_ingest_features a
+  ON a.pack_id = c.pack_id AND a.role = 'amenity'
+ AND a.amenity IN ('toilet','water','bbq','playground','shelter')
+ AND ST_DWithin(c.geom, a.geom, 0.0005)
+WHERE c.pack_id = $1 AND c.role = 'candidate'
+GROUP BY c.source, c.source_id;
 
 -- name: ListPackSourceLinks :many
 -- Planner preload (replaces one FindSpotBySource round-trip per candidate):
