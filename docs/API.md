@@ -334,7 +334,7 @@ Response `200`:
 
 ### `DELETE /v1/devices/{id}`
 
-Soft-delete (GDPR/CCPA unlink); also removes the device's weekend digest. `204` on success, `404` if unknown/already deleted.
+Soft-delete (GDPR/CCPA unlink). In the same statement it hard-deletes the device's alert rules (their delivery log cascades) and weekend digest, and clears the stored push token, attestation key and prefs. Crowd reports, spot reports, score feedback, events and subscription links are kept (anonymous aggregates). `204` on success, `404` if unknown/already deleted.
 Until real auth exists, the device UUID acts as the capability token — keep it in Keychain.
 
 ---
