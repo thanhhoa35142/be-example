@@ -181,6 +181,33 @@ type EventSummary struct {
 	ByDay  []DayCount  `json:"byDay"`
 }
 
+// EventBreakdownInput selects an event name and the props to bucket by.
+type EventBreakdownInput struct {
+	Name  string
+	Prop  string
+	By    string // optional second prop
+	Since time.Time
+}
+
+// EventBreakdown buckets one event name by a props key (and optionally a
+// second). Count = events, Devices = distinct devices in the bucket.
+type EventBreakdown struct {
+	Name  string               `json:"name"`
+	Prop  string               `json:"prop"`
+	By    string               `json:"by,omitempty"`
+	Since time.Time            `json:"since"`
+	Items []EventBreakdownItem `json:"items"`
+}
+
+// EventBreakdownItem is one bucket. By is the second prop's value (only
+// present when the request set `by`). Events lacking a prop have value "".
+type EventBreakdownItem struct {
+	Value   string  `json:"value"`
+	By      *string `json:"by,omitempty"`
+	Count   int64   `json:"count"`
+	Devices int64   `json:"devices"`
+}
+
 // NameCount counts events per name.
 type NameCount struct {
 	Name  string `json:"name"`

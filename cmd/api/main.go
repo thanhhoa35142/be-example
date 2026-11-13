@@ -18,6 +18,7 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/modules/alerts"
 	"github.com/thanhhoa35142/be-example/internal/modules/apikeys"
 	"github.com/thanhhoa35142/be-example/internal/modules/devices"
+	"github.com/thanhhoa35142/be-example/internal/modules/digest"
 	"github.com/thanhhoa35142/be-example/internal/modules/entitlement"
 	"github.com/thanhhoa35142/be-example/internal/modules/events"
 	"github.com/thanhhoa35142/be-example/internal/modules/geo"
@@ -77,6 +78,7 @@ func main() {
 	adminSvc := admin.NewService(persistence.NewAdminRepo(queries))
 	keysSvc := apikeys.NewService(persistence.NewAPIKeysRepo(queries, pool))
 	eventsSvc := events.NewService(persistence.NewEventsRepo(queries))
+	digestSvc := digest.NewService(persistence.NewDigestRepo(queries), entitlementSvc, nil, logger)
 
 	router := infrahttp.NewRouter(pool, infrahttp.Handlers{
 		Spots:           infrahttp.NewSpotsHandler(spotsSvc),
@@ -87,6 +89,7 @@ func main() {
 		Entitlement:     infrahttp.NewEntitlementHandler(entitlementSvc),
 		Admin:           infrahttp.NewAdminHandler(adminSvc, keysSvc),
 		Events:          infrahttp.NewEventsHandler(eventsSvc),
+		Digest:          infrahttp.NewDigestHandler(digestSvc),
 	})
 
 	if os.Getenv("GIN_MODE") == "" && os.Getenv("APP_ENV") != "production" {

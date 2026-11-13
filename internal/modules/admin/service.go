@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -32,6 +33,7 @@ var jobScheduleLimits = map[string]jobScheduleLimit{
 	"crowd.aggregate":        {min: 60, max: 24 * 60 * 60},
 	"scoring.recompute":      {min: 5 * 60, max: 6 * 60 * 60},
 	"alerts.evaluate":        {min: 60, max: 60 * 60},
+	"digest.weekly":          {min: 15 * 60, max: 60 * 60},
 	"holidays.refresh":       {min: 24 * 60 * 60, max: 30 * 24 * 60 * 60},
 	"retention.purge":        {min: 60 * 60, max: 30 * 24 * 60 * 60},
 	"ingest.osm":             {min: 60 * 60, max: 7 * 24 * 60 * 60},
@@ -106,6 +108,29 @@ func (s *Service) EventSummary(ctx context.Context, f MetricsFilter) (EventSumma
 		return EventSummary{}, err
 	}
 	return s.repo.EventSummary(ctx, f)
+}
+
+var (
+	eventNameRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+	propKeyRe   = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]{0,31}$`)
+)
+
+// EventBreakdown validates and runs a props breakdown. Since defaults to 30d ago.
+func (s *Service) EventBreakdown(ctx context.Context, in EventBreakdownInput, now time.Time) (EventBreakdown, error) {
+	if !eventNameRe.MatchString(in.Name) {
+		return EventBreakdown{}, fmt.Errorf("%w: name must match [a-z][a-z0-9_]{0,63}", ErrInvalidFilter)
+	}
+	if !propKeyRe.MatchString(in.Prop) {
+		return EventBreakdown{}, fmt.Errorf("%w: prop must match [a-zA-Z][a-zA-Z0-9_]{0,31}", ErrInvalidFilter)
+	}
+	if in.By != "" && !propKeyRe.MatchString(in.By) {
+		return EventBreakdown{}, fmt.Errorf("%w: by must match [a-zA-Z][a-zA-Z0-9_]{0,31}", ErrInvalidFilter)
+	}
+	if in.Since.IsZero() {
+		in.Since = now.Add(-30 * 24 * time.Hour)
+	}
+	in.Since = in.Since.UTC()
+	return s.repo.EventBreakdown(ctx, in)
 }
 
 func clampLimit(limit int) int {

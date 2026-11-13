@@ -336,6 +336,17 @@ type TWeatherHourlyForecast struct {
 	FetchedAt  time.Time     `json:"fetched_at"`
 }
 
+type TWeeklyDigest struct {
+	DeviceID   uuid.UUID   `json:"device_id"`
+	SpotIds    []uuid.UUID `json:"spot_ids"`
+	Enabled    bool        `json:"enabled"`
+	SendDow    int16       `json:"send_dow"`
+	SendHour   int16       `json:"send_hour"`
+	LastSentOn pgtype.Date `json:"last_sent_on"`
+	CreatedAt  time.Time   `json:"created_at"`
+	UpdatedAt  time.Time   `json:"updated_at"`
+}
+
 type TWorkerJobSchedule struct {
 	Job             string    `json:"job"`
 	IntervalSeconds int32     `json:"interval_seconds"`

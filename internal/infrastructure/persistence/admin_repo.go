@@ -328,6 +328,25 @@ func (r *AdminRepo) EventSummary(ctx context.Context, f admin.MetricsFilter) (ad
 	return s, nil
 }
 
+func (r *AdminRepo) EventBreakdown(ctx context.Context, in admin.EventBreakdownInput) (admin.EventBreakdown, error) {
+	out := admin.EventBreakdown{Name: in.Name, Prop: in.Prop, By: in.By, Since: in.Since, Items: []admin.EventBreakdownItem{}}
+	rows, err := r.q.AdminEventPropBreakdown(ctx, AdminEventPropBreakdownParams{
+		Prop: in.Prop, By: in.By, Name: in.Name, Since: in.Since,
+	})
+	if err != nil {
+		return out, err
+	}
+	for _, row := range rows {
+		it := admin.EventBreakdownItem{Value: row.Value, Count: row.N, Devices: row.Devices}
+		if in.By != "" {
+			by := row.ByValue
+			it.By = &by
+		}
+		out.Items = append(out.Items, it)
+	}
+	return out, nil
+}
+
 // ---- scoring config ----
 
 func (r *AdminRepo) ListScoringConfigs(ctx context.Context) ([]admin.ScoringConfigVersion, error) {

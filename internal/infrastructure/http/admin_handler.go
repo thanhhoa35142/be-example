@@ -134,6 +134,26 @@ func (h *AdminHandler) Events(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": s})
 }
 
+// GET /v1/admin/events/breakdown?name=&prop=[&by=][&since=RFC3339] — event
+// counts bucketed by a props key (default window: last 30 days).
+func (h *AdminHandler) EventBreakdown(c *gin.Context) {
+	in := admin.EventBreakdownInput{Name: c.Query("name"), Prop: c.Query("prop"), By: c.Query("by")}
+	if v := c.Query("since"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidQuery, "Invalid query", "since must be RFC3339")
+			return
+		}
+		in.Since = t
+	}
+	b, err := h.svc.EventBreakdown(c.Request.Context(), in, time.Now())
+	if err != nil {
+		h.writeConfigError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": b})
+}
+
 // GET /v1/admin/jobs?limit=&cursor= — recent job_run rows, keyset-paginated
 // (cursor = last job run id).
 func (h *AdminHandler) Jobs(c *gin.Context) {

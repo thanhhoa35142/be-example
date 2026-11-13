@@ -334,7 +334,7 @@ Response `200`:
 
 ### `DELETE /v1/devices/{id}`
 
-Soft-delete (GDPR/CCPA unlink). `204` on success, `404` if unknown/already deleted.
+Soft-delete (GDPR/CCPA unlink); also removes the device's weekend digest. `204` on success, `404` if unknown/already deleted.
 Until real auth exists, the device UUID acts as the capability token — keep it in Keychain.
 
 ---
@@ -459,6 +459,55 @@ When a rule fires, the notifier sends an APNs alert (`apns-push-type: alert`, pr
 - Devices without `apnsToken` are skipped (delivery stays unrecorded, not a failure).
 - Credentials: `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_KEY` (.p8 PEM), optional `APNS_BUNDLE_ID`. Without them the worker logs payloads instead of sending.
 
+## Weekend digest (Plus)
+
+Plus devices can opt into one push per week (default **Thursday 18:00 device-local**, from `devices.tz`) naming the single best picnic window of the coming weekend across the spots they chose. Free devices cannot create a digest (`plan_limit`); a digest whose device later drops to Free is skipped silently. Device identification is the same as `/v1/alerts`: the device UUID in the path is the capability token.
+
+### `PUT /v1/devices/{id}/digest` — create / replace
+
+```json
+{"spotIds":["<uuid>","<uuid>"],"enabled":true}
+```
+
+→ `200`
+
+```json
+{"data":{"spotIds":["<uuid>","<uuid>"],"enabled":true,"sendDow":4,"sendHour":18}}
+```
+
+- `spotIds`: 1–20 spot UUIDs (an empty list is only accepted with `enabled:false`). Merged spot ids are resolved to their merge target like `GET /v1/spots?ids=`; duplicates collapse; the response carries the resolved ids in request order.
+- `sendDow` is `time.Weekday` (0 = Sunday), `sendHour` is device-local 0–23. Both are server-defined for now (4 / 18) and not settable.
+- Re-`PUT` keeps the schedule and the last-sent marker (no double send on edit).
+
+Errors: `invalid_id` (400, bad device UUID), `invalid_body` (400: bad JSON, missing `spotIds`/`enabled`, non-UUID id, more than 20 ids, unknown/inactive spot id, empty `spotIds` while enabled), `plan_limit` (403, Free plan), `not_found` (404, unknown device).
+
+### `GET /v1/devices/{id}/digest`
+
+`200` with the same `data` shape, or `404 not_found` when the device has no digest.
+
+### `DELETE /v1/devices/{id}/digest`
+
+`204` (idempotent).
+
+### Push payload (APNs)
+
+Sent by worker job `digest.weekly` through the same APNs client as alerts (collapse-id `digest-<deviceId>`):
+
+```json
+{
+  "aps": {"alert": {"title": "Your weekend picnic", "body": "Saturday 2–5 PM at Vondelpark looks best (88)."}, "sound": "default"},
+  "kind": "digest.weekend",
+  "spotId": "<uuid>",
+  "windowStart": "2026-11-21T13:00:00Z",
+  "windowEnd": "2026-11-21T16:00:00Z",
+  "score": 88
+}
+```
+
+- Window search: the coming Saturday and Sunday (device-local dates; on a Sunday only that day), 08:00–20:00 in **each spot's own timezone**, per spot the best contiguous run of 2–4 hours where every hourly score is ≥ 60 (`t_spot_scores`), ranked by mean score (ties: longer, then earlier). The single best (spot, day, window) wins; `score` is the rounded mean. If nothing qualifies, no push is sent.
+- Text is rendered in the spot's local time, 12h for `en` ("Saturday 2–5 PM at …"), 24h for `nl` ("Zaterdag 14–17 uur bij … ziet er het best uit (88)."); locale from `device.locale`, fallback `en`. Custom keys are top-level next to `aps`. The app routes taps on `kind == "digest.weekend"` + `spotId` to spot detail.
+- Idempotent: at most one send (or silent skip) per device per local date. A transient APNs failure releases the slot so the next hourly run retries inside the same local hour.
+
 ## Entitlement (Free / Plus)
 
 ### `GET /v1/devices/{id}/entitlement`
@@ -494,6 +543,7 @@ All `/v1/admin/*` endpoints require `Authorization: Bearer $ADMIN_TOKEN`. When `
 | `GET /v1/admin/overview` | Headline counts: spots, devices (24h active), pending reports, alert rules/deliveries, Plus devices |
 | `GET /v1/admin/freshness` | Newest `fetched_at`/`computed_at`/`updated_at` per pipeline stage — staleness alerting |
 | `GET /v1/admin/metrics` | Analytical counters: score distribution + histogram + cap rate (7d), feedback verdicts, report type/status (30d), crowd sources, subscription statuses, alert delivery outcomes |
+| `GET /v1/admin/events/breakdown?name=&prop=[&by=][&since=]` | Event props breakdown (see below) |
 | `GET /v1/admin/jobs?limit=&cursor=` | Recent `job_run` rows, keyset-paginated (`cursor` = last run id from `nextCursor`) |
 | `GET /v1/admin/jobs/schedules` | Registered worker job intervals in seconds, including allowed bounds |
 | `PATCH /v1/admin/jobs/{job}/schedule` | Update a job interval: `{"intervalSeconds":3600}` |
@@ -509,7 +559,18 @@ All `/v1/admin/*` endpoints require `Authorization: Bearer $ADMIN_TOKEN`. When `
 | `POST /v1/admin/scoring-config/{version}/activate` | Make a stored version effective |
 
 Workers write `job_run` automatically (start → ok/failed/skipped).
-Job schedules are stored in the database; running workers reload changes within 30 seconds. Jobs still run once at worker startup. Allowed interval ranges: `weather.refresh` 900–3600s, `crowd.refresh` 3600–2592000s, `crowd.aggregate` 60–86400s, `scoring.recompute` 300–21600s, `alerts.evaluate` 60–3600s, and `holidays.refresh` 86400–2592000s (default weekly; offline national public holidays for every pack country, current + next year, into `t_holidays`).
+Job schedules are stored in the database; running workers reload changes within 30 seconds. Jobs still run once at worker startup. Allowed interval ranges: `weather.refresh` 900–3600s, `crowd.refresh` 3600–2592000s, `crowd.aggregate` 60–86400s, `scoring.recompute` 300–21600s, `alerts.evaluate` 60–3600s, `digest.weekly` 900–3600s (default hourly; must tick at least hourly to hit each local send hour — sends the Plus weekend digest), and `holidays.refresh` 86400–2592000s (default weekly; offline national public holidays for every pack country, current + next year, into `t_holidays`).
+
+### `GET /v1/admin/events/breakdown?name=paywall_feedback&prop=choice[&by=reason][&since=RFC3339]`
+
+Buckets one event name by a prop (`props->>prop`, bound as a parameter) and optionally a second prop. `since` defaults to now − 30 days. `prop`/`by` must match `^[a-zA-Z][a-zA-Z0-9_]{0,31}$`, `name` `^[a-z][a-z0-9_]{0,63}$`, else `400 invalid_query`; bad `since` → `400 invalid_query`. Items are sorted by `count` desc (max 500); `devices` = distinct devices in the bucket (one person may answer several times); events lacking the prop fall into `value: ""`. Missing/wrong admin token as for the other admin routes.
+
+```json
+{"data":{"name":"paywall_feedback","prop":"choice","by":"reason","since":"2026-10-14T11:06:39Z",
+ "items":[{"value":"shade","by":"forecast","count":2,"devices":1},{"value":"price","by":"general","count":1,"devices":1}]}}
+```
+
+Without `by`, items are `{value, count, devices}` and the `by` field is omitted everywhere.
 
 ### `POST /v1/events` — product analytics batch
 

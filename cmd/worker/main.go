@@ -18,6 +18,7 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/modules/admin"
 	"github.com/thanhhoa35142/be-example/internal/modules/alerts"
 	"github.com/thanhhoa35142/be-example/internal/modules/crowd"
+	"github.com/thanhhoa35142/be-example/internal/modules/digest"
 	"github.com/thanhhoa35142/be-example/internal/modules/entitlement"
 	"github.com/thanhhoa35142/be-example/internal/modules/geo"
 	"github.com/thanhhoa35142/be-example/internal/modules/holidays"
@@ -133,6 +134,13 @@ func main() {
 		alertsRepo,
 		entitlementSvc,
 		notifier.NewSender(logger, alertsRepo, apnsClient),
+	)
+
+	digestSvc := digest.NewService(
+		persistence.NewDigestRepo(queries),
+		entitlementSvc,
+		notifier.NewDigestSender(notifier.NewSender(logger, alertsRepo, apnsClient)),
+		logger,
 	)
 
 	var osmiumSrc *osm.OsmiumSource
@@ -346,6 +354,29 @@ func main() {
 				}
 				logger.Info("alerts done", "rules", stats.Rules, "evaluated", stats.Evaluated,
 					"fired", stats.Fired, "sent", stats.Sent, "failed", stats.Failed)
+				return nil
+			},
+		},
+		{
+			// Hourly tick; each run only sends to devices whose local clock is
+			// the digest's send weekday/hour (default Thu 18:00), once per day.
+			name:         "digest.weekly",
+			initialDelay: 5 * time.Minute,
+			fn: func(ctx context.Context) error {
+				stats, err := digestSvc.RunWeekly(ctx, time.Now())
+				if bag, ok := ctx.Value(jobStatsKey{}).(*jobStatsBag); ok {
+					bag.set("candidates", stats.Candidates)
+					bag.set("due", stats.Due)
+					bag.set("sent", stats.Sent)
+					bag.set("no_window", stats.NoWindow)
+					bag.set("skipped", stats.Skipped)
+					bag.set("failed", stats.Failed)
+				}
+				if err != nil {
+					return err
+				}
+				logger.Info("digest done", "candidates", stats.Candidates, "due", stats.Due,
+					"sent", stats.Sent, "no_window", stats.NoWindow, "skipped", stats.Skipped, "failed", stats.Failed)
 				return nil
 			},
 		},

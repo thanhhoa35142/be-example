@@ -374,6 +374,64 @@ paths:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
 
+  /v1/devices/{id}/digest:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      summary: Create or replace the weekend digest (Plus only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WeeklyDigestRequest" }
+      responses:
+        "200":
+          description: Saved (merged spot ids resolved to their target)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/WeeklyDigest" }
+        "400":
+          description: invalid_body (bad shape, >20 ids, unknown spot) or invalid_id
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "403":
+          description: plan_limit (Free plan)
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "404":
+          description: Unknown device (not_found)
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+    get:
+      summary: Current weekend digest
+      responses:
+        "200":
+          description: Digest
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/WeeklyDigest" }
+        "404":
+          description: No digest (not_found)
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+    delete:
+      summary: Remove the weekend digest (idempotent)
+      responses:
+        "204": { description: Deleted }
+
   /v1/devices/{id}/entitlement:
     get:
       summary: Resolved plan for a device
@@ -686,6 +744,24 @@ components:
         tz: { type: string, example: "Europe/Amsterdam" }
         enabled: { type: boolean }
 
+    WeeklyDigestRequest:
+      type: object
+      required: [spotIds, enabled]
+      properties:
+        spotIds:
+          type: array
+          maxItems: 20
+          items: { type: string, format: uuid }
+        enabled: { type: boolean }
+    WeeklyDigest:
+      type: object
+      properties:
+        spotIds:
+          type: array
+          items: { type: string, format: uuid }
+        enabled: { type: boolean }
+        sendDow: { type: integer, minimum: 0, maximum: 6, description: "0 = Sunday" }
+        sendHour: { type: integer, minimum: 0, maximum: 23, description: "device-local hour" }
     AlertRuleRequest:
       type: object
       required: [deviceId, minScore, daysMask, startLocal, endLocal, tz]

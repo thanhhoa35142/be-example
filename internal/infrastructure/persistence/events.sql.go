@@ -12,6 +12,67 @@ import (
 	"github.com/google/uuid"
 )
 
+const adminEventPropBreakdown = `-- name: AdminEventPropBreakdown :many
+SELECT COALESCE(props ->> $1::text, '')::text AS value,
+       CASE WHEN $2::text = '' THEN ''
+            ELSE COALESCE(props ->> $2::text, '') END::text AS by_value,
+       count(*)::bigint AS n,
+       count(DISTINCT device_id)::bigint AS devices
+FROM t_events
+WHERE name = $3
+  AND created_at >= $4::timestamptz
+GROUP BY 1, 2
+ORDER BY n DESC, value, by_value
+LIMIT 500
+`
+
+type AdminEventPropBreakdownParams struct {
+	Prop  string    `json:"prop"`
+	By    string    `json:"by"`
+	Name  string    `json:"name"`
+	Since time.Time `json:"since"`
+}
+
+type AdminEventPropBreakdownRow struct {
+	Value   string `json:"value"`
+	ByValue string `json:"by_value"`
+	N       int64  `json:"n"`
+	Devices int64  `json:"devices"`
+}
+
+// Breakdown of events.props->>prop (optionally split by a second prop).
+// prop/by are bound parameters (jsonb ->> text), never interpolated.
+// Events missing the prop are bucketed under ”.
+func (q *Queries) AdminEventPropBreakdown(ctx context.Context, arg AdminEventPropBreakdownParams) ([]AdminEventPropBreakdownRow, error) {
+	rows, err := q.db.Query(ctx, adminEventPropBreakdown,
+		arg.Prop,
+		arg.By,
+		arg.Name,
+		arg.Since,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AdminEventPropBreakdownRow{}
+	for rows.Next() {
+		var i AdminEventPropBreakdownRow
+		if err := rows.Scan(
+			&i.Value,
+			&i.ByValue,
+			&i.N,
+			&i.Devices,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const countEventsForDeviceSince = `-- name: CountEventsForDeviceSince :one
 SELECT count(*) FROM t_events
 WHERE device_id = $1 AND created_at > $2

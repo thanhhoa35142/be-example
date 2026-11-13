@@ -34,6 +34,7 @@ type Repository interface {
 	// Analytics
 	Metrics(ctx context.Context, f MetricsFilter) (Metrics, error)
 	EventSummary(ctx context.Context, f MetricsFilter) (EventSummary, error)
+	EventBreakdown(ctx context.Context, in EventBreakdownInput) (EventBreakdown, error)
 
 	// Scoring config management
 	ListScoringConfigs(ctx context.Context) ([]ScoringConfigVersion, error)

@@ -14,6 +14,7 @@ type Handlers struct {
 	Entitlement     *EntitlementHandler
 	Admin           *AdminHandler
 	Events          *EventsHandler
+	Digest          *DigestHandler
 }
 
 func NewRouter(pool *pgxpool.Pool, h Handlers) *gin.Engine {
@@ -59,6 +60,11 @@ func NewRouter(pool *pgxpool.Pool, h Handlers) *gin.Engine {
 			v1.PUT("/alerts/:id", h.Alerts.Update)
 			v1.DELETE("/alerts/:id", h.Alerts.Delete)
 		}
+		if h.Digest != nil {
+			v1.PUT("/devices/:id/digest", h.Digest.Put)
+			v1.GET("/devices/:id/digest", h.Digest.Get)
+			v1.DELETE("/devices/:id/digest", h.Digest.Delete)
+		}
 		if h.Events != nil {
 			v1.POST("/events", h.Events.Track)
 		}
@@ -78,6 +84,7 @@ func NewRouter(pool *pgxpool.Pool, h Handlers) *gin.Engine {
 			admin.GET("/freshness", h.Admin.Freshness)
 			admin.GET("/metrics", h.Admin.Metrics)
 			admin.GET("/events", h.Admin.Events)
+			admin.GET("/events/breakdown", h.Admin.EventBreakdown)
 			admin.GET("/jobs", h.Admin.Jobs)
 			admin.GET("/jobs/schedules", h.Admin.JobSchedules)
 			admin.PATCH("/jobs/:job/schedule", h.Admin.UpdateJobSchedule)

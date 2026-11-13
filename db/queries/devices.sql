@@ -32,6 +32,12 @@ SELECT COALESCE(tz, 'UTC') FROM t_devices
 WHERE id = $1 AND deleted_at IS NULL;
 
 -- name: SoftDeleteDevice :execrows
+-- "Delete my data": the device is soft-deleted and its weekly digest (which
+-- would otherwise outlive it, soft delete never fires the FK cascade) is
+-- removed in the same statement.
+WITH gone AS (
+    DELETE FROM t_weekly_digests WHERE device_id = $1
+)
 UPDATE t_devices SET deleted_at = now()
 WHERE id = $1 AND deleted_at IS NULL;
 
