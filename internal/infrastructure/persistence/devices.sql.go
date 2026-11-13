@@ -57,6 +57,8 @@ WITH digest AS (
     DELETE FROM t_weekly_digests WHERE device_id = $1
 ), rules AS (
     DELETE FROM t_alert_rules WHERE device_id = $1
+), events AS (
+    DELETE FROM t_events WHERE device_id = $1
 )
 UPDATE t_devices SET
     deleted_at    = now(),
@@ -71,7 +73,7 @@ WHERE t_devices.id = $1 AND t_devices.deleted_at IS NULL
 // "Delete my data": the device is soft-deleted (the row is kept so anonymous
 // aggregates referencing it stay valid) while everything personal goes in the
 // same statement: weekly digest, alert rules (t_alert_deliveries cascade from
-// the rules), and the push token / attestation key / prefs on the device row.
+// the rules), analytics events (t_events, device_id-keyed), and the push token / attestation key / prefs on the device row.
 // Soft delete never fires the device FK cascades, hence the explicit deletes.
 func (q *Queries) SoftDeleteDevice(ctx context.Context, id uuid.UUID) (int64, error) {
 	result, err := q.db.Exec(ctx, softDeleteDevice, id)

@@ -9,7 +9,7 @@ import (
 )
 
 // "Delete my data": deleting a device removes its alert rules (+ deliveries),
-// weekly digest and push identifiers; the soft-deleted row remains.
+// weekly digest, analytics events and push identifiers; the soft-deleted row remains.
 func TestDeleteDeviceRemovesPersonalData(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
@@ -36,6 +36,9 @@ func TestDeleteDeviceRemovesPersonalData(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO t_weekly_digests (device_id, spot_ids) VALUES ($1, ARRAY[$2]::uuid[])`, dev, spot); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := pool.Exec(ctx, `INSERT INTO t_events (device_id, name) VALUES ($1, 'app_open'), ($1, 'spot_view')`, dev); err != nil {
+		t.Fatal(err)
+	}
 
 	ok, err := persistence.NewDevicesRepo(persistence.New(pool)).Delete(ctx, dev)
 	if err != nil || !ok {
@@ -57,6 +60,9 @@ func TestDeleteDeviceRemovesPersonalData(t *testing.T) {
 	}
 	if n := count(`SELECT count(*) FROM t_weekly_digests WHERE device_id=$1`, dev); n != 0 {
 		t.Errorf("digest left: %d", n)
+	}
+	if n := count(`SELECT count(*) FROM t_events WHERE device_id=$1`, dev); n != 0 {
+		t.Errorf("events left: %d", n)
 	}
 	if n := count(`SELECT count(*) FROM t_devices WHERE id=$1 AND deleted_at IS NOT NULL
 		AND apns_token IS NULL AND apns_env IS NULL AND attest_key_id IS NULL
