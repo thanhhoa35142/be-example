@@ -8,7 +8,7 @@
 #   --target worker  debian runtime with osmium-tool for the OSM ingest
 #                  (INGEST_SOURCE=osmium). Alpine has no osmium-tool
 #                  package, so the worker is built against glibc instead.
-FROM golang:1.25-alpine AS build
+FROM golang:1.26-alpine AS build
 RUN apk add --no-cache gcc musl-dev
 WORKDIR /src
 
@@ -23,7 +23,7 @@ RUN CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o /out/api ./cmd/api \
  && CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o /out/keyctl ./cmd/keyctl
 
 # ---- worker (glibc + osmium-tool) ----------------------------------------
-FROM golang:1.25-bookworm AS build-worker
+FROM golang:1.26-bookworm AS build-worker
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
