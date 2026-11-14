@@ -3,7 +3,6 @@ package digest_test
 import (
 	"context"
 	"log/slog"
-	"os"
 	"testing"
 	"time"
 
@@ -12,6 +11,7 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/infrastructure/persistence"
 	"github.com/thanhhoa35142/be-example/internal/modules/digest"
 	"github.com/thanhhoa35142/be-example/internal/modules/entitlement"
+	"github.com/thanhhoa35142/be-example/internal/platform/testdb"
 )
 
 type capture struct{ got []digest.Delivery }
@@ -25,10 +25,7 @@ func (c *capture) Send(_ context.Context, d digest.Delivery) error {
 // scores for the coming weekend). It fabricates a Plus device (entitlement
 // rows inserted directly — never in production code) and cleans up after.
 func TestRunWeeklyDB(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
+	dsn := testdb.DSN(t)
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {

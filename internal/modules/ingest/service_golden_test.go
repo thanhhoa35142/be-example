@@ -6,7 +6,7 @@ package ingest_test
 // t_ingest_features rows are asserted with SQL.
 //
 // Requires a migrated database; skipped when DATABASE_URL is unset.
-// Dev DSN: postgres://picnic:picnic@localhost:4343/picnic?sslmode=disable
+// Local DSN (TEST_DATABASE_URL): postgres://picnic:picnic@localhost:4343/picnic_test?sslmode=disable
 //
 // Each subtest creates its own t_city_packs row (status 'draft' so the
 // scheduled worker — which only lists beta/live packs — never picks it up)
@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"iter"
-	"os"
 	"testing"
 	"time"
 
@@ -28,6 +27,7 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/infrastructure/persistence"
 	"github.com/thanhhoa35142/be-example/internal/modules/ingest"
 	"github.com/thanhhoa35142/be-example/internal/modules/ingest/osm"
+	"github.com/thanhhoa35142/be-example/internal/platform/testdb"
 )
 
 // ---------------------------------------------------------------------------
@@ -93,10 +93,7 @@ func goldenFeature(sourceID string, version int, tags map[string]string, geom []
 
 func goldenPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
+	dsn := testdb.DSN(t)
 	pool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
 		t.Fatal(err)

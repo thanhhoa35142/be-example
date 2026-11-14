@@ -5,9 +5,11 @@
 #   scripts/ingest/restore-local.sh <pickhour-cloud.dump> [db_name]
 #   scripts/ingest/restore-local.sh <pickhour-cloud.dump> --replace
 #
-# Default target is a separate database (picnic_cloud) so the dev DB is
-# untouched; point DATABASE_URL at it to try it out. --replace drops and
-# recreates the dev database "picnic" (stop the API/worker first).
+# Default target is a separate check database (picnic_cloud) so the main
+# database is untouched; point DATABASE_URL at it to try it out. --replace
+# drops and recreates "picnic" — the main database, the copy that seeds prod —
+# so everything in it is replaced by the dump (stop the API/worker first, and
+# run migrations afterwards: the dump may be on an older schema).
 #
 # Env: PG_CONTAINER (default picnic-postgres), PG_USER (default picnic).
 set -euo pipefail
@@ -20,7 +22,7 @@ PGU=${PG_USER:-picnic}
 [ -s "$DUMP" ] || { echo "dump not found: $DUMP" >&2; exit 1; }
 if [ "$TARGET" = "--replace" ]; then
   TARGET=picnic
-  read -r -p "This DROPS the local database '$TARGET'. Type 'yes' to continue: " ok
+  read -r -p "This DROPS the MAIN database '$TARGET' (the copy that seeds prod) and replaces it with the dump. Type 'yes' to continue: " ok
   [ "$ok" = yes ] || exit 1
 fi
 

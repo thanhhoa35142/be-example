@@ -361,6 +361,13 @@ geojsonseq → classify → tx → stats):
 uploads `pickhour-cloud.dump`; `scripts/ingest/restore-local.sh` restores it
 into a local database (`picnic_cloud` by default, `--replace` for `picnic`).
 
+Since 2026-11-14 the local database `picnic` is that restored cloud data
+(migrated to the current schema) and is the single database: the one the API
+and worker use and the copy that seeds prod. `--replace` therefore replaces
+the main data. Integration tests use `TEST_DATABASE_URL` (the scratch
+database `picnic_test`) and never touch `picnic`. Scores are recomputed once
+right before go-live; the worker stays off until then.
+
 - **Pack catalog**: `scripts/ingest/packs.tsv` — one row per city (group,
   slug, name, country, tz, bbox, Geofabrik extract). Single source of truth
   for the workflow; add a city = add a row. Markets covered: EU + UK, US,

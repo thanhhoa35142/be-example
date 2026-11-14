@@ -2,7 +2,6 @@ package alerts_test
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
@@ -12,6 +11,7 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/infrastructure/persistence"
 	"github.com/thanhhoa35142/be-example/internal/modules/alerts"
 	"github.com/thanhhoa35142/be-example/internal/modules/entitlement"
+	"github.com/thanhhoa35142/be-example/internal/platform/testdb"
 )
 
 // onlyRule restricts Evaluate to one rule so the test never touches real
@@ -43,10 +43,7 @@ func (c *captureSender) Send(_ context.Context, d alerts.Delivery) error {
 // lat/lon, evaluates it in a daytime window and checks the pushed spot is the
 // best active spot within the radius of the cell center.
 func TestAreaRuleEvaluate(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
+	dsn := testdb.DSN(t)
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
