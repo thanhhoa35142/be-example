@@ -14,37 +14,54 @@ import (
 )
 
 const listSpotForecast = `-- name: ListSpotForecast :many
-SELECT ts_hour, score, s_weather, s_crowd, s_amenity, s_shade, s_fresh,
-       cap_reason, reasons, confidence, computed_at
-FROM t_spot_scores
-WHERE spot_id = $1
-  AND ts_hour >= $2
-  AND ts_hour < $3
-ORDER BY ts_hour
+SELECT ss.ts_hour, ss.score, ss.s_weather, ss.s_crowd, ss.s_amenity, ss.s_shade, ss.s_fresh,
+       ss.cap_reason, ss.reasons, ss.confidence, ss.computed_at,
+       w.temp, w.feels_like, w.precip_prob, w.wind, w.uv, w.cloud
+FROM t_spot_scores ss
+LEFT JOIN t_weather_hourly_forecasts w
+       ON w.cell_id = $1::bigint AND w.ts = ss.ts_hour
+WHERE ss.spot_id = $2
+  AND ss.ts_hour >= $3
+  AND ss.ts_hour < $4
+ORDER BY ss.ts_hour
 `
 
 type ListSpotForecastParams struct {
-	SpotID   uuid.UUID `json:"spot_id"`
-	TsHour   time.Time `json:"ts_hour"`
-	TsHour_2 time.Time `json:"ts_hour_2"`
+	WeatherCellID int64     `json:"weather_cell_id"`
+	SpotID        uuid.UUID `json:"spot_id"`
+	FromTs        time.Time `json:"from_ts"`
+	ToTs          time.Time `json:"to_ts"`
 }
 
 type ListSpotForecastRow struct {
-	TsHour     time.Time   `json:"ts_hour"`
-	Score      int16       `json:"score"`
-	SWeather   pgtype.Int2 `json:"s_weather"`
-	SCrowd     pgtype.Int2 `json:"s_crowd"`
-	SAmenity   pgtype.Int2 `json:"s_amenity"`
-	SShade     pgtype.Int2 `json:"s_shade"`
-	SFresh     pgtype.Int2 `json:"s_fresh"`
-	CapReason  pgtype.Text `json:"cap_reason"`
-	Reasons    []byte      `json:"reasons"`
-	Confidence int16       `json:"confidence"`
-	ComputedAt time.Time   `json:"computed_at"`
+	TsHour     time.Time     `json:"ts_hour"`
+	Score      int16         `json:"score"`
+	SWeather   pgtype.Int2   `json:"s_weather"`
+	SCrowd     pgtype.Int2   `json:"s_crowd"`
+	SAmenity   pgtype.Int2   `json:"s_amenity"`
+	SShade     pgtype.Int2   `json:"s_shade"`
+	SFresh     pgtype.Int2   `json:"s_fresh"`
+	CapReason  pgtype.Text   `json:"cap_reason"`
+	Reasons    []byte        `json:"reasons"`
+	Confidence int16         `json:"confidence"`
+	ComputedAt time.Time     `json:"computed_at"`
+	Temp       pgtype.Float4 `json:"temp"`
+	FeelsLike  pgtype.Float4 `json:"feels_like"`
+	PrecipProb pgtype.Int2   `json:"precip_prob"`
+	Wind       pgtype.Float4 `json:"wind"`
+	Uv         pgtype.Float4 `json:"uv"`
+	Cloud      pgtype.Int2   `json:"cloud"`
 }
 
+// Hourly scores plus the raw weather of the spot's weather cell for the same
+// hour (NULL columns when that hour has no weather row).
 func (q *Queries) ListSpotForecast(ctx context.Context, arg ListSpotForecastParams) ([]ListSpotForecastRow, error) {
-	rows, err := q.db.Query(ctx, listSpotForecast, arg.SpotID, arg.TsHour, arg.TsHour_2)
+	rows, err := q.db.Query(ctx, listSpotForecast,
+		arg.WeatherCellID,
+		arg.SpotID,
+		arg.FromTs,
+		arg.ToTs,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -64,6 +81,12 @@ func (q *Queries) ListSpotForecast(ctx context.Context, arg ListSpotForecastPara
 			&i.Reasons,
 			&i.Confidence,
 			&i.ComputedAt,
+			&i.Temp,
+			&i.FeelsLike,
+			&i.PrecipProb,
+			&i.Wind,
+			&i.Uv,
+			&i.Cloud,
 		); err != nil {
 			return nil, err
 		}

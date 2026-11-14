@@ -94,6 +94,20 @@ type ForecastPoint struct {
 	CapReason  *string    `json:"capReason,omitempty"`
 	Reasons    []Reason   `json:"reasons"`
 	Confidence int        `json:"confidence"`
+	// Weather is the raw forecast behind the score for this hour; nil when
+	// the hour has no weather row.
+	Weather *HourWeather `json:"weather,omitempty"`
+}
+
+// HourWeather is the provider forecast for one hour (metric units; the
+// client converts for display). Absent keys mean the provider had no value.
+type HourWeather struct {
+	TempC      *float64 `json:"tempC,omitempty"`
+	FeelsLikeC *float64 `json:"feelsLikeC,omitempty"`
+	PrecipProb *int     `json:"precipProb,omitempty"` // 0-100 %
+	WindKmh    *float64 `json:"windKmh,omitempty"`
+	UV         *float64 `json:"uv,omitempty"`
+	Cloud      *int     `json:"cloud,omitempty"` // 0-100 %
 }
 
 type Amenity struct {

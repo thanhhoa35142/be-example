@@ -20,5 +20,5 @@ type Repository interface {
 	GetByID(ctx context.Context, id uuid.UUID) (SpotDetail, error)
 	ListAmenities(ctx context.Context, spotID uuid.UUID) ([]Amenity, error)
 	ListSources(ctx context.Context, spotID uuid.UUID) ([]Source, error)
-	ListForecast(ctx context.Context, spotID uuid.UUID, from, to time.Time) ([]ForecastPoint, error)
+	ListForecast(ctx context.Context, spotID uuid.UUID, weatherCellID int64, from, to time.Time) ([]ForecastPoint, error)
 }

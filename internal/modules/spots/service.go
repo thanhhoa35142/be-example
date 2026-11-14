@@ -128,12 +128,13 @@ func (s *Service) Get(ctx context.Context, id uuid.UUID) (SpotDetail, error) {
 // Forecast returns hourly scores for the next ForecastDays days starting at
 // the current hour.
 func (s *Service) Forecast(ctx context.Context, id uuid.UUID) ([]ForecastPoint, error) {
-	if _, err := s.Get(ctx, id); err != nil {
+	detail, err := s.Get(ctx, id)
+	if err != nil {
 		return nil, err
 	}
 	from := time.Now().UTC().Truncate(time.Hour)
 	to := from.Add(ForecastDays * 24 * time.Hour)
-	points, err := s.repo.ListForecast(ctx, id, from, to)
+	points, err := s.repo.ListForecast(ctx, id, geo.WeatherCellID(detail.CellID), from, to)
 	if err != nil {
 		return nil, err
 	}

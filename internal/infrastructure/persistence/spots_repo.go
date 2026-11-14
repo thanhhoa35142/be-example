@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"time"
 
 	"github.com/google/uuid"
@@ -180,11 +181,12 @@ func (r *SpotsRepository) ListSources(ctx context.Context, spotID uuid.UUID) ([]
 	return out, nil
 }
 
-func (r *SpotsRepository) ListForecast(ctx context.Context, spotID uuid.UUID, from, to time.Time) ([]spots.ForecastPoint, error) {
+func (r *SpotsRepository) ListForecast(ctx context.Context, spotID uuid.UUID, weatherCellID int64, from, to time.Time) ([]spots.ForecastPoint, error) {
 	rows, err := r.queries.ListSpotForecast(ctx, ListSpotForecastParams{
-		SpotID:   spotID,
-		TsHour:   from,
-		TsHour_2: to,
+		WeatherCellID: weatherCellID,
+		SpotID:        spotID,
+		FromTs:        from,
+		ToTs:          to,
 	})
 	if err != nil {
 		return nil, err
@@ -204,9 +206,26 @@ func (r *SpotsRepository) ListForecast(ctx context.Context, spotID uuid.UUID, fr
 			CapReason:  textPtr(row.CapReason),
 			Reasons:    reasonsFromJSON(row.Reasons),
 			Confidence: int(row.Confidence),
+			Weather:    hourWeather(row.Temp, row.FeelsLike, row.PrecipProb, row.Wind, row.Uv, row.Cloud),
 		})
 	}
 	return out, nil
+}
+
+// hourWeather maps the LEFT JOINed weather columns; nil when the hour has no
+// weather row at all (every column NULL).
+func hourWeather(temp, feels pgtype.Float4, precip pgtype.Int2, wind, uv pgtype.Float4, cloud pgtype.Int2) *spots.HourWeather {
+	if !temp.Valid && !feels.Valid && !precip.Valid && !wind.Valid && !uv.Valid && !cloud.Valid {
+		return nil
+	}
+	return &spots.HourWeather{
+		TempC:      round1Ptr(temp),
+		FeelsLikeC: round1Ptr(feels),
+		PrecipProb: int16Ptr(precip),
+		WindKmh:    round1Ptr(wind),
+		UV:         round1Ptr(uv),
+		Cloud:      int16Ptr(cloud),
+	}
 }
 
 func scoreSnapshotFromRow(score pgtype.Int2, confidence pgtype.Int2, capReason pgtype.Text, reasons []byte, computedAt pgtype.Timestamptz) *spots.ScoreSnapshot {
@@ -242,6 +261,16 @@ func reasonsFromJSON(raw []byte) []spots.Reason {
 		return []spots.Reason{}
 	}
 	return r
+}
+
+// round1Ptr converts a nullable real to float64 rounded to 0.1, so the JSON
+// carries 21.3 instead of float32 noise like 21.299999237060547.
+func round1Ptr(v pgtype.Float4) *float64 {
+	if !v.Valid {
+		return nil
+	}
+	f := math.Round(float64(v.Float32)*10) / 10
+	return &f
 }
 
 func textPtr(t pgtype.Text) *string {
