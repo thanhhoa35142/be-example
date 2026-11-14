@@ -4,18 +4,24 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
+	"regexp"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/thanhhoa35142/be-example/internal/platform/httpx"
 )
+
+// requestIDRe is the only shape of client-supplied X-Request-ID we echo into
+// logs and responses: short and free of control chars / log-injection bytes.
+var requestIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 func RequestID() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.GetHeader("X-Request-ID")
-		if id == "" {
+		if !requestIDRe.MatchString(id) {
 			id = uuid.NewString()
 		}
 		c.Set("requestID", id)
@@ -35,23 +41,6 @@ func ClientInfo() gin.HandlerFunc {
 	}
 }
 
-// AdminAuth guards staff endpoints with a bearer token from ADMIN_TOKEN.
-// When ADMIN_TOKEN is unset the admin surface is disabled entirely (404).
-func AdminAuth() gin.HandlerFunc {
-	token := os.Getenv("ADMIN_TOKEN")
-	return func(c *gin.Context) {
-		if token == "" {
-			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "not found"})
-			return
-		}
-		if c.GetHeader("Authorization") != "Bearer "+token {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-			return
-		}
-		c.Next()
-	}
-}
-
 func Logger() gin.HandlerFunc {
 	return gin.LoggerWithFormatter(func(param gin.LogFormatterParams) string {
 		return time.Now().Format("2006/01/02 - 15:04:05") +
@@ -59,7 +48,7 @@ func Logger() gin.HandlerFunc {
 			" | " + param.StatusCodeColor() + fmt.Sprint(param.StatusCode) + param.ResetColor() +
 			" | " + param.Latency.String() +
 			" | " + param.ClientIP +
-			" | " + param.Path + " | " + param.ErrorMessage + "\n"
+			" | " + pathWithoutQuery(param.Path) + " | " + param.ErrorMessage + "\n"
 	})
 }
 
@@ -74,6 +63,16 @@ func Recovery() gin.HandlerFunc {
 			"panic", fmt.Sprint(recovered),
 			"stack", string(debug.Stack()),
 		)
-		c.AbortWithStatusJSON(500, gin.H{"title": "Internal Server Error", "status": 500})
+		httpx.WriteProblem(c, http.StatusInternalServerError, httpx.CodeInternal, "Internal Server Error", "")
+		c.Abort()
 	})
+}
+
+// pathWithoutQuery drops the query string so identifiers/credentials passed
+// as query parameters (legacy ?deviceId=) never reach the access log.
+func pathWithoutQuery(p string) string {
+	if i := strings.IndexByte(p, '?'); i >= 0 {
+		return p[:i]
+	}
+	return p
 }

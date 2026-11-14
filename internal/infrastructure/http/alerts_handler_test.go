@@ -17,11 +17,14 @@ import (
 // memAlertsRepo embeds the Repository port; only rule CRUD is implemented.
 type memAlertsRepo struct {
 	alerts.Repository
-	rules map[uuid.UUID]alerts.Rule
+	rules       map[uuid.UUID]alerts.Rule
+	missingSpot *uuid.UUID // SpotActive reports false for this spot
 }
 
 func (r *memAlertsRepo) DeviceExists(context.Context, uuid.UUID) (bool, error) { return true, nil }
-func (r *memAlertsRepo) CountRules(context.Context, uuid.UUID) (int, error)    { return len(r.rules), nil }
+func (r *memAlertsRepo) SpotActive(_ context.Context, id uuid.UUID) (bool, error) {
+	return r.missingSpot == nil || id != *r.missingSpot, nil
+}
 func (r *memAlertsRepo) GetRule(_ context.Context, id uuid.UUID) (*alerts.Rule, error) {
 	if v, ok := r.rules[id]; ok {
 		return &v, nil
@@ -35,7 +38,10 @@ func (r *memAlertsRepo) ListRules(context.Context, uuid.UUID) ([]alerts.Rule, er
 	}
 	return out, nil
 }
-func (r *memAlertsRepo) InsertRule(_ context.Context, dev uuid.UUID, in alerts.RuleInput, s, e time.Duration) (uuid.UUID, error) {
+func (r *memAlertsRepo) InsertRuleLimited(_ context.Context, dev uuid.UUID, in alerts.RuleInput, s, e time.Duration, max int) (uuid.UUID, error) {
+	if max >= 0 && len(r.rules) >= max {
+		return uuid.Nil, alerts.ErrPlanLimit
+	}
 	id := uuid.New()
 	r.rules[id] = alerts.Rule{ID: id, DeviceID: dev, SpotID: in.SpotID, H3Cell: in.H3Cell, RadiusM: in.RadiusM,
 		MinScore: in.MinScore, DaysMask: in.DaysMask, StartLocal: s, EndLocal: e, TZ: in.TZ, Enabled: true}
@@ -109,5 +115,67 @@ func TestAlertsHandlerArea(t *testing.T) {
 	r2.ServeHTTP(w, req)
 	if w.Code != 403 || !strings.Contains(w.Body.String(), "plan_limit") {
 		t.Fatalf("free cap: %d %s", w.Code, w.Body)
+	}
+}
+
+func TestAlertsHandlerValidation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	dev := uuid.New()
+	missing := uuid.New()
+	repo := &memAlertsRepo{rules: map[uuid.UUID]alerts.Rule{}, missingSpot: &missing}
+	h := NewAlertsHandler(alerts.NewService(repo, planMap{dev: "plus"}, nil))
+	r := gin.New()
+	r.POST("/v1/alerts", h.Create)
+	r.GET("/v1/alerts", h.List)
+	r.DELETE("/v1/alerts/:id", h.Delete)
+
+	post := func(start, end, tz, spot string) *httptest.ResponseRecorder {
+		body := `{"deviceId":"` + dev.String() + `","spotId":"` + spot + `","minScore":50,"daysMask":127,"startLocal":"` + start + `","endLocal":"` + end + `","tz":"` + tz + `"}`
+		req := httptest.NewRequest("POST", "/v1/alerts", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w
+	}
+	ok := uuid.New().String()
+	for name, c := range map[string]struct{ s, e, tz string }{
+		"garbage start": {"nope", "10:00", "UTC"},
+		"garbage end":   {"08:00", "25:99", "UTC"},
+		"equal":         {"08:00", "08:00", "UTC"},
+		"empty tz":      {"08:00", "10:00", ""},
+		"Local tz":      {"08:00", "10:00", "Local"},
+		"unknown tz":    {"08:00", "10:00", "Mars/Base"},
+	} {
+		if w := post(c.s, c.e, c.tz, ok); w.Code != 400 || !strings.Contains(w.Body.String(), `"code":"invalid_body"`) {
+			t.Errorf("%s: %d %s", name, w.Code, w.Body)
+		}
+	}
+	if w := post("22:00", "06:00", "UTC", ok); w.Code != http.StatusCreated {
+		t.Errorf("overnight window must be valid: %d %s", w.Code, w.Body)
+	}
+	if w := post("08:00", "10:00", "UTC", missing.String()); w.Code != 404 {
+		t.Errorf("missing spot: want 404, got %d %s", w.Code, w.Body)
+	}
+
+	// Device id: header preferred, legacy query still accepted, neither -> 400.
+	get := func(hdr, query string) int {
+		req := httptest.NewRequest("GET", "/v1/alerts"+query, nil)
+		if hdr != "" {
+			req.Header.Set("X-Device-ID", hdr)
+		}
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w.Code
+	}
+	if c := get(dev.String(), ""); c != 200 {
+		t.Errorf("header: %d", c)
+	}
+	if c := get("", "?deviceId="+dev.String()); c != 200 {
+		t.Errorf("legacy query: %d", c)
+	}
+	if c := get("not-a-uuid", "?deviceId="+dev.String()); c != 400 {
+		t.Errorf("bad header must not fall back to query: %d", c)
+	}
+	if c := get("", ""); c != 400 {
+		t.Errorf("missing id: %d", c)
 	}
 }

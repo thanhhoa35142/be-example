@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -28,6 +29,7 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/modules/spots"
 	"github.com/thanhhoa35142/be-example/internal/platform/config"
 	platformlog "github.com/thanhhoa35142/be-example/internal/platform/log"
+	"github.com/thanhhoa35142/be-example/internal/platform/ratelimit"
 )
 
 func main() {
@@ -60,11 +62,11 @@ func main() {
 	spotsRepo := persistence.NewSpotsRepository(queries)
 	spotsSvc := spots.NewService(spotsRepo)
 	recSvc := recommendations.NewService(persistence.NewRecommendationsRepo(queries))
-	devicesSvc := devices.NewService(persistence.NewDevicesRepo(queries))
+	devicesSvc := devices.NewService(persistence.NewDevicesRepo(queries, pool))
 	reportsSvc := reports.NewService(persistence.NewReportsRepo(queries))
-	entitlementSvc := entitlement.NewService(persistence.NewEntitlementRepo(queries))
 	logger := platformlog.New("api")
-	alertsRepo := persistence.NewAlertsRepo(queries)
+	entitlementSvc := entitlement.NewService(persistence.NewEntitlementRepo(queries, pool), appStoreVerifier(cfg, logger))
+	alertsRepo := persistence.NewAlertsRepo(queries, pool)
 	apnsClient, err := notifier.ClientFromEnv()
 	if err != nil {
 		logger.Warn("APNs disabled", "error", err)
@@ -80,7 +82,16 @@ func main() {
 	eventsSvc := events.NewService(persistence.NewEventsRepo(queries))
 	digestSvc := digest.NewService(persistence.NewDigestRepo(queries), entitlementSvc, nil, logger)
 
-	router := infrahttp.NewRouter(pool, infrahttp.Handlers{
+	// Gin reads its mode when the engine is built: set it first.
+	cfg.ConfigureGinMode(gin.SetMode)
+
+	limits := infrahttp.RateLimits{
+		Read:   ratelimit.PerMinute(float64(cfg.RateReadPerMin), cfg.RateReadBurst),
+		Write:  ratelimit.PerMinute(float64(cfg.RateWritePerMin), cfg.RateWriteBurst),
+		Device: ratelimit.PerMinute(float64(cfg.RateDevicePerHour)/60, cfg.RateDeviceBurst),
+	}
+	authFail := ratelimit.PerMinute(float64(cfg.RateAuthFailPerMin), cfg.RateAuthFailPerMin)
+	router, err := infrahttp.NewRouter(pool, infrahttp.Handlers{
 		Spots:           infrahttp.NewSpotsHandler(spotsSvc),
 		Recommendations: infrahttp.NewRecommendationsHandler(recSvc),
 		Devices:         infrahttp.NewDevicesHandler(devicesSvc),
@@ -90,16 +101,29 @@ func main() {
 		Admin:           infrahttp.NewAdminHandler(adminSvc, keysSvc),
 		Events:          infrahttp.NewEventsHandler(eventsSvc),
 		Digest:          infrahttp.NewDigestHandler(digestSvc),
+		Share: infrahttp.NewShareHandler(spotsSvc, infrahttp.ShareOptions{
+			AppleAppIDs:   cfg.AppleAppIDs,
+			AppStoreAppID: cfg.AppStoreAppID,
+		}),
+	}, infrahttp.Options{
+		TrustedProxies: cfg.TrustedProxies,
+		MaxBodyBytes:   cfg.MaxBodyBytes,
+		Limits:         &limits,
+		AdminToken:     os.Getenv("ADMIN_TOKEN"),
+		AdminFailed:    &authFail,
 	})
-
-	if os.Getenv("GIN_MODE") == "" && os.Getenv("APP_ENV") != "production" {
-		gin.SetMode(gin.DebugMode)
+	if err != nil {
+		log.Fatalf("router: %v", err)
 	}
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
 		Handler:           router,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second, // whole request incl. body (largest body is 512 KiB)
+		WriteTimeout:      60 * time.Second, // covers the slowest admin aggregate query
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    16 << 10,
 	}
 
 	go func() {
@@ -119,4 +143,26 @@ func main() {
 		fmt.Fprintln(os.Stderr, "shutdown:", err)
 	}
 	log.Println("server stopped")
+}
+
+// appStoreVerifier wires the App Store JWS verifier. Without
+// APPSTORE_BUNDLE_ID the entitlement service stays fail-closed: POST
+// /v1/entitlement/link and /v1/appstore/notifications answer 503 and no
+// subscription can be created. There is no bypass.
+func appStoreVerifier(cfg config.Config, logger *slog.Logger) entitlement.Option {
+	if cfg.AppStoreBundleID == "" {
+		logger.Error("APPSTORE_BUNDLE_ID is not set: subscription linking and App Store notifications are DISABLED (fail closed)")
+		return entitlement.WithVerifier(nil, entitlement.Config{})
+	}
+	v, err := entitlement.NewProductionVerifier()
+	if err != nil {
+		log.Fatalf("app store verifier: %v", err)
+	}
+	if cfg.AppStoreAllowSandbox {
+		logger.Warn("App Store Sandbox payloads are accepted (APPSTORE_ALLOW_SANDBOX=true); set it to false once the app is live")
+	}
+	return entitlement.WithVerifier(v, entitlement.Config{
+		BundleID:     cfg.AppStoreBundleID,
+		AllowSandbox: cfg.AppStoreAllowSandbox,
+	})
 }

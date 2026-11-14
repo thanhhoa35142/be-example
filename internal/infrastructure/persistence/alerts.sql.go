@@ -290,6 +290,21 @@ func (q *Queries) ListEnabledAlertRules(ctx context.Context) ([]TAlertRule, erro
 	return items, nil
 }
 
+const lockDeviceForAlerts = `-- name: LockDeviceForAlerts :one
+SELECT id FROM t_devices
+WHERE id = $1 AND deleted_at IS NULL
+FOR UPDATE
+`
+
+// Row lock that serialises concurrent rule creation for one device so the
+// plan limit (count then insert) cannot be raced.
+func (q *Queries) LockDeviceForAlerts(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, lockDeviceForAlerts, id)
+	var id_2 uuid.UUID
+	err := row.Scan(&id_2)
+	return id_2, err
+}
+
 const markDeliveryDead = `-- name: MarkDeliveryDead :exec
 UPDATE t_alert_deliveries
 SET status = 'dead', last_error = $3

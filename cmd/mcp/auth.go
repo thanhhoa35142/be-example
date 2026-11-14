@@ -6,9 +6,11 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/thanhhoa35142/be-example/internal/modules/apikeys"
+	"github.com/thanhhoa35142/be-example/internal/platform/ratelimit"
 )
 
 type ctxKey string
@@ -24,7 +26,11 @@ func authFrom(ctx context.Context) (*apikeys.Auth, bool) {
 // apiKeyAuth requires "Authorization: Bearer phk_..." and resolves it to
 // an apikeys.Auth (key + grants) stored in the request context. Enforces
 // the key's rate_limit_rps via an in-memory token bucket.
-func apiKeyAuth(svc *apikeys.Service, limiter *keyLimiter) gin.HandlerFunc {
+//
+// Failed authentications are rate-limited per client IP (failed): once an IP
+// has burned its budget it is answered 429 before any database lookup, so
+// key-guessing cannot be used to hammer the DB.
+func apiKeyAuth(svc *apikeys.Service, limiter *keyLimiter, failed *ratelimit.Limiter) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := c.GetHeader("Authorization")
 		token, ok := strings.CutPrefix(header, "Bearer ")
@@ -32,8 +38,15 @@ func apiKeyAuth(svc *apikeys.Service, limiter *keyLimiter) gin.HandlerFunc {
 			writeAuthProblem(c, http.StatusUnauthorized, "Missing bearer token")
 			return
 		}
+		ip := c.ClientIP()
+		if denied, retry := failed.Deny(ip); denied {
+			c.Header("Retry-After", strconv.Itoa(int(retry/time.Second)))
+			writeAuthProblem(c, http.StatusTooManyRequests, "Too many failed authentication attempts")
+			return
+		}
 		auth, err := svc.Authenticate(c.Request.Context(), token)
 		if err != nil {
+			failed.Hit(ip)
 			status := http.StatusUnauthorized
 			if errors.Is(err, apikeys.ErrForbidden) {
 				status = http.StatusForbidden

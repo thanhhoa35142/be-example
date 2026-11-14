@@ -8,8 +8,9 @@ import (
 
 // Repository is the persistence port for the devices module.
 type Repository interface {
-	// Upsert creates or refreshes a device; returns ErrConflict if the
-	// APNs token is already bound to a different device ID.
+	// Upsert creates or refreshes a device. An APNs token held by another
+	// live device is taken over (the previous holder is demoted to
+	// push_status 'unregistered'); ErrConflict only signals a lost race.
 	Upsert(ctx context.Context, in RegisterInput) (uuid.UUID, error)
 	// Exists reports whether an active (non-deleted) device exists.
 	Exists(ctx context.Context, id uuid.UUID) (bool, error)

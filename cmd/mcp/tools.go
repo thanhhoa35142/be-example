@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -96,6 +98,30 @@ type recommendArgs struct {
 	When    string  `json:"when,omitempty" jsonschema:"optional RFC3339 timestamp; defaults to current hour"`
 }
 
+// toolError maps a service error to a message that is safe to show an agent.
+// Known domain errors get a clean, stable message; anything else (database,
+// driver, internal) is logged server-side and replaced by a generic one so no
+// internals leak through the MCP channel.
+func toolError(ctx context.Context, tool string, err error) error {
+	var merged spots.MergedError
+	switch {
+	case errors.Is(err, spots.ErrNotFound):
+		return errors.New("spot not found")
+	case errors.As(err, &merged):
+		return fmt.Errorf("spot was merged into %s; use that id", merged.NewID)
+	case errors.Is(err, spots.ErrInvalidBBox):
+		return errors.New("invalid bounding box: check west/south/east/north")
+	case errors.Is(err, spots.ErrBboxTooLarge):
+		return errors.New("bounding box too large; use a smaller area")
+	case errors.Is(err, spots.ErrInvalidQuery), errors.Is(err, recommendations.ErrInvalidQuery):
+		return errors.New("invalid query parameters")
+	case errors.Is(err, apikeys.ErrForbidden):
+		return errors.New("forbidden: this API key lacks the required scope")
+	}
+	slog.ErrorContext(ctx, "mcp tool failed", "tool", tool, "error", err)
+	return errors.New("internal error; try again later")
+}
+
 func parseWhen(s string) (*time.Time, error) {
 	if s == "" {
 		return nil, nil
@@ -133,7 +159,7 @@ func registerTools(s *mcp.Server, spotsSvc *spots.Service, recSvc *recommendatio
 			West: args.West, South: args.South, East: args.East, North: args.North,
 		}, when)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, toolError(ctx, "spots_in_bbox", err)
 		}
 		out := make([]spotOut, 0, len(items))
 		for _, it := range items {
@@ -155,7 +181,7 @@ func registerTools(s *mcp.Server, spotsSvc *spots.Service, recSvc *recommendatio
 		}
 		d, err := spotsSvc.Get(ctx, id)
 		if err != nil {
-			return nil, spotDetailOut{}, err
+			return nil, spotDetailOut{}, toolError(ctx, "spot_get", err)
 		}
 		return nil, spotDetailOut{
 			spotOut:   toSpotOut(d.Spot, nil),
@@ -177,7 +203,7 @@ func registerTools(s *mcp.Server, spotsSvc *spots.Service, recSvc *recommendatio
 		}
 		pts, err := spotsSvc.Forecast(ctx, id)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, toolError(ctx, "spot_forecast", err)
 		}
 		return nil, pts, nil
 	})
@@ -204,7 +230,7 @@ func registerTools(s *mcp.Server, spotsSvc *spots.Service, recSvc *recommendatio
 		}
 		items, err := recSvc.Recommend(ctx, q)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, toolError(ctx, "recommend_spots", err)
 		}
 		out := make([]recOut, 0, len(items))
 		for _, it := range items {

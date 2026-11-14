@@ -9,16 +9,20 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/thanhhoa35142/be-example/internal/modules/devices"
 )
 
 type DevicesRepo struct {
-	q *Queries
+	q    *Queries
+	pool *pgxpool.Pool
 }
 
-func NewDevicesRepo(q *Queries) *DevicesRepo {
-	return &DevicesRepo{q: q}
+// NewDevicesRepo needs the pool to run the APNs-token takeover in one
+// transaction.
+func NewDevicesRepo(q *Queries, pool *pgxpool.Pool) *DevicesRepo {
+	return &DevicesRepo{q: q, pool: pool}
 }
 
 func (r *DevicesRepo) Upsert(ctx context.Context, in devices.RegisterInput) (uuid.UUID, error) {
@@ -26,7 +30,7 @@ func (r *DevicesRepo) Upsert(ctx context.Context, in devices.RegisterInput) (uui
 	if err != nil || len(in.Prefs) == 0 {
 		prefs = []byte("{}")
 	}
-	id, err := r.q.UpsertDevice(ctx, UpsertDeviceParams{
+	params := UpsertDeviceParams{
 		ID:         in.ID,
 		ApnsToken:  textParam(in.APNsToken),
 		ApnsEnv:    textParam(in.APNsEnv),
@@ -34,12 +38,45 @@ func (r *DevicesRepo) Upsert(ctx context.Context, in devices.RegisterInput) (uui
 		Tz:         textParam(in.TZ),
 		AppVersion: textParam(in.AppVersion),
 		Prefs:      prefs,
-	})
-	if err != nil {
+	}
+	// A concurrent registration of the same token by a third device can win
+	// the unique index between our release and upsert; one retry resolves it
+	// (the retry's release demotes the winner, last writer takes the token).
+	for attempt := 0; ; attempt++ {
+		id, err := r.upsertTakingOverToken(ctx, params)
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			if attempt == 0 {
+				continue
+			}
 			return uuid.Nil, devices.ErrConflict
 		}
+		return id, err
+	}
+}
+
+// upsertTakingOverToken demotes any other live holder of the APNs token
+// (token/env cleared, push_status 'unregistered') and upserts the device, in
+// one transaction. A reinstall that lost its Keychain gets a fresh device id
+// but the same APNs token; the new install takes the token over instead of
+// being locked out with a permanent conflict.
+func (r *DevicesRepo) upsertTakingOverToken(ctx context.Context, p UpsertDeviceParams) (uuid.UUID, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	q := r.q.WithTx(tx)
+	if p.ApnsToken.Valid {
+		if err := q.ReleaseAPNsToken(ctx, ReleaseAPNsTokenParams{ApnsToken: p.ApnsToken, ID: p.ID}); err != nil {
+			return uuid.Nil, err
+		}
+	}
+	id, err := q.UpsertDevice(ctx, p)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return uuid.Nil, err
 	}
 	return id, nil

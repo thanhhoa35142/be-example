@@ -1,8 +1,35 @@
 package http
 
 import (
+	"fmt"
+
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/thanhhoa35142/be-example/internal/platform/ratelimit"
+)
+
+// Options configures the HTTP edge. Zero values fall back to safe defaults.
+type Options struct {
+	// TrustedProxies are the IPs/CIDRs whose X-Forwarded-For is believed.
+	// Default (empty): trust none, ClientIP is the socket peer. Behind a load
+	// balancer set this to the LB's address, otherwise every client shares the
+	// LB's rate-limit bucket.
+	TrustedProxies []string
+	// MaxBodyBytes is the default request body cap (default 64 KiB).
+	MaxBodyBytes int64
+	// Limits are the per-IP rate budgets (default DefaultRateLimits()).
+	Limits *RateLimits
+	// AdminToken enables /v1/admin when non-empty.
+	AdminToken string
+	// AdminFailed rate-limits failed admin auth per IP (default 10/min).
+	AdminFailed *ratelimit.Rule
+}
+
+const (
+	defaultMaxBody = 64 << 10
+	// Routes that legitimately carry more than the default.
+	maxEventsBody   = 512 << 10 // 100 events x 4 KiB props + envelope
+	maxAppStoreBody = 256 << 10 // JWS with x5c chain + nested transaction
 )
 
 type Handlers struct {
@@ -15,11 +42,36 @@ type Handlers struct {
 	Admin           *AdminHandler
 	Events          *EventsHandler
 	Digest          *DigestHandler
+	Share           *ShareHandler
 }
 
-func NewRouter(pool *pgxpool.Pool, h Handlers) *gin.Engine {
+// NewRouter builds the engine. Call gin.SetMode (config.ConfigureGinMode)
+// before this: Gin reads the mode when the engine is created.
+func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error) {
+	if opts.MaxBodyBytes <= 0 {
+		opts.MaxBodyBytes = defaultMaxBody
+	}
+	limits := DefaultRateLimits()
+	if opts.Limits != nil {
+		limits = *opts.Limits
+	}
+	adminFail := ratelimit.PerMinute(10, 10)
+	if opts.AdminFailed != nil {
+		adminFail = *opts.AdminFailed
+	}
+
 	r := gin.New()
-	r.Use(RequestID(), ClientInfo(), Logger(), Recovery())
+	// Gin trusts every proxy by default, which makes ClientIP() spoofable via
+	// X-Forwarded-For. nil = trust none.
+	if err := r.SetTrustedProxies(opts.TrustedProxies); err != nil {
+		return nil, fmt.Errorf("trusted proxies: %w", err)
+	}
+	r.Use(RequestID(), ClientInfo(), Logger(), Recovery(),
+		RateLimit(limits),
+		BodyLimit(opts.MaxBodyBytes, map[string]int64{
+			"/v1/events":                 maxEventsBody,
+			"/v1/appstore/notifications": maxAppStoreBody,
+		}))
 
 	r.GET("/healthz", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
@@ -32,6 +84,12 @@ func NewRouter(pool *pgxpool.Pool, h Handlers) *gin.Engine {
 		}
 		c.JSON(200, gin.H{"status": "ok"})
 	})
+
+	// Public share surface (universal links + fallback page), outside /v1.
+	if h.Share != nil {
+		r.GET("/s/:id", h.Share.Spot)
+		r.GET("/.well-known/apple-app-site-association", h.Share.AppleAppSiteAssociation)
+	}
 
 	v1 := r.Group("/v1")
 	{
@@ -78,7 +136,7 @@ func NewRouter(pool *pgxpool.Pool, h Handlers) *gin.Engine {
 
 	// Staff surface — disabled unless ADMIN_TOKEN is configured.
 	if h.Admin != nil {
-		admin := v1.Group("/admin", AdminAuth())
+		admin := v1.Group("/admin", AdminAudit(), AdminAuth(opts.AdminToken, ratelimit.New(adminFail)))
 		{
 			admin.GET("/overview", h.Admin.Overview)
 			admin.GET("/freshness", h.Admin.Freshness)
@@ -101,5 +159,5 @@ func NewRouter(pool *pgxpool.Pool, h Handlers) *gin.Engine {
 		}
 	}
 
-	return r
+	return r, nil
 }

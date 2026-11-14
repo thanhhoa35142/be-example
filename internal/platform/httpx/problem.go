@@ -24,6 +24,19 @@ const (
 	CodeRateLimited   = "rate_limited"
 	CodePlanLimit     = "plan_limit"
 	CodeInternal      = "internal_error"
+	// CodePayloadTooLarge: request body over the size limit (413).
+	CodePayloadTooLarge = "payload_too_large"
+	// CodeUnauthorized: missing/invalid staff credentials (401).
+	CodeUnauthorized = "unauthorized"
+	// CodeDeviceLimit: subscription already linked to the max number of
+	// active devices (409).
+	CodeDeviceLimit = "device_limit"
+	// CodeAccountMismatch: the transaction's appAccountToken belongs to a
+	// different device (403).
+	CodeAccountMismatch = "account_mismatch"
+	// CodeUnavailable: a required server-side capability is not configured
+	// (503), e.g. App Store verification.
+	CodeUnavailable = "service_unavailable"
 )
 
 // Problem is an RFC 7807 problem-details body extended with a stable

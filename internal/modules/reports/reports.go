@@ -30,8 +30,25 @@ const (
 	CrowdBusy     = 3
 )
 
-// CrowdRateLimit is the max crowd reports per device per rolling 24h.
-const CrowdRateLimit = 30
+// Per-device limits over a rolling 24h window.
+const (
+	// CrowdRateLimit is the max crowd reports per device.
+	CrowdRateLimit = 30
+	// SpotReportRateLimit is the max spot reports (any type) per device.
+	SpotReportRateLimit = 30
+	// FeedbackRateLimit is the max score-feedback submissions per device.
+	FeedbackRateLimit = 100
+)
+
+// Score feedback may reference an hour this far back (the user is looking at
+// a recent hour) or ahead (the 7-day forecast horizon, plus the current hour).
+const (
+	FeedbackMaxAge   = 72 * time.Hour
+	FeedbackMaxAhead = 7*24*time.Hour + time.Hour
+)
+
+// MaxIssueCodeLen bounds the issueCode of an "issue" report.
+const MaxIssueCodeLen = 64
 
 type SpotReportInput struct {
 	SpotID    uuid.UUID

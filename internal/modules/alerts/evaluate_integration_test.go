@@ -26,10 +26,10 @@ func TestEvaluateSmoke(t *testing.T) {
 	}
 	defer pool.Close()
 	q := persistence.New(pool)
-	alertsRepo := persistence.NewAlertsRepo(q)
+	alertsRepo := persistence.NewAlertsRepo(q, pool)
 	svc := alerts.NewService(
 		alertsRepo,
-		entitlement.NewService(persistence.NewEntitlementRepo(q)),
+		entitlement.NewService(persistence.NewEntitlementRepo(q, pool)),
 		notifier.NewSender(slog.Default(), alertsRepo, nil),
 	)
 	start := time.Now()

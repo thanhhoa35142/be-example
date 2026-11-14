@@ -9,10 +9,14 @@ import (
 type Repository interface {
 	// DeviceExists reports whether an active device exists.
 	DeviceExists(ctx context.Context, deviceID string) (bool, error)
-	// UpsertSubscription inserts or refreshes a subscription row.
-	UpsertSubscription(ctx context.Context, s Subscription) error
-	// LinkDevice attaches a subscription to a device.
-	LinkDevice(ctx context.Context, deviceID, originalTransactionID string) error
+	// UpsertSubscription inserts or refreshes a subscription row. applied is
+	// false when the write was dropped as stale (older last_signed_date) or
+	// because it would un-revoke a revoked/refunded subscription.
+	UpsertSubscription(ctx context.Context, s Subscription) (applied bool, err error)
+	// LinkDevice attaches a subscription to a device, atomically enforcing
+	// maxDevices active devices per transaction (ErrDeviceLimit). Linking an
+	// already-linked pair succeeds without counting.
+	LinkDevice(ctx context.Context, deviceID, originalTransactionID string, maxDevices int) error
 	// ActiveSubscription returns the device's current entitled subscription.
 	ActiveSubscription(ctx context.Context, deviceID string) (*Subscription, error)
 	// RecordNotification stores an App Store Server Notification for audit.

@@ -4,6 +4,7 @@
 package events
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -45,6 +46,15 @@ type NameCount struct {
 func validate(in Input) error {
 	if !nameRe.MatchString(in.Name) {
 		return fmt.Errorf("%w: name must match [a-z][a-z0-9_]{0,63}", ErrInvalidEvent)
+	}
+	if len(in.Props) > 0 {
+		b, err := json.Marshal(in.Props)
+		if err != nil {
+			return fmt.Errorf("%w: props not serializable", ErrInvalidEvent)
+		}
+		if len(b) > MaxPropsBytes {
+			return fmt.Errorf("%w: props over %d bytes", ErrInvalidEvent, MaxPropsBytes)
+		}
 	}
 	return nil
 }

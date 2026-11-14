@@ -9,6 +9,8 @@ info:
     - Success responses (except `/v1/spots` bbox) are wrapped in `{ "data": ... }`.
     - Errors are RFC 7807 `application/problem+json` with a stable `code`.
     - All timestamps are RFC3339 UTC. Distances in meters. Coordinates `[lon, lat]`.
+    - Limits: per-client-IP rate limits (reads 600/min, writes 60/min, `POST /v1/devices` 30/hour by default) answer `429 rate_limited` with `Retry-After`; request bodies are capped (64 KiB default, 512 KiB `/v1/events`, 256 KiB App Store webhook) and answer `413 payload_too_large`.
+    - Requests without a body identify the device with the `X-Device-ID` header (preferred); the legacy `deviceId` query parameter is still accepted.
 servers:
   - url: http://localhost:8080
     description: local dev
@@ -203,7 +205,7 @@ paths:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
         "409":
-          description: apnsToken bound to another device
+          description: Lost race between concurrent registrations of the same apnsToken (retry). A token held by another device is otherwise taken over by the new device.
           content:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
@@ -246,8 +248,18 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ReportStatus" }
+        "400":
+          description: invalid_report - unknown type, or type=issue without a valid issueCode
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
         "404":
           description: Device or spot not found
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "429":
+          description: Rate limited (30 spot reports/device/24h)
           content:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
@@ -289,14 +301,32 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ReportStatus" }
+        "400":
+          description: invalid_report - tsHour not on the hour or outside [now-72h, now+7d+1h]
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "404":
+          description: Unknown device or inactive spot
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "429":
+          description: Rate limited (100/device/24h)
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
 
   /v1/alerts:
     get:
       summary: List alert rules for a device
       parameters:
+        - $ref: "#/components/parameters/DeviceIdHeader"
         - name: deviceId
           in: query
-          required: true
+          required: false
+          deprecated: true
+          description: Legacy; use the X-Device-ID header.
           schema: { type: string, format: uuid }
       responses:
         "200":
@@ -328,8 +358,18 @@ paths:
                 type: object
                 properties:
                   data: { $ref: "#/components/schemas/AlertRule" }
+        "400":
+          description: invalid_body - bad shape/range, startLocal/endLocal not HH:MM or equal, tz not an IANA zone (empty and Local rejected)
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
         "403":
-          description: Free plan limit (1 rule)
+          description: Free plan limit (1 rule), enforced atomically
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "404":
+          description: Unknown device, or spotId does not reference an active spot
           content:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
@@ -362,9 +402,12 @@ paths:
       summary: Delete an alert rule
       parameters:
         - $ref: "#/components/parameters/SpotId"
+        - $ref: "#/components/parameters/DeviceIdHeader"
         - name: deviceId
           in: query
-          required: true
+          required: false
+          deprecated: true
+          description: Legacy; use the X-Device-ID header.
           schema: { type: string, format: uuid }
       responses:
         "204": { description: Deleted }
@@ -481,7 +524,22 @@ paths:
                     properties:
                       plan: { type: string, enum: [free, plus] }
         "400":
-          description: Invalid JWS
+          description: Malformed, unsigned or forged JWS (signature/x5c chain not rooted in Apple Root CA G3), wrong bundleId, or unsupported environment
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "403":
+          description: account_mismatch - the transaction's appAccountToken (a UUID) names another device
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "409":
+          description: device_limit - the subscription is already linked to 5 active devices
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "503":
+          description: service_unavailable - App Store verification not configured (APPSTORE_BUNDLE_ID unset)
           content:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
@@ -489,6 +547,8 @@ paths:
   /v1/appstore/notifications:
     post:
       summary: App Store Server Notifications V2 webhook
+      description: |
+        Authenticated only by the JWS: the outer signedPayload and the nested signedTransactionInfo are verified (ES256, x5c chain to Apple Root CA G3, bundleId, environment). A nested transaction that fails verification rejects the whole notification (400).
       requestBody:
         required: true
         content:
@@ -510,9 +570,25 @@ paths:
                     type: object
                     properties:
                       status: { type: string, example: accepted }
+        "400":
+          description: Invalid or forged signedPayload
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "503":
+          description: service_unavailable - verification not configured
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
 
 components:
   parameters:
+    DeviceIdHeader:
+      name: X-Device-ID
+      in: header
+      required: false
+      description: Device UUID for requests without a body (preferred over the legacy deviceId query parameter).
+      schema: { type: string, format: uuid }
     SpotId:
       name: id
       in: path
@@ -527,7 +603,7 @@ components:
         type: { type: string, example: "about:blank" }
         code:
           type: string
-          enum: [bad_request, invalid_id, invalid_bbox, bbox_too_large, invalid_when, invalid_query, invalid_body, invalid_report, not_found, merged_spot, conflict, rate_limited, plan_limit, internal_error]
+          enum: [bad_request, invalid_id, invalid_bbox, bbox_too_large, invalid_when, invalid_query, invalid_body, invalid_report, not_found, merged_spot, conflict, rate_limited, plan_limit, payload_too_large, unauthorized, device_limit, account_mismatch, service_unavailable, internal_error]
         title: { type: string }
         status: { type: integer }
         detail: { type: string }
@@ -671,6 +747,16 @@ components:
           maxItems: 3
           items: { $ref: "#/components/schemas/Reason" }
         confidence: { type: integer, minimum: 1, maximum: 3 }
+        weather:
+          type: object
+          description: raw provider forecast for this hour (metric); absent when the hour has no weather row, and each key is absent when the provider had no value
+          properties:
+            tempC: { type: number }
+            feelsLikeC: { type: number }
+            precipProb: { type: integer, minimum: 0, maximum: 100 }
+            windKmh: { type: number }
+            uv: { type: number }
+            cloud: { type: integer, minimum: 0, maximum: 100 }
 
     RecommendationItem:
       allOf:
@@ -693,13 +779,14 @@ components:
       required: [id]
       properties:
         id: { type: string, format: uuid, description: client-generated, stored in Keychain }
-        apnsToken: { type: string, nullable: true }
+        apnsToken: { type: string, nullable: true, minLength: 32, maxLength: 200, pattern: "^[0-9a-fA-F]+$", description: "hex; a token held by another live device is taken over" }
         apnsEnv: { type: string, enum: [sandbox, production], nullable: true }
-        locale: { type: string, nullable: true, example: en }
-        tz: { type: string, nullable: true, example: Europe/Amsterdam }
-        appVersion: { type: string, nullable: true }
+        locale: { type: string, nullable: true, example: en, maxLength: 35, pattern: "^[A-Za-z0-9_-]+$" }
+        tz: { type: string, nullable: true, example: Europe/Amsterdam, maxLength: 64, description: "valid IANA zone; Local rejected" }
+        appVersion: { type: string, nullable: true, maxLength: 32, pattern: "^[A-Za-z0-9._+-]+$" }
         prefs:
           type: object
+          description: at most 4096 bytes serialized
           additionalProperties: true
           example: { tempUnit: celsius, distUnit: km }
 
@@ -709,7 +796,7 @@ components:
       properties:
         deviceId: { type: string, format: uuid }
         type: { type: string, enum: [confirm, missing, closed, issue] }
-        issueCode: { type: string, nullable: true }
+        issueCode: { type: string, nullable: true, maxLength: 64, pattern: "^[A-Za-z0-9._-]+$", description: "required when type=issue, ignored otherwise" }
 
     CrowdReportRequest:
       type: object

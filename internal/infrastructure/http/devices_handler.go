@@ -40,18 +40,17 @@ func (h *DevicesHandler) Register(c *gin.Context) {
 		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidID, "Invalid id", "expected a UUID")
 		return
 	}
-	if req.APNsEnv != nil && *req.APNsEnv != "sandbox" && *req.APNsEnv != "production" {
-		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Invalid apnsEnv", "expected sandbox or production")
-		return
-	}
-
 	outID, err := h.svc.Register(c.Request.Context(), devices.RegisterInput{
 		ID: id, APNsToken: req.APNsToken, APNsEnv: req.APNsEnv,
 		Locale: req.Locale, TZ: req.TZ, AppVersion: req.AppVersion, Prefs: req.Prefs,
 	})
 	if err != nil {
+		if errors.Is(err, devices.ErrInvalidInput) {
+			httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Invalid device", err.Error())
+			return
+		}
 		if errors.Is(err, devices.ErrConflict) {
-			httpx.WriteProblem(c, http.StatusConflict, httpx.CodeConflict, "Conflict", "apnsToken already bound to another device")
+			httpx.WriteProblem(c, http.StatusConflict, httpx.CodeConflict, "Conflict", "apnsToken is being registered concurrently, retry")
 			return
 		}
 		httpx.WriteError(c, err)

@@ -20,6 +20,7 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/modules/recommendations"
 	"github.com/thanhhoa35142/be-example/internal/modules/spots"
 	"github.com/thanhhoa35142/be-example/internal/platform/config"
+	"github.com/thanhhoa35142/be-example/internal/platform/ratelimit"
 )
 
 func main() {
@@ -65,18 +66,32 @@ func main() {
 		nil,
 	)
 
-	if os.Getenv("GIN_MODE") == "" && os.Getenv("APP_ENV") != "production" {
-		gin.SetMode(gin.DebugMode)
-	}
+	// Gin reads its mode when the engine is built: set it first.
+	cfg.ConfigureGinMode(gin.SetMode)
 	router := gin.New()
+	// Trust no proxy by default so X-Forwarded-For cannot spoof the client IP
+	// used for the failed-auth throttle.
+	if err := router.SetTrustedProxies(cfg.TrustedProxies); err != nil {
+		log.Fatalf("trusted proxies: %v", err)
+	}
 	router.Use(gin.Recovery())
+	authFail := ratelimit.New(ratelimit.PerMinute(float64(cfg.RateAuthFailPerMin), cfg.RateAuthFailPerMin))
 	router.GET("/healthz", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
-	router.Any("/mcp", apiKeyAuth(keysSvc, newKeyLimiter()), gin.WrapH(mcpHandler))
+	router.Any("/mcp", apiKeyAuth(keysSvc, newKeyLimiter(), authFail), gin.WrapH(mcpHandler))
 
 	srv := &http.Server{
 		Addr:              ":" + port,
 		Handler:           router,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		// No WriteTimeout on purpose: Streamable HTTP answers long-lived
+		// responses (SSE streams) and net/http's WriteTimeout is an absolute
+		// deadline on the whole response, so any non-zero value would cut
+		// streams off mid-flight. Slow-reader abuse is bounded by IdleTimeout
+		// and the per-key rate limiter instead.
+		WriteTimeout:   0,
+		IdleTimeout:    120 * time.Second,
+		MaxHeaderBytes: 16 << 10,
 	}
 	go func() {
 		log.Printf("pickhour mcp listening on :%s/mcp", port)

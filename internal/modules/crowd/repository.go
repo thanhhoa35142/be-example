@@ -57,8 +57,9 @@ type Repository interface {
 	// Returns the number of rows inserted or changed.
 	UpsertModelBatch(ctx context.Context, rows []ModelEstimate) (int64, error)
 
-	// CommunityStats returns aggregated crowd_report rows with at least
-	// minReports votes in the last 30 days.
+	// CommunityStats returns aggregated crowd_report rows with votes from at
+	// least minReports DISTINCT devices in the last 30 days; NReports is that
+	// distinct-device count and AvgLevel the mean of per-device averages.
 	CommunityStats(ctx context.Context, minReports int) ([]CommunitySlot, error)
 	// UpsertCommunity writes one community-sourced estimate.
 	UpsertCommunity(ctx context.Context, spotID uuid.UUID, dow, hour, level, nReports int) error

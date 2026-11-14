@@ -30,6 +30,40 @@ func (q *Queries) CountCrowdReportsSince(ctx context.Context, arg CountCrowdRepo
 	return count, err
 }
 
+const countScoreFeedbackSince = `-- name: CountScoreFeedbackSince :one
+SELECT count(*) FROM t_score_feedbacks
+WHERE device_id = $1 AND created_at > $2
+`
+
+type CountScoreFeedbackSinceParams struct {
+	DeviceID  uuid.UUID `json:"device_id"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func (q *Queries) CountScoreFeedbackSince(ctx context.Context, arg CountScoreFeedbackSinceParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countScoreFeedbackSince, arg.DeviceID, arg.CreatedAt)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countSpotReportsSince = `-- name: CountSpotReportsSince :one
+SELECT count(*) FROM t_spot_reports
+WHERE device_id = $1 AND created_at > $2
+`
+
+type CountSpotReportsSinceParams struct {
+	DeviceID  uuid.UUID `json:"device_id"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func (q *Queries) CountSpotReportsSince(ctx context.Context, arg CountSpotReportsSinceParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countSpotReportsSince, arg.DeviceID, arg.CreatedAt)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const insertCrowdReport = `-- name: InsertCrowdReport :exec
 INSERT INTO t_crowd_reports (spot_id, device_id, level, local_dow, local_hour)
 VALUES ($1, $2, $3, $4, $5)

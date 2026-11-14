@@ -76,7 +76,7 @@ func TestRunWeeklyDB(t *testing.T) {
 
 	repo := persistence.NewDigestRepo(q)
 	snd := &capture{}
-	svc := digest.NewService(repo, entitlement.NewService(persistence.NewEntitlementRepo(q)), snd, slog.Default())
+	svc := digest.NewService(repo, entitlement.NewService(persistence.NewEntitlementRepo(q, pool)), snd, slog.Default())
 	if _, _, err := svc.Upsert(ctx, dev, []uuid.UUID{spotID}, true); err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestRunWeeklyDB(t *testing.T) {
 	}
 
 	// Soft delete ("delete my data") removes the digest.
-	if ok, err := persistence.NewDevicesRepo(q).Delete(ctx, dev); err != nil || !ok {
+	if ok, err := persistence.NewDevicesRepo(q, pool).Delete(ctx, dev); err != nil || !ok {
 		t.Fatal(ok, err)
 	}
 	if _, err := repo.Get(ctx, dev); err != digest.ErrNotFound {

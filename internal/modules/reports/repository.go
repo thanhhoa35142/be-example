@@ -18,6 +18,10 @@ type Repository interface {
 	// InsertSpotReport inserts a spot report; returns ErrDuplicateReport
 	// when the (device, spot, type, day) unique constraint hits.
 	InsertSpotReport(ctx context.Context, in SpotReportInput) error
+	// SpotReportsSince counts a device's spot reports after `since`.
+	SpotReportsSince(ctx context.Context, deviceID uuid.UUID, since time.Time) (int, error)
+	// ScoreFeedbackSince counts a device's feedback rows created after `since`.
+	ScoreFeedbackSince(ctx context.Context, deviceID uuid.UUID, since time.Time) (int, error)
 	// CrowdReportsSince counts a device's crowd reports after `since`.
 	CrowdReportsSince(ctx context.Context, deviceID uuid.UUID, since time.Time) (int, error)
 	// InsertCrowdReport stores a community crowd report.

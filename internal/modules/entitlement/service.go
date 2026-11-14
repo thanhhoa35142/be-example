@@ -9,17 +9,47 @@ import (
 )
 
 type Service struct {
-	repo Repository
+	repo     Repository
+	verifier PayloadVerifier
+	cfg      Config
+	now      func() time.Time
 }
 
-func NewService(repo Repository) *Service {
-	return &Service{repo: repo}
+// Option configures a Service.
+type Option func(*Service)
+
+// WithVerifier installs the JWS verifier and policy. Without it the service
+// still resolves plans but refuses every signed payload (ErrNotConfigured).
+func WithVerifier(v PayloadVerifier, cfg Config) Option {
+	return func(s *Service) { s.verifier, s.cfg = v, cfg }
 }
 
-// LinkTransaction verifies (decodes) a StoreKit signed transaction, upserts
-// the subscription, and links it to the device. Returns ErrDeviceNotFound
-// when the device is unknown.
+func NewService(repo Repository, opts ...Option) *Service {
+	s := &Service{repo: repo, now: time.Now}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
+}
+
+// LinkTransaction verifies a StoreKit signed transaction (signature, Apple
+// chain, bundle id, environment), upserts the subscription, and links it to
+// the device. Returns ErrDeviceNotFound when the device is unknown,
+// ErrAccountTokenMismatch when the transaction's appAccountToken names another
+// device, and ErrDeviceLimit when the transaction is already on
+// MaxDevicesPerSubscription active devices.
 func (s *Service) LinkTransaction(ctx context.Context, deviceID, signedTransaction string) (*Entitlement, error) {
+	sub, accountToken, err := s.decodeTransaction(signedTransaction)
+	if err != nil {
+		return nil, err
+	}
+	// appAccountToken is optional; when the app sets it to the device id and
+	// it parses as a UUID it must match the device linking the transaction.
+	if tok, perr := uuid.Parse(accountToken); perr == nil {
+		if dev, derr := uuid.Parse(deviceID); derr != nil || tok != dev {
+			return nil, ErrAccountTokenMismatch
+		}
+	}
 	exists, err := s.repo.DeviceExists(ctx, deviceID)
 	if err != nil {
 		return nil, err
@@ -27,14 +57,12 @@ func (s *Service) LinkTransaction(ctx context.Context, deviceID, signedTransacti
 	if !exists {
 		return nil, ErrDeviceNotFound
 	}
-	sub, err := decodeTransaction(signedTransaction)
-	if err != nil {
+	// A stale transaction (older signedDate) or an attempt to un-revoke is
+	// dropped by the upsert; the plan below then reflects the stored state.
+	if _, err := s.repo.UpsertSubscription(ctx, *sub); err != nil {
 		return nil, err
 	}
-	if err := s.repo.UpsertSubscription(ctx, *sub); err != nil {
-		return nil, err
-	}
-	if err := s.repo.LinkDevice(ctx, deviceID, sub.OriginalTransactionID); err != nil {
+	if err := s.repo.LinkDevice(ctx, deviceID, sub.OriginalTransactionID, MaxDevicesPerSubscription); err != nil {
 		return nil, err
 	}
 	return s.Entitlement(ctx, deviceID)
@@ -64,7 +92,7 @@ func (s *Service) Entitlement(ctx context.Context, deviceID string) (*Entitlemen
 // ProcessNotification handles an App Store Server Notification V2: records it
 // for audit and upserts the embedded transaction when present.
 func (s *Service) ProcessNotification(ctx context.Context, signedPayload string) error {
-	n, sub, rawPayload, err := decodeNotification(signedPayload)
+	n, sub, rawPayload, err := s.decodeNotification(signedPayload)
 	if err != nil {
 		return err
 	}
@@ -79,7 +107,7 @@ func (s *Service) ProcessNotification(ctx context.Context, signedPayload string)
 		Subtype:               n.Subtype,
 		OriginalTransactionID: otid,
 		SignedDate:            signedAt,
-		Environment:           n.Environment,
+		Environment:           n.Data.Environment,
 		Payload:               rawPayload,
 	}); err != nil {
 		return err
@@ -94,8 +122,13 @@ func (s *Service) ProcessNotification(ctx context.Context, signedPayload string)
 	} else if ok && !lastSigned.Before(signedAt) {
 		return s.repo.MarkNotificationIgnored(ctx, n.NotificationUUID)
 	}
-	if err := s.repo.UpsertSubscription(ctx, *sub); err != nil {
+	applied, err := s.repo.UpsertSubscription(ctx, *sub)
+	if err != nil {
 		return s.markFailed(ctx, n.NotificationUUID, err)
+	}
+	if !applied {
+		// Stale by the transaction's own signedDate, or it would un-revoke.
+		return s.repo.MarkNotificationIgnored(ctx, n.NotificationUUID)
 	}
 	slog.InfoContext(ctx, "app store notification processed",
 		"type", n.NotificationType, "subtype", n.Subtype,

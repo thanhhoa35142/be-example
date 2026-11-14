@@ -15,9 +15,14 @@ import (
 const aggregateCommunityCrowd = `-- name: AggregateCommunityCrowd :many
 SELECT spot_id, local_dow, local_hour,
        count(*) AS n_reports,
-       round(avg(level)::numeric, 2) AS avg_level
-FROM t_crowd_reports
-WHERE created_at >= now() - interval '30 days'
+       round(avg(device_level)::numeric, 2) AS avg_level
+FROM (
+    SELECT spot_id, local_dow, local_hour, device_id,
+           avg(level) AS device_level
+    FROM t_crowd_reports
+    WHERE created_at >= now() - interval '30 days'
+    GROUP BY spot_id, local_dow, local_hour, device_id
+) per_device
 GROUP BY spot_id, local_dow, local_hour
 HAVING count(*) >= $1
 `
@@ -30,6 +35,9 @@ type AggregateCommunityCrowdRow struct {
 	AvgLevel  pgtype.Numeric `json:"avg_level"`
 }
 
+// A slot needs at least $1 DISTINCT devices (n_reports = distinct devices),
+// and each device counts once: its own reports are averaged first, so one
+// device (or a few fake ones) cannot dominate or unlock a slot.
 func (q *Queries) AggregateCommunityCrowd(ctx context.Context, dollar_1 interface{}) ([]AggregateCommunityCrowdRow, error) {
 	rows, err := q.db.Query(ctx, aggregateCommunityCrowd, dollar_1)
 	if err != nil {

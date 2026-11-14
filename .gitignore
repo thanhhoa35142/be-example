@@ -5,3 +5,6 @@ tmp/
 
 # CI caches
 .cache/
+
+# Stray local build output at the repo root (anchored so cmd/worker/ is unaffected)
+/worker

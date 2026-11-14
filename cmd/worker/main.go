@@ -124,8 +124,8 @@ func main() {
 	crowdSvc := crowd.NewService(persistence.NewCrowdRepo(queries))
 	holidaysSvc := holidays.NewService(persistence.NewHolidaysRepo(queries))
 	adminSvc := admin.NewService(persistence.NewAdminRepo(queries))
-	entitlementSvc := entitlement.NewService(persistence.NewEntitlementRepo(queries))
-	alertsRepo := persistence.NewAlertsRepo(queries)
+	entitlementSvc := entitlement.NewService(persistence.NewEntitlementRepo(queries, pool))
+	alertsRepo := persistence.NewAlertsRepo(queries, pool)
 	apnsClient, err := notifier.ClientFromEnv()
 	if err != nil {
 		logger.Warn("APNs disabled", "error", err)

@@ -76,8 +76,9 @@ type appStoreNotificationRequest struct {
 }
 
 // POST /v1/appstore/notifications — App Store Server Notifications V2 webhook.
-// TODO(production): authenticate the caller (Apple does not sign the outer
-// request; verify the JWS payload chain before trusting contents).
+// Apple does not authenticate the outer request; trust comes entirely from
+// verifying the signedPayload JWS (x5c chain to Apple Root CA G3, signature,
+// bundle id, environment) and its nested signedTransactionInfo.
 func (h *EntitlementHandler) AppStoreNotification(c *gin.Context) {
 	var req appStoreNotificationRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -99,6 +100,13 @@ func (h *EntitlementHandler) writeError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, entitlement.ErrDeviceNotFound):
 		httpx.WriteProblem(c, http.StatusNotFound, httpx.CodeNotFound, "Device not found", "")
+	case errors.Is(err, entitlement.ErrDeviceLimit):
+		httpx.WriteProblem(c, http.StatusConflict, httpx.CodeDeviceLimit, "Device limit reached",
+			"this subscription is already linked to the maximum number of devices")
+	case errors.Is(err, entitlement.ErrAccountTokenMismatch):
+		httpx.WriteProblem(c, http.StatusForbidden, httpx.CodeAccountMismatch, "Transaction belongs to another device", "")
+	case errors.Is(err, entitlement.ErrNotConfigured):
+		httpx.WriteProblem(c, http.StatusServiceUnavailable, httpx.CodeUnavailable, "Subscription verification unavailable", "")
 	case errors.Is(err, entitlement.ErrInvalidJWS), errors.Is(err, entitlement.ErrInvalidNotice):
 		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Invalid signed payload", "")
 	default:

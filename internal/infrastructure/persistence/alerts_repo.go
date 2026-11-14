@@ -7,16 +7,21 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/thanhhoa35142/be-example/internal/modules/alerts"
 )
 
 type AlertsRepo struct {
-	q *Queries
+	q    *Queries
+	pool *pgxpool.Pool
 }
 
-func NewAlertsRepo(q *Queries) *AlertsRepo {
-	return &AlertsRepo{q: q}
+// NewAlertsRepo needs the pool to run the plan-limit check + insert in one
+// transaction.
+func NewAlertsRepo(q *Queries, pool *pgxpool.Pool) *AlertsRepo {
+	return &AlertsRepo{q: q, pool: pool}
 }
 
 func ruleFromRow(r TAlertRule) alerts.Rule {
@@ -85,13 +90,61 @@ func (r *AlertsRepo) GetRule(ctx context.Context, id uuid.UUID) (*alerts.Rule, e
 	return &rule, nil
 }
 
-func (r *AlertsRepo) CountRules(ctx context.Context, deviceID uuid.UUID) (int, error) {
-	n, err := r.q.CountAlertRules(ctx, deviceID)
-	return int(n), err
+// InsertRuleLimited inserts a rule unless the device already has maxRules
+// (maxRules < 0 = unlimited). The device row is locked FOR UPDATE inside the
+// transaction, so concurrent creates for one device are serialised and the
+// count-then-insert cannot be raced past the plan limit.
+func (r *AlertsRepo) InsertRuleLimited(ctx context.Context, deviceID uuid.UUID, in alerts.RuleInput, start, end time.Duration, maxRules int) (uuid.UUID, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	q := r.q.WithTx(tx)
+	if _, err := q.LockDeviceForAlerts(ctx, deviceID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return uuid.Nil, alerts.ErrDeviceInvalid
+		}
+		return uuid.Nil, err
+	}
+	if maxRules >= 0 {
+		n, err := q.CountAlertRules(ctx, deviceID)
+		if err != nil {
+			return uuid.Nil, err
+		}
+		if int(n) >= maxRules {
+			return uuid.Nil, alerts.ErrPlanLimit
+		}
+	}
+	id, err := q.InsertAlertRule(ctx, ruleParams(deviceID, in, start, end))
+	if err != nil {
+		return uuid.Nil, mapRuleFKError(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return uuid.Nil, err
+	}
+	return id, nil
 }
 
-func (r *AlertsRepo) InsertRule(ctx context.Context, deviceID uuid.UUID, in alerts.RuleInput, start, end time.Duration) (uuid.UUID, error) {
-	return r.q.InsertAlertRule(ctx, ruleParams(deviceID, in, start, end))
+// mapRuleFKError turns a spot FK violation (spot deleted between the
+// pre-check and the write) into a client error instead of a 500.
+func mapRuleFKError(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+		return alerts.ErrSpotNotFound
+	}
+	return err
+}
+
+func (r *AlertsRepo) SpotActive(ctx context.Context, spotID uuid.UUID) (bool, error) {
+	row, err := r.q.GetSpotByID(ctx, spotID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return row.Status == "active", nil
 }
 
 func (r *AlertsRepo) UpdateRule(ctx context.Context, id, deviceID uuid.UUID, in alerts.RuleInput, start, end time.Duration) (bool, error) {
@@ -116,7 +169,10 @@ func (r *AlertsRepo) UpdateRule(ctx context.Context, id, deviceID uuid.UUID, in 
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
-	return err == nil, err
+	if err != nil {
+		return false, mapRuleFKError(err)
+	}
+	return true, nil
 }
 
 func (r *AlertsRepo) DeleteRule(ctx context.Context, id, deviceID uuid.UUID) (bool, error) {
@@ -210,7 +266,10 @@ func (r *AlertsRepo) ClaimDelivery(ctx context.Context, d alerts.Delivery, windo
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
-	return err == nil, err
+	if err != nil {
+		return false, mapRuleFKError(err)
+	}
+	return true, nil
 }
 
 func (r *AlertsRepo) MarkDeliverySent(ctx context.Context, ruleID uuid.UUID, windowStart time.Time, apnsStatus int) error {

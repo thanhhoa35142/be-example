@@ -18,6 +18,7 @@ var (
 	ErrInvalidRule   = errors.New("invalid alert rule")
 	ErrPlanLimit     = errors.New("plan limit reached") // Free: 1 alert area
 	ErrDeviceInvalid = errors.New("device not found")
+	ErrSpotNotFound  = errors.New("spot not found")
 	// ErrNoPushToken means the device has no APNs token registered — the
 	// delivery is skipped, not failed.
 	ErrNoPushToken = errors.New("device has no push token")
@@ -112,8 +113,50 @@ func parseHHMM(s string) (time.Duration, error) {
 	return time.Duration(t.Hour())*time.Hour + time.Duration(t.Minute())*time.Minute, nil
 }
 
+// validTZ accepts only real IANA zone names. time.LoadLocation treats ""
+// as UTC and "Local" as the server's zone, neither of which is a client choice.
+func validTZ(tz string) bool {
+	if tz == "" || tz == "Local" {
+		return false
+	}
+	_, err := time.LoadLocation(tz)
+	return err == nil
+}
+
+// parsedRule is a normalized RuleInput plus its parsed local window.
+type parsedRule struct {
+	RuleInput
+	start, end time.Duration
+}
+
 // normalize validates and fills defaults for a RuleInput.
 func normalize(in RuleInput) (RuleInput, error) {
+	n, err := validate(in)
+	return n.RuleInput, err
+}
+
+// validate is normalize plus the parsed start/end durations.
+func validate(in RuleInput) (parsedRule, error) {
+	out, err := normalizeShape(in)
+	if err != nil {
+		return parsedRule{RuleInput: out}, err
+	}
+	start, err := parseHHMM(out.StartLocal)
+	if err != nil {
+		return parsedRule{RuleInput: out}, fmt.Errorf("%w: startLocal must be HH:MM", ErrInvalidRule)
+	}
+	end, err := parseHHMM(out.EndLocal)
+	if err != nil {
+		return parsedRule{RuleInput: out}, fmt.Errorf("%w: endLocal must be HH:MM", ErrInvalidRule)
+	}
+	if start == end {
+		// Overnight windows (start > end) are valid; a zero-length one is not.
+		return parsedRule{RuleInput: out}, fmt.Errorf("%w: startLocal and endLocal must differ", ErrInvalidRule)
+	}
+	return parsedRule{RuleInput: out, start: start, end: end}, nil
+}
+
+func normalizeShape(in RuleInput) (RuleInput, error) {
 	shapes := 0
 	if in.SpotID != nil {
 		shapes++
@@ -147,8 +190,8 @@ func normalize(in RuleInput) (RuleInput, error) {
 	if in.DaysMask <= 0 || in.DaysMask > 127 {
 		return in, fmt.Errorf("%w: daysMask must select 1..7 weekdays", ErrInvalidRule)
 	}
-	if _, err := time.LoadLocation(in.TZ); err != nil {
-		return in, fmt.Errorf("%w: unknown timezone", ErrInvalidRule)
+	if !validTZ(in.TZ) {
+		return in, fmt.Errorf("%w: tz must be an IANA time zone", ErrInvalidRule)
 	}
 	return in, nil
 }

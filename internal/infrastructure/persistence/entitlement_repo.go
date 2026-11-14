@@ -9,15 +9,19 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/thanhhoa35142/be-example/internal/modules/entitlement"
 )
 
 type EntitlementRepo struct {
-	q *Queries
+	q    *Queries
+	pool *pgxpool.Pool
 }
 
-func NewEntitlementRepo(q *Queries) *EntitlementRepo {
-	return &EntitlementRepo{q: q}
+// NewEntitlementRepo needs the pool to run the device-link cap in a
+// transaction.
+func NewEntitlementRepo(q *Queries, pool *pgxpool.Pool) *EntitlementRepo {
+	return &EntitlementRepo{q: q, pool: pool}
 }
 
 func (r *EntitlementRepo) DeviceExists(ctx context.Context, deviceID string) (bool, error) {
@@ -35,8 +39,8 @@ func tsParam(t *time.Time) pgtype.Timestamptz {
 	return pgtype.Timestamptz{Time: *t, Valid: true}
 }
 
-func (r *EntitlementRepo) UpsertSubscription(ctx context.Context, s entitlement.Subscription) error {
-	return r.q.UpsertSubscription(ctx, UpsertSubscriptionParams{
+func (r *EntitlementRepo) UpsertSubscription(ctx context.Context, s entitlement.Subscription) (bool, error) {
+	n, err := r.q.UpsertSubscription(ctx, UpsertSubscriptionParams{
 		OriginalTransactionID: s.OriginalTransactionID,
 		ProductID:             s.ProductID,
 		Status:                s.Status,
@@ -49,17 +53,48 @@ func (r *EntitlementRepo) UpsertSubscription(ctx context.Context, s entitlement.
 		RevokedAt:             tsParam(s.RevokedAt),
 		LastSignedDate:        s.LastSignedDate,
 	})
+	return n > 0, err
 }
 
-func (r *EntitlementRepo) LinkDevice(ctx context.Context, deviceID, originalTransactionID string) error {
+// LinkDevice links the pair inside a transaction that first locks the
+// subscription row, so concurrent links of one transaction to different
+// devices are serialised and the active-device cap cannot be raced.
+func (r *EntitlementRepo) LinkDevice(ctx context.Context, deviceID, originalTransactionID string, maxDevices int) error {
 	id, err := uuid.Parse(deviceID)
 	if err != nil {
 		return entitlement.ErrDeviceNotFound
 	}
-	return r.q.LinkDeviceSubscription(ctx, LinkDeviceSubscriptionParams{
-		DeviceID:              id,
-		OriginalTransactionID: originalTransactionID,
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	q := r.q.WithTx(tx)
+
+	if _, err := q.LockSubscription(ctx, originalTransactionID); err != nil {
+		return err
+	}
+	linked, err := q.IsDeviceLinkedToSubscription(ctx, IsDeviceLinkedToSubscriptionParams{
+		DeviceID: id, OriginalTransactionID: originalTransactionID,
 	})
+	if err != nil {
+		return err
+	}
+	if !linked {
+		n, err := q.CountActiveDevicesForSubscription(ctx, originalTransactionID)
+		if err != nil {
+			return err
+		}
+		if int(n) >= maxDevices {
+			return entitlement.ErrDeviceLimit
+		}
+		if err := q.LinkDeviceSubscription(ctx, LinkDeviceSubscriptionParams{
+			DeviceID: id, OriginalTransactionID: originalTransactionID,
+		}); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *EntitlementRepo) ActiveSubscription(ctx context.Context, deviceID string) (*entitlement.Subscription, error) {

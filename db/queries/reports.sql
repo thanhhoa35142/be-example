@@ -19,3 +19,11 @@ INSERT INTO t_score_feedbacks (spot_id, device_id, ts_hour, verdict)
 VALUES ($1, $2, $3, $4)
 ON CONFLICT (device_id, spot_id, ts_hour)
 DO UPDATE SET verdict = EXCLUDED.verdict;
+
+-- name: CountSpotReportsSince :one
+SELECT count(*) FROM t_spot_reports
+WHERE device_id = $1 AND created_at > $2;
+
+-- name: CountScoreFeedbackSince :one
+SELECT count(*) FROM t_score_feedbacks
+WHERE device_id = $1 AND created_at > $2;

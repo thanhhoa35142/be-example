@@ -37,7 +37,8 @@ func (s *Service) List(ctx context.Context, deviceID uuid.UUID) ([]Rule, error) 
 	return s.repo.ListRules(ctx, deviceID)
 }
 
-// Create validates the rule and enforces the plan limit (Free = 1 area).
+// Create validates the rule and enforces the plan limit (Free = 1 area). The
+// limit check and insert run atomically in the repository.
 func (s *Service) Create(ctx context.Context, deviceID uuid.UUID, in RuleInput) (*Rule, error) {
 	exists, err := s.repo.DeviceExists(ctx, deviceID)
 	if err != nil {
@@ -46,8 +47,11 @@ func (s *Service) Create(ctx context.Context, deviceID uuid.UUID, in RuleInput) 
 	if !exists {
 		return nil, ErrDeviceInvalid
 	}
-	n, err := normalize(in)
+	p, err := validate(in)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.checkSpot(ctx, p.SpotID); err != nil {
 		return nil, err
 	}
 	plan, err := s.plans.Plan(ctx, deviceID)
@@ -55,33 +59,41 @@ func (s *Service) Create(ctx context.Context, deviceID uuid.UUID, in RuleInput) 
 		return nil, err
 	}
 	max := s.maxRule(plan)
-	if max >= 0 {
-		count, err := s.repo.CountRules(ctx, deviceID)
-		if err != nil {
-			return nil, err
-		}
-		if count >= max {
-			return nil, fmt.Errorf("%w: %d rule(s) on %s plan", ErrPlanLimit, max, plan)
-		}
+	id, err := s.repo.InsertRuleLimited(ctx, deviceID, p.RuleInput, p.start, p.end, max)
+	if errors.Is(err, ErrPlanLimit) {
+		return nil, fmt.Errorf("%w: %d rule(s) on %s plan", ErrPlanLimit, max, plan)
 	}
-	start, _ := parseHHMM(n.StartLocal)
-	end, _ := parseHHMM(n.EndLocal)
-	id, err := s.repo.InsertRule(ctx, deviceID, n, start, end)
 	if err != nil {
 		return nil, err
 	}
 	return s.repo.GetRule(ctx, id)
 }
 
+// checkSpot requires a spot-targeted rule to reference an existing active spot.
+func (s *Service) checkSpot(ctx context.Context, spotID *uuid.UUID) error {
+	if spotID == nil {
+		return nil
+	}
+	ok, err := s.repo.SpotActive(ctx, *spotID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrSpotNotFound
+	}
+	return nil
+}
+
 // Update replaces a rule owned by the device.
 func (s *Service) Update(ctx context.Context, id, deviceID uuid.UUID, in RuleInput) (*Rule, error) {
-	n, err := normalize(in)
+	p, err := validate(in)
 	if err != nil {
 		return nil, err
 	}
-	start, _ := parseHHMM(n.StartLocal)
-	end, _ := parseHHMM(n.EndLocal)
-	ok, err := s.repo.UpdateRule(ctx, id, deviceID, n, start, end)
+	if err := s.checkSpot(ctx, p.SpotID); err != nil {
+		return nil, err
+	}
+	ok, err := s.repo.UpdateRule(ctx, id, deviceID, p.RuleInput, p.start, p.end)
 	if err != nil {
 		return nil, err
 	}

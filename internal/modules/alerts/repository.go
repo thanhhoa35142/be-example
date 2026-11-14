@@ -32,8 +32,12 @@ type PlanResolver interface {
 type Repository interface {
 	ListRules(ctx context.Context, deviceID uuid.UUID) ([]Rule, error)
 	GetRule(ctx context.Context, id uuid.UUID) (*Rule, error)
-	CountRules(ctx context.Context, deviceID uuid.UUID) (int, error)
-	InsertRule(ctx context.Context, deviceID uuid.UUID, in RuleInput, start, end time.Duration) (uuid.UUID, error)
+	// InsertRuleLimited atomically enforces the plan limit (maxRules < 0 =
+	// unlimited): it returns ErrPlanLimit when the device already has
+	// maxRules, ErrDeviceInvalid when it is gone, ErrSpotNotFound on an FK miss.
+	InsertRuleLimited(ctx context.Context, deviceID uuid.UUID, in RuleInput, start, end time.Duration, maxRules int) (uuid.UUID, error)
+	// SpotActive reports whether the spot exists and is active.
+	SpotActive(ctx context.Context, spotID uuid.UUID) (bool, error)
 	UpdateRule(ctx context.Context, id, deviceID uuid.UUID, in RuleInput, start, end time.Duration) (bool, error)
 	DeleteRule(ctx context.Context, id, deviceID uuid.UUID) (bool, error)
 

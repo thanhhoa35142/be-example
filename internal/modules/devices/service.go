@@ -14,8 +14,12 @@ func NewService(repo Repository) *Service {
 	return &Service{repo: repo}
 }
 
-// Register upserts the device and returns its ID.
+// Register validates field limits, then upserts the device and returns its ID.
 func (s *Service) Register(ctx context.Context, in RegisterInput) (uuid.UUID, error) {
+	in, err := in.Normalize()
+	if err != nil {
+		return uuid.Nil, err
+	}
 	return s.repo.Upsert(ctx, in)
 }
 

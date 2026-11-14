@@ -93,11 +93,32 @@ func (h *AlertsHandler) input(req alertRuleRequest) (alerts.RuleInput, bool) {
 	}, true
 }
 
-// GET /v1/alerts?deviceId= — list rules for a device.
-func (h *AlertsHandler) List(c *gin.Context) {
-	deviceID, err := uuid.Parse(c.Query("deviceId"))
+// deviceIDHeader carries the device id for requests without a body. Preferred
+// over the legacy ?deviceId= query parameter, which ends up in proxy/access
+// logs and browser-style history.
+const deviceIDHeader = "X-Device-ID"
+
+// requestDeviceID reads the device id from X-Device-ID (preferred), falling
+// back to the legacy deviceId query parameter for older app builds.
+func requestDeviceID(c *gin.Context) (uuid.UUID, bool) {
+	raw := c.GetHeader(deviceIDHeader)
+	if raw == "" {
+		raw = c.Query("deviceId")
+	}
+	id, err := uuid.Parse(raw)
 	if err != nil {
-		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidQuery, "Invalid query", "deviceId must be a UUID")
+		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidQuery, "Invalid device id",
+			"send the device UUID in the X-Device-ID header (or legacy deviceId query parameter)")
+		return uuid.Nil, false
+	}
+	return id, true
+}
+
+// GET /v1/alerts — list rules for a device (X-Device-ID header, or legacy
+// ?deviceId=).
+func (h *AlertsHandler) List(c *gin.Context) {
+	deviceID, ok := requestDeviceID(c)
+	if !ok {
 		return
 	}
 	rules, err := h.svc.List(c.Request.Context(), deviceID)
@@ -167,16 +188,16 @@ func (h *AlertsHandler) Update(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": ruleDTO(*rule)})
 }
 
-// DELETE /v1/alerts/:id?deviceId= — remove a rule.
+// DELETE /v1/alerts/:id — remove a rule (X-Device-ID header, or legacy
+// ?deviceId=).
 func (h *AlertsHandler) Delete(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidID, "Invalid id", "expected a UUID")
 		return
 	}
-	deviceID, err := uuid.Parse(c.Query("deviceId"))
-	if err != nil {
-		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidQuery, "Invalid query", "deviceId must be a UUID")
+	deviceID, ok := requestDeviceID(c)
+	if !ok {
 		return
 	}
 	if err := h.svc.Delete(c.Request.Context(), id, deviceID); err != nil {
@@ -194,6 +215,8 @@ func (h *AlertsHandler) writeError(c *gin.Context, err error) {
 		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Invalid rule", err.Error())
 	case errors.Is(err, alerts.ErrPlanLimit):
 		httpx.WriteProblem(c, http.StatusForbidden, httpx.CodePlanLimit, "Plan limit reached", err.Error())
+	case errors.Is(err, alerts.ErrSpotNotFound):
+		httpx.WriteProblem(c, http.StatusNotFound, httpx.CodeNotFound, "Spot not found", "spotId does not reference an active spot")
 	case errors.Is(err, alerts.ErrDeviceInvalid):
 		httpx.WriteProblem(c, http.StatusNotFound, httpx.CodeNotFound, "Device not found", "")
 	default:

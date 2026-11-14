@@ -56,6 +56,16 @@ func (r *ReportsRepo) InsertSpotReport(ctx context.Context, in reports.SpotRepor
 	})
 }
 
+func (r *ReportsRepo) SpotReportsSince(ctx context.Context, deviceID uuid.UUID, since time.Time) (int, error) {
+	n, err := r.q.CountSpotReportsSince(ctx, CountSpotReportsSinceParams{DeviceID: deviceID, CreatedAt: since})
+	return int(n), err
+}
+
+func (r *ReportsRepo) ScoreFeedbackSince(ctx context.Context, deviceID uuid.UUID, since time.Time) (int, error) {
+	n, err := r.q.CountScoreFeedbackSince(ctx, CountScoreFeedbackSinceParams{DeviceID: deviceID, CreatedAt: since})
+	return int(n), err
+}
+
 func (r *ReportsRepo) CrowdReportsSince(ctx context.Context, deviceID uuid.UUID, since time.Time) (int, error) {
 	n, err := r.q.CountCrowdReportsSince(ctx, CountCrowdReportsSinceParams{
 		DeviceID: deviceID, CreatedAt: since,

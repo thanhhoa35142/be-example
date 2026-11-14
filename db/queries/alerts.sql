@@ -14,6 +14,13 @@ WHERE id = $1;
 -- name: CountAlertRules :one
 SELECT count(*) FROM t_alert_rules WHERE device_id = $1;
 
+-- name: LockDeviceForAlerts :one
+-- Row lock that serialises concurrent rule creation for one device so the
+-- plan limit (count then insert) cannot be raced.
+SELECT id FROM t_devices
+WHERE id = $1 AND deleted_at IS NULL
+FOR UPDATE;
+
 -- name: InsertAlertRule :one
 INSERT INTO t_alert_rules (device_id, spot_id, h3_cell, radius_m, min_score,
                         days_mask, start_local, end_local, tz)

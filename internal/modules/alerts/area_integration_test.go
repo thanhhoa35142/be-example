@@ -54,7 +54,7 @@ func TestAreaRuleEvaluate(t *testing.T) {
 	}
 	defer pool.Close()
 	q := persistence.New(pool)
-	repo := persistence.NewAlertsRepo(q)
+	repo := persistence.NewAlertsRepo(q, pool)
 
 	// A noon-UTC hour (13:00 Amsterdam in winter, 14:00 in summer) that has
 	// scores; daytime so the darkness cap does not zero everything.
@@ -76,7 +76,7 @@ func TestAreaRuleEvaluate(t *testing.T) {
 
 	dev := uuid.New()
 	if _, err := q.UpsertDevice(ctx, persistence.UpsertDeviceParams{
-		ID: dev, ApnsToken: pgtype.Text{String: "deadbeef", Valid: true},
+		ID: dev, ApnsToken: pgtype.Text{String: "tok-" + dev.String(), Valid: true},
 		ApnsEnv: pgtype.Text{String: "sandbox", Valid: true},
 		Tz:      pgtype.Text{String: "Europe/Amsterdam", Valid: true},
 		Prefs:   []byte(`{}`),
@@ -85,7 +85,7 @@ func TestAreaRuleEvaluate(t *testing.T) {
 	}
 	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM t_devices WHERE id = $1`, dev) }) // cascades rules/deliveries
 
-	svc := alerts.NewService(repo, entitlement.NewService(persistence.NewEntitlementRepo(q)), nil)
+	svc := alerts.NewService(repo, entitlement.NewService(persistence.NewEntitlementRepo(q, pool)), nil)
 	radius := 3000
 	rule, err := svc.Create(ctx, dev, alerts.RuleInput{
 		Area: &alerts.LatLon{Lat: 52.3612, Lon: 4.8791}, RadiusM: &radius,
@@ -126,7 +126,7 @@ func TestAreaRuleEvaluate(t *testing.T) {
 	}
 
 	send := &captureSender{}
-	ev := alerts.NewService(onlyRule{repo, rule.ID}, entitlement.NewService(persistence.NewEntitlementRepo(q)), send)
+	ev := alerts.NewService(onlyRule{repo, rule.ID}, entitlement.NewService(persistence.NewEntitlementRepo(q, pool)), send)
 	st, err := ev.Evaluate(ctx, now)
 	if err != nil {
 		t.Fatal(err)

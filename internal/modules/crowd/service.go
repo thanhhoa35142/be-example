@@ -193,8 +193,11 @@ func (s *Service) estimateSpot(
 	return raw, nil
 }
 
-// MinCommunityReports is the minimum vote count before community data
-// overrides the model for a slot (spec: "đủ số báo cáo tối thiểu").
+// MinCommunityReports is the minimum number of DISTINCT devices that must have
+// voted on a slot before community data overrides the model (spec: "đủ số báo
+// cáo tối thiểu"). Each device counts once and its own votes are averaged
+// first, so one device (or a few fake ones) cannot set a spot's crowd level.
+// crowd_estimate.n_reports stores this distinct-device count.
 const MinCommunityReports = 5
 
 // AggregateCommunity folds crowd_report rows into crowd_estimate slots with
