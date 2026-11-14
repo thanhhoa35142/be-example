@@ -2,10 +2,13 @@
 package httpx
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Stable machine-readable error codes. Clients switch on Code, never Title.
@@ -37,6 +40,9 @@ const (
 	// CodeUnavailable: a required server-side capability is not configured
 	// (503), e.g. App Store verification.
 	CodeUnavailable = "service_unavailable"
+	// CodeTimeout: the request exceeded a server-side deadline (statement
+	// or lock timeout) — transient, safe to retry (503).
+	CodeTimeout = "timeout"
 )
 
 // Problem is an RFC 7807 problem-details body extended with a stable
@@ -65,8 +71,23 @@ func WriteProblem(c *gin.Context, status int, code, title, detail string) {
 	})
 }
 
+// isDBTimeout reports whether err is a server-side deadline expiry rather
+// than a bug: context deadline, Postgres statement_timeout (57014) or
+// lock_timeout (55P03). These are transient — the client should retry.
+func isDBTimeout(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "57014" || pgErr.Code == "55P03"
+	}
+	return false
+}
+
 // WriteError logs the underlying error server-side (with request id for
-// correlation) and returns a generic 500 — internals are never leaked.
+// correlation) and returns a generic error — internals are never leaked.
+// DB timeouts map to 503 (retryable) instead of 500.
 func WriteError(c *gin.Context, err error) {
 	slog.ErrorContext(c.Request.Context(), "request failed",
 		"request_id", c.GetString("requestID"),
@@ -77,5 +98,10 @@ func WriteError(c *gin.Context, err error) {
 		"path", c.Request.URL.Path,
 		"error", err,
 	)
+	if isDBTimeout(err) {
+		c.Header("Retry-After", "1")
+		WriteProblem(c, http.StatusServiceUnavailable, CodeTimeout, "Service Unavailable", "")
+		return
+	}
 	WriteProblem(c, http.StatusInternalServerError, CodeInternal, "Internal Server Error", "")
 }

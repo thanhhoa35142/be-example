@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"os"
 	"os/signal"
 	"strings"
 	"sync/atomic"
@@ -102,6 +103,23 @@ func main() {
 	// Each job holds one conn for its advisory lock; size the pool so all
 	// registered jobs can run concurrently.
 	poolCfg.MaxConns = 12
+	// Worker statements are batch work (ingest, scoring recompute) and can
+	// legitimately run for minutes — no statement_timeout unless
+	// DB_STATEMENT_TIMEOUT is set explicitly. lock_timeout still applies so
+	// a stuck lock wait can't pin a conn forever. JIT stays at the PG
+	// default: compilation cost amortizes over long batch queries.
+	if poolCfg.ConnConfig.RuntimeParams == nil {
+		poolCfg.ConnConfig.RuntimeParams = map[string]string{}
+	}
+	if cfg.DBLockTimeout != "" {
+		poolCfg.ConnConfig.RuntimeParams["lock_timeout"] = cfg.DBLockTimeout
+	}
+	if os.Getenv("DB_STATEMENT_TIMEOUT") != "" {
+		poolCfg.ConnConfig.RuntimeParams["statement_timeout"] = cfg.DBStatementTimeout
+	}
+	if cfg.DBMaxConns > 0 {
+		poolCfg.MaxConns = cfg.DBMaxConns
+	}
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		log.Fatalf("db connect: %v", err)

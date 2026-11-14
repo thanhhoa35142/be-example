@@ -59,6 +59,7 @@ Every non-GeoJSON success response is wrapped:
 | `payload_too_large` | 413 | request body over the size cap (64 KiB default; `POST /v1/events` 512 KiB; App Store webhook 256 KiB) |
 | `rate_limited` | 429 | too many requests (per-IP limit, carries `Retry-After`) or too many reports/feedback per device per 24h |
 | `service_unavailable` | 503 | server-side App Store verification is not configured — retry later |
+| `timeout` | 503 | DB statement/lock timeout exceeded — transient, safe to retry (carries `Retry-After`) |
 | `internal_error` | 500 | unexpected — details only in server logs via `requestId` |
 
 ### Request headers

@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	infrahttp "github.com/thanhhoa35142/be-example/internal/infrastructure/http"
 	"github.com/thanhhoa35142/be-example/internal/infrastructure/persistence"
@@ -49,7 +48,7 @@ func main() {
 		}
 	}
 
-	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	pool, err := persistence.NewPool(ctx, cfg.DatabaseURL, cfg.DBRuntimeParams(), cfg.DBMaxConns)
 	if err != nil {
 		log.Fatalf("db connect: %v", err)
 	}
