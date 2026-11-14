@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -109,33 +110,75 @@ func main() {
 
 	// Redis bumps the shared data version after jobs that change data behind
 	// cached API GETs; nil = caching disabled (API falls back to TTL only).
+	// The client is kept even when the boot ping fails: go-redis reconnects
+	// on its own, so bumps resume once Redis is back.
 	var rdb *redis.Client
 	if cfg.RedisURL != "" {
 		if opts, err := redis.ParseURL(cfg.RedisURL); err == nil {
 			rdb = redis.NewClient(opts)
 			pctx, pcancel := context.WithTimeout(ctx, 3*time.Second)
 			if err := rdb.Ping(pctx).Err(); err != nil {
-				logger.Warn("redis unreachable — cache version bumps disabled", "error", err)
-				rdb = nil
+				logger.Warn("redis unreachable — cache version bumps will fail until it recovers", "error", err)
 			}
 			pcancel()
 		} else {
 			logger.Warn("bad REDIS_URL — cache version bumps disabled", "error", err)
 		}
 	}
+	// cacheDirtyKey marks (per job run) that the job wrote data behind
+	// cached GETs; bumpCache only bumps the shared version when set, so
+	// jobs that changed nothing don't flush every cache entry.
+	//
+	// Two versions exist. The data version (touchCache) flushes every
+	// cached GET. The weather version (touchWeatherCache) flushes only the
+	// routes that return raw weather rows. Why weather does not touch the
+	// data version: it is observable in list/recommendation/detail
+	// responses only through the scores computed from it, and scores change
+	// only when scoring.recompute rewrites them — which bumps the data
+	// version itself (and runs a few minutes after weather.refresh, see
+	// t_worker_job_schedules). Bumping at weather.refresh as well flushed
+	// every entry a second time per hour for nothing: the refilled entries
+	// carried the same old scores. The same holds for crowd/holiday inputs.
+	// Anything a response shows directly from its table (spots, packs: ingest;
+	// forecast weather: weather.refresh via the weather version) still
+	// invalidates at once.
+	type cacheDirty struct{ data, weather atomic.Bool }
+	type cacheDirtyKey struct{}
 	bumpCache := func(fn func(context.Context) error) func(context.Context) error {
 		return func(ctx context.Context) error {
+			dirty := &cacheDirty{}
+			ctx = context.WithValue(ctx, cacheDirtyKey{}, dirty)
 			if err := fn(ctx); err != nil {
 				return err
 			}
-			if rdb != nil {
+			if rdb != nil && (dirty.data.Load() || dirty.weather.Load()) {
 				bctx, cancel := context.WithTimeout(ctx, 2*time.Second)
-				if err := cache.Bump(bctx, rdb); err != nil {
-					logger.Warn("cache version bump failed", "error", err)
+				if dirty.data.Load() {
+					if err := cache.Bump(bctx, rdb); err != nil {
+						logger.Warn("cache version bump failed", "error", err)
+					}
+				}
+				if dirty.weather.Load() {
+					if err := cache.BumpWeather(bctx, rdb); err != nil {
+						logger.Warn("cache weather version bump failed", "error", err)
+					}
 				}
 				cancel()
 			}
 			return nil
+		}
+	}
+	// touchCache flags the current job run as having changed data shown
+	// directly by cached GETs.
+	touchCache := func(ctx context.Context) {
+		if d, ok := ctx.Value(cacheDirtyKey{}).(*cacheDirty); ok {
+			d.data.Store(true)
+		}
+	}
+	// touchWeatherCache flags changed raw weather rows (forecast endpoint).
+	touchWeatherCache := func(ctx context.Context) {
+		if d, ok := ctx.Value(cacheDirtyKey{}).(*cacheDirty); ok {
+			d.weather.Store(true)
 		}
 	}
 
@@ -267,6 +310,7 @@ func main() {
 		// One failing pack (guard trip, bad geometry…) must not starve the
 		// packs after it: keep going and report every failure.
 		var errs []error
+		mutated := false // any pack wrote spot/amenity/source data → bump cache
 		for _, i := range todo {
 			if err := ctx.Err(); err != nil {
 				errs = append(errs, err)
@@ -284,6 +328,10 @@ func main() {
 			packs[i].Bounds = bounds
 			started := time.Now()
 			st, err := ingestSvc.RunPack(ctx, packs[i], jobRunID(ctx), *dryRun)
+			if err == nil && !*dryRun {
+				mutated = mutated || st.Created+st.Updated+st.Closed+
+					st.HiddenVanished+st.Absorbed+st.AmenitiesLinked > 0
+			}
 			if bag, ok := ctx.Value(jobStatsKey{}).(*jobStatsBag); ok {
 				existing, _ := bag.m["packs"].([]any)
 				entry := map[string]any{"pack": packs[i].Slug, "stats": st,
@@ -305,6 +353,9 @@ func main() {
 				"closed", st.Closed, "absorbed", st.Absorbed, "amenities", st.AmenitiesLinked,
 				"stage_ms", st.StageMs)
 		}
+		if mutated {
+			touchCache(ctx)
+		}
 		return errors.Join(errs...)
 	}
 
@@ -317,7 +368,16 @@ func main() {
 				if err != nil {
 					return err
 				}
-				logger.Info("weather done", "provider", weatherProvider.Name(), "cells", stats.Cells, "rows", stats.Fetched, "failed", stats.Failed)
+				// ReplaceRows deletes+rewrites each fetched cell's range
+				// (and restamps fetched_at), so any replaced cell changed
+				// the raw weather the forecast endpoint returns. Scores
+				// are untouched until scoring.recompute, so only the
+				// weather version is bumped (see cacheDirtyKey above).
+				// A quota-skipped run replaces nothing → no bump.
+				if stats.Replaced > 0 {
+					touchWeatherCache(ctx)
+				}
+				logger.Info("weather done", "provider", weatherProvider.Name(), "cells", stats.Cells, "rows", stats.Fetched, "replaced", stats.Replaced, "failed", stats.Failed)
 				return nil
 			}),
 		},
@@ -335,6 +395,8 @@ func main() {
 					bag.set("uncovered_countries", stats.Uncovered)
 					bag.set("per_country", stats.PerCountry)
 				}
+				// No cache bump: holidays only feed scoring, whose recompute
+				// bumps when scores change (see cacheDirtyKey above).
 				if err != nil {
 					return err
 				}
@@ -350,6 +412,8 @@ func main() {
 				if err != nil {
 					return err
 				}
+				// No cache bump: crowd estimates only feed scoring, whose
+				// recompute bumps when scores change (see cacheDirtyKey).
 				logger.Info("crowd done", "spots", stats.Spots, "slots", stats.Slots, "written", stats.Written, "skipped", stats.Skipped)
 				return nil
 			}),
@@ -362,7 +426,9 @@ func main() {
 				if err != nil {
 					return err
 				}
-				logger.Info("crowd aggregate done", "written", stats.Written)
+				// No cache bump: community crowd aggregates only feed
+				// scoring, whose recompute bumps when scores change.
+				logger.Info("crowd aggregate done", "written", stats.Written, "deleted", stats.Deleted)
 				return nil
 			}),
 		},
@@ -373,6 +439,9 @@ func main() {
 				stats, err := scoringSvc.Recompute(ctx)
 				if err != nil {
 					return err
+				}
+				if stats.Written > 0 {
+					touchCache(ctx)
 				}
 				logger.Info("scoring done", "spots", stats.Spots, "hours", stats.Hours, "written", stats.Written, "unchanged", stats.Hours-stats.Written, "skipped", stats.Skipped)
 				return nil
@@ -446,7 +515,10 @@ func main() {
 		{
 			name:         "retention.purge",
 			initialDelay: 10 * time.Minute, // daily, lowest priority — runs last
-			fn: bumpCache(func(ctx context.Context) error {
+			// No bumpCache: purged rows (old forecasts, scores, events,
+			// reports, job runs) are all outside the windows cached GETs
+			// serve, so a purge never changes a cached response.
+			fn: func(ctx context.Context) error {
 				stats, err := persistence.NewRetentionRepo(queries).Purge(ctx)
 				if err != nil {
 					return err
@@ -457,7 +529,7 @@ func main() {
 					"job_runs", stats.JobRuns, "deliveries", stats.AlertDeliveries,
 					"payloads_scrubbed", stats.PayloadsScrubbed)
 				return nil
-			}),
+			},
 		},
 	}
 

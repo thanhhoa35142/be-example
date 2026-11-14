@@ -22,6 +22,10 @@ type geoJSONFeature struct {
 type geoJSONFeatureCollection struct {
 	Type     string           `json:"type"` // "FeatureCollection"
 	Features []geoJSONFeature `json:"features"`
+	// Truncated / Total are only present when a wide viewport was capped to
+	// the best-scoring spots: Total is the number of matching spots.
+	Truncated bool `json:"truncated,omitempty"`
+	Total     int  `json:"total,omitempty"`
 }
 
 // toFeatureCollection renders the viewport/batch result. withArea / withScores

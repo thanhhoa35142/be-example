@@ -49,9 +49,18 @@ services:
   redis:
     image: redis:7-alpine
     container_name: perf-redis
-    command: ["redis-server", "--appendonly", "yes"]
-    volumes:
-      - perfredis:/data
+    # Same policy as the main stack: no persistence, bounded memory. The
+    # container limit is 256M so maxmemory stays well under it.
+    command:
+      - redis-server
+      - --appendonly
+      - "no"
+      - --save
+      - ""
+      - --maxmemory
+      - ${REDIS_MAXMEMORY:-128mb}
+      - --maxmemory-policy
+      - volatile-lru
     deploy:
       resources:
         limits: { cpus: "0.25", memory: 256M }
@@ -133,7 +142,6 @@ services:
 
 volumes:
   perfdata:
-  perfredis:
 
 networks:
   pickhour:

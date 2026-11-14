@@ -12,11 +12,68 @@ import (
 type listRepo struct {
 	Repository
 	tsHour, from, to time.Time
+	limit            int
+	total            int // reported match count
+	rows             int // rows returned (after the cap)
 }
 
-func (r *listRepo) List(_ context.Context, _ ListQuery, ts, from, to time.Time) ([]SpotWithScore, error) {
-	r.tsHour, r.from, r.to = ts, from, to
-	return nil, nil
+func (r *listRepo) List(_ context.Context, _ ListQuery, ts, from, to time.Time, limit int) ([]SpotWithScore, int, error) {
+	r.tsHour, r.from, r.to, r.limit = ts, from, to, limit
+	return make([]SpotWithScore, r.rows), r.total, nil
+}
+
+func TestSpotCap(t *testing.T) {
+	box := func(span float64) BBox { return BBox{West: 0, South: 0, East: span, North: span / 2} }
+	if got := SpotCap(box(0.12), 24, true); got != 0 {
+		t.Fatalf("span at threshold must be uncapped, got %d", got)
+	}
+	if got := SpotCap(box(0.14), 24, true); got == 0 {
+		t.Fatal("span above threshold must be capped")
+	}
+	// Heavier payload shapes get a smaller N, all inside the byte budget.
+	plain, h12, heavy := SpotCap(box(0.3), 0, false), SpotCap(box(0.3), 12, false), SpotCap(box(0.3), 24, true)
+	if !(plain > h12 && h12 > heavy) {
+		t.Fatalf("cap must shrink with payload weight: %d %d %d", plain, h12, heavy)
+	}
+	if heavy*(featureBaseBytes+featureHourBytes*24+featureAreaBytes) > ResponseBudgetBytes {
+		t.Fatalf("heavy cap %d exceeds budget", heavy)
+	}
+	// A tall viewport counts too.
+	if SpotCap(BBox{West: 0, South: 0, East: 0.05, North: 0.3}, 0, false) == 0 {
+		t.Fatal("height must count towards the span")
+	}
+}
+
+func TestListPageTruncation(t *testing.T) {
+	repo := &listRepo{total: 1358, rows: 270}
+	svc := NewService(repo)
+	wide := BBox{West: 151, South: -34, East: 151.3, North: -33.7}
+	res, err := svc.ListPage(context.Background(), ListQuery{BBox: &wide, Hours: 24, IncludeArea: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repo.limit == 0 || !res.Truncated || res.Total != 1358 || len(res.Items) != 270 {
+		t.Fatalf("limit=%d res=%+v", repo.limit, res)
+	}
+	// Under the cap: nothing truncated even though a limit was passed.
+	repo.total, repo.rows = 100, 100
+	if res, _ = svc.ListPage(context.Background(), ListQuery{BBox: &wide}); res.Truncated {
+		t.Fatal("100 spots under a cap must not report truncation")
+	}
+	// Narrow viewport and the ids path never carry a limit; List never caps.
+	narrow := BBox{West: 151, South: -34, East: 151.1, North: -33.9}
+	_, _ = svc.ListPage(context.Background(), ListQuery{BBox: &narrow, Hours: 24})
+	if repo.limit != 0 {
+		t.Fatalf("narrow viewport limit=%d", repo.limit)
+	}
+	_, _ = svc.ListPage(context.Background(), ListQuery{IDs: []uuid.UUID{uuid.New()}})
+	if repo.limit != 0 {
+		t.Fatalf("ids limit=%d", repo.limit)
+	}
+	_, _ = svc.List(context.Background(), ListQuery{BBox: &wide})
+	if repo.limit != 0 {
+		t.Fatalf("List must not cap, limit=%d", repo.limit)
+	}
 }
 
 func TestListSelectorAndLimits(t *testing.T) {

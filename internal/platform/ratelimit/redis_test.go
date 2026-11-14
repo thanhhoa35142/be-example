@@ -65,6 +65,24 @@ func TestRedisDenyDoesNotConsume(t *testing.T) {
 	}
 }
 
+// With Redis unreachable the limiter must degrade to its in-memory bucket,
+// not fail open. Port 1 refuses connections instantly.
+func TestRedisLimiterFallsBackToMemory(t *testing.T) {
+	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
+	defer rdb.Close()
+	l := NewRedis(rdb, PerMinute(60, 2), "t") // 1/s, burst 2
+
+	key := fmt.Sprintf("test:%d", time.Now().UnixNano())
+	for i := 0; i < 2; i++ {
+		if ok, _ := l.Allow(key); !ok {
+			t.Fatalf("allow %d denied — fallback bucket should have burst 2", i)
+		}
+	}
+	if ok, retry := l.Allow(key); ok || retry < time.Second {
+		t.Fatalf("expected local-bucket denial, got ok=%v retry=%v", ok, retry)
+	}
+}
+
 func TestRedisNamespacesAreIsolated(t *testing.T) {
 	rdb := redisTestClient(t)
 	key := fmt.Sprintf("test:%d", time.Now().UnixNano())

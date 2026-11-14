@@ -90,6 +90,12 @@ Liveness/readiness probes. No auth.
 
 ---
 
+### Response cache and compression (all public GETs)
+
+`/v1/spots`, `/v1/spots/{id}`, `/v1/spots/{id}/forecast`, `/v1/packs` and `/v1/recommendations` are cached server-side. The `X-Cache` response header says what happened: `HIT` (served from the cache), `MISS` (computed and stored), `BYPASS` (computed, not cacheable: non-200, non-JSON, > 1 MiB), `COALESCED` (answered from a concurrent identical request). Requests with an `Authorization` header and non-GET requests are never cached; the header is absent when the cache is disabled or unavailable. JSON bodies of at least 1 KiB are gzip-compressed for clients sending `Accept-Encoding: gzip` (`Content-Encoding: gzip`, `Vary: Accept-Encoding`); smaller bodies are sent as is.
+
+---
+
 ### `GET /v1/spots?bbox=&when=` (also `ids=`, `from=&hours=`, `include=area`)
 
 Spots inside a viewport — or a batch of known spots (Saved screen) — with their score at a given hour.
@@ -110,6 +116,8 @@ Query params (exactly one of `bbox` / `ids`):
 | `minScore` | no | int 0–100 | keep spots whose score at the requested hour (`when`, default now) is ≥ `minScore`; spots with no score at that hour are excluded. Out of range / not an int → `invalid_query` |
 
 Both or neither of `bbox` / `ids` → `400 invalid_query`. `hours` works with either selector. The `ids` variant has no viewport size cap.
+
+**Wide viewports are capped.** The server snaps `bbox` outward to a 0.02° grid. When the snapped box is wider or taller than **0.12°** it returns only the **top N spots by score at the requested hour** (best first; spots without a score last; ties by id, so the result is deterministic) instead of every spot, which keeps zoomed-out responses small and cacheable. Boxes up to 0.12° and the `ids` variant always return everything. N depends on how heavy each feature is: `floor(655360 / (520 + 64·hours + 370·[include=area]))`, min 100 — e.g. 1260 with no extras, 508 with `hours=12`, 270 with `hours=24&include=area`. When the cap cut spots the response gains two **top-level** members next to `features`: `"truncated": true` and `"total": <spots matching before the cap>`. Both are absent when nothing was cut, so existing clients that ignore unknown members are unaffected. Filters (`kinds`, `amenities`, `minScore`) apply before the cap and `total` counts only spots that passed them. Features are now ordered by score (descending) rather than arbitrarily.
 
 The `kinds` / `amenities` / `minScore` filters apply to both selectors (for `ids`, to the resolved target); absent or empty = no filter. Filtering happens in SQL, so the response shape is unchanged — filtered-out spots are simply omitted.
 
@@ -156,6 +164,7 @@ The `kinds` / `amenities` / `minScore` filters apply to both selectors (for `ids
 | `score.capReason` | string \| null | e.g. `rain`, `heat`, `cold` when hard-capped |
 | `score.reasons` | array ≤3 | `{code, params?}` — **translate client-side** |
 | `scores` | array | only with `hours`: `{tsHour, score, capReason}` for `hours` consecutive hours from `from` (truncated to the hour), ascending; hours without a computed score are omitted; `[]` if none. `capReason` is `null` or e.g. `rain`, `dark`. Built in one query — use it for the map time-lapse instead of one request per hour |
+| `truncated` / `total` (top level, not in `properties`) | bool / int | only when a wide viewport was capped, see above |
 | `area` | GeoJSON MultiPolygon \| null | only with `include=area`: park outline simplified server-side (~5 m, `ST_SimplifyPreserveTopology`, coordinates rounded to 6 decimals); `null` for point spots. `geometry` stays the Point |
 
 Time-lapse / outline example (`GET /v1/spots?bbox=4.85,52.35,4.90,52.37&from=2026-11-13T06:00:00Z&hours=3&include=area`), one feature's extra properties:
@@ -608,6 +617,7 @@ All `/v1/admin/*` endpoints require `Authorization: Bearer $ADMIN_TOKEN` (compar
 | `GET /v1/admin/freshness` | Newest `fetched_at`/`computed_at`/`updated_at` per pipeline stage — staleness alerting |
 | `GET /v1/admin/metrics` | Analytical counters: score distribution + histogram + cap rate (7d), feedback verdicts, report type/status (30d), crowd sources, subscription statuses, alert delivery outcomes |
 | `GET /v1/admin/events/breakdown?name=&prop=[&by=][&since=]` | Event props breakdown (see below) |
+| `GET /v1/admin/cache` | Response-cache counters per route since this API process started (in-process, per replica): `hit`, `miss`, `coalesced` (waited on a concurrent miss for the same key), `bypass` + `bypassByReason` (`disabled`, `breaker`, `request`, `redis`, `canceled`, `status`, `content`, `size`, `empty`), `storeErrors`, `breakerTrips`, and `hitRate = (hit+coalesced)/(hit+coalesced+miss)` (null until a cacheable request was seen) |
 | `GET /v1/admin/jobs?limit=&cursor=` | Recent `job_run` rows, keyset-paginated (`cursor` = last run id from `nextCursor`) |
 | `GET /v1/admin/jobs/schedules` | Registered worker job intervals in seconds, including allowed bounds |
 | `PATCH /v1/admin/jobs/{job}/schedule` | Update a job interval: `{"intervalSeconds":3600}` |

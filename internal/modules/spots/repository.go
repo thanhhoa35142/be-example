@@ -12,7 +12,10 @@ import (
 type Repository interface {
 	// List returns active spots for the query; tsHour is the hour for Score and
 	// [seriesFrom, seriesTo) bounds the hourly series (empty range = none).
-	List(ctx context.Context, q ListQuery, tsHour, seriesFrom, seriesTo time.Time) ([]SpotWithScore, error)
+	// limit > 0 keeps only the top `limit` viewport spots by score at tsHour
+	// (ties by id); total is the match count before that cap (== len(items)
+	// when nothing was cut).
+	List(ctx context.Context, q ListQuery, tsHour, seriesFrom, seriesTo time.Time, limit int) (items []SpotWithScore, total int, err error)
 	// WeatherProvider returns the provider name behind the cell's forecast
 	// rows, or "" when the cell has none.
 	WeatherProvider(ctx context.Context, weatherCellID int64) (string, error)

@@ -32,12 +32,17 @@ func (h *SpotsHandler) List(c *gin.Context) {
 		return
 	}
 
-	items, err := h.svc.List(c.Request.Context(), q)
+	res, err := h.svc.ListPage(c.Request.Context(), q)
 	if err != nil {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, toFeatureCollection(items, scoreHour(q, time.Now()), q.IncludeArea, q.Hours > 0))
+	fc := toFeatureCollection(res.Items, scoreHour(q, time.Now()), q.IncludeArea, q.Hours > 0)
+	if res.Truncated {
+		fc.Truncated = true
+		fc.Total = res.Total
+	}
+	c.JSON(http.StatusOK, fc)
 }
 
 // GET /v1/packs
@@ -107,6 +112,9 @@ func parseListQuery(v url.Values) (spots.ListQuery, *queryProblem) {
 		if err != nil {
 			return spots.ListQuery{}, &queryProblem{httpx.CodeInvalidBBox, "Invalid bbox", "expected bbox=west,south,east,north in WGS84 degrees"}
 		}
+		// Snap the viewport outward to the cache grid so map drags share
+		// cache entries; the query and the cache key see the same box.
+		bbox = spots.CanonicalBBox(bbox)
 		q.BBox = &bbox
 	} else {
 		parts := strings.Split(v.Get("ids"), ",")

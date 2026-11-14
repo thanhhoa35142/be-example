@@ -34,7 +34,12 @@ func NewService(repo Repository, provider Provider, dailyCallLimit int) *Service
 type Stats struct {
 	Cells   int
 	Fetched int
-	Failed  int
+	// Replaced counts cells whose forecast range was deleted+rewritten —
+	// the actual DB mutation signal (Fetched counts rows and misses cells
+	// that went empty). FetchedAt is restamped every run, so any replaced
+	// cell is a real data change behind cached GETs.
+	Replaced int
+	Failed   int
 }
 
 // Refresh fetches forecasts for every distinct weather cell covering active
@@ -120,6 +125,7 @@ func (s *Service) Refresh(ctx context.Context) (Stats, error) {
 			}
 			mu.Lock()
 			st.Fetched += len(rows)
+			st.Replaced++
 			mu.Unlock()
 			return nil
 		})

@@ -144,7 +144,7 @@ func (r *CrowdRepo) UpsertCommunity(ctx context.Context, spotID uuid.UUID, dow, 
 	})
 }
 
-func (r *CrowdRepo) DeleteStaleCommunity(ctx context.Context) error {
+func (r *CrowdRepo) DeleteStaleCommunity(ctx context.Context) (int64, error) {
 	return r.q.DeleteStaleCommunityEstimates(ctx)
 }
 

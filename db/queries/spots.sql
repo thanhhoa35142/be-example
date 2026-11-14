@@ -3,6 +3,35 @@
 -- min_score excludes spots with no score at ts_hour.
 -- include_area adds the park outline simplified to ~5 m (0.00005 deg),
 -- coordinates rounded to 6 decimals. NULL for point spots.
+-- max_rows caps the result (NULL = everything): the cheap `matched` CTE ranks
+-- every spot in the box by score at ts_hour (best first, unscored last, id as
+-- the deterministic tie-break) and counts them, LIMIT keeps the top max_rows,
+-- and only those rows pay for area / hourly_scores below. total_matched is the
+-- uncapped match count, so callers can tell the result was truncated.
+WITH matched AS (
+    SELECT s.id,
+           sc.score, sc.confidence, sc.cap_reason, sc.reasons, sc.computed_at,
+           (count(*) OVER ())::int AS total_matched
+    FROM t_spots s
+    LEFT JOIN t_spot_scores sc
+      ON sc.spot_id = s.id AND sc.ts_hour = sqlc.arg(ts_hour)::timestamptz
+    WHERE s.status = 'active'
+      AND (COALESCE(cardinality(sqlc.arg(kinds)::text[]), 0) = 0 OR s.kind = ANY(sqlc.arg(kinds)::text[]))
+      AND (COALESCE(cardinality(sqlc.arg(amenities)::text[]), 0) = 0
+           OR (SELECT count(*) FROM t_spot_amenities fa
+                WHERE fa.spot_id = s.id AND fa.type = ANY(sqlc.arg(amenities)::text[]))
+              = cardinality(sqlc.arg(amenities)::text[]))
+      AND (sqlc.narg(min_score)::int IS NULL OR sc.score >= sqlc.narg(min_score)::int)
+      AND s.geom::geometry && ST_MakeEnvelope(
+          sqlc.arg(west)::float8,
+          sqlc.arg(south)::float8,
+          sqlc.arg(east)::float8,
+          sqlc.arg(north)::float8,
+          4326
+      )
+    ORDER BY sc.score DESC NULLS LAST, s.id
+    LIMIT sqlc.narg(max_rows)::int
+)
 SELECT s.id, s.city_pack_id, s.kind, s.name, s.names,
        ST_X(s.geom::geometry)::float8 AS lon,
        ST_Y(s.geom::geometry)::float8 AS lat,
@@ -10,7 +39,7 @@ SELECT s.id, s.city_pack_id, s.kind, s.name, s.names,
        (CASE WHEN sqlc.arg(include_area)::bool AND s.area IS NOT NULL
             THEN ST_AsGeoJSON(ST_Multi(ST_SimplifyPreserveTopology(s.area, 0.00005)), 6)::jsonb
        END)::jsonb AS area_geojson,
-       sc.score, sc.confidence, sc.cap_reason, sc.reasons, sc.computed_at,
+       m.score, m.confidence, m.cap_reason, m.reasons, m.computed_at,
        (SELECT jsonb_agg(jsonb_build_object(
                   'tsHour', to_char(h.ts_hour AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
                   'score', h.score,
@@ -18,24 +47,11 @@ SELECT s.id, s.city_pack_id, s.kind, s.name, s.names,
           FROM t_spot_scores h
          WHERE h.spot_id = s.id
            AND h.ts_hour >= sqlc.arg(scores_from)::timestamptz
-           AND h.ts_hour <  sqlc.arg(scores_to)::timestamptz)::jsonb AS hourly_scores
-FROM t_spots s
-LEFT JOIN t_spot_scores sc
-  ON sc.spot_id = s.id AND sc.ts_hour = sqlc.arg(ts_hour)::timestamptz
-WHERE s.status = 'active'
-  AND (COALESCE(cardinality(sqlc.arg(kinds)::text[]), 0) = 0 OR s.kind = ANY(sqlc.arg(kinds)::text[]))
-  AND (COALESCE(cardinality(sqlc.arg(amenities)::text[]), 0) = 0
-       OR (SELECT count(*) FROM t_spot_amenities fa
-            WHERE fa.spot_id = s.id AND fa.type = ANY(sqlc.arg(amenities)::text[]))
-          = cardinality(sqlc.arg(amenities)::text[]))
-  AND (sqlc.narg(min_score)::int IS NULL OR sc.score >= sqlc.narg(min_score)::int)
-  AND s.geom::geometry && ST_MakeEnvelope(
-      sqlc.arg(west)::float8,
-      sqlc.arg(south)::float8,
-      sqlc.arg(east)::float8,
-      sqlc.arg(north)::float8,
-      4326
-  );
+           AND h.ts_hour <  sqlc.arg(scores_to)::timestamptz)::jsonb AS hourly_scores,
+       m.total_matched
+FROM matched m
+JOIN t_spots s ON s.id = m.id
+ORDER BY m.score DESC NULLS LAST, s.id;
 
 -- name: ListSpotsByIDs :many
 -- Optional filters (kinds / amenities AND / min_score) apply to the resolved target.

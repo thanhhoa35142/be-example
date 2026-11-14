@@ -21,7 +21,7 @@ func NewSpotsRepository(q *Queries) *SpotsRepository {
 	return &SpotsRepository{queries: q}
 }
 
-func (r *SpotsRepository) List(ctx context.Context, q spots.ListQuery, tsHour, seriesFrom, seriesTo time.Time) ([]spots.SpotWithScore, error) {
+func (r *SpotsRepository) List(ctx context.Context, q spots.ListQuery, tsHour, seriesFrom, seriesTo time.Time, limit int) ([]spots.SpotWithScore, int, error) {
 	f := q.Filter.Normalized()
 	if q.BBox != nil {
 		rows, err := r.queries.ListSpotsInBBox(ctx, ListSpotsInBBoxParams{
@@ -36,17 +36,20 @@ func (r *SpotsRepository) List(ctx context.Context, q spots.ListQuery, tsHour, s
 			Kinds:       f.Kinds,
 			Amenities:   f.Amenities,
 			MinScore:    minScoreParam(f.MinScore),
+			MaxRows:     pgtype.Int4{Int32: int32(limit), Valid: limit > 0},
 		})
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
+		total := 0
 		out := make([]spots.SpotWithScore, 0, len(rows))
 		for _, row := range rows {
+			total = int(row.TotalMatched)
 			out = append(out, spotWithScore(row.ID, row.CityPackID, row.Kind, row.Name, row.Names, row.Lon, row.Lat,
 				row.Country, row.City, row.Tz, row.LastVerifiedAt, row.AreaGeojson, row.HourlyScores,
 				row.Score, row.Confidence, row.CapReason, row.Reasons, row.ComputedAt))
 		}
-		return out, nil
+		return out, total, nil
 	}
 
 	rows, err := r.queries.ListSpotsByIDs(ctx, ListSpotsByIDsParams{
@@ -60,7 +63,7 @@ func (r *SpotsRepository) List(ctx context.Context, q spots.ListQuery, tsHour, s
 		MinScore:    minScoreParam(f.MinScore),
 	})
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	out := make([]spots.SpotWithScore, 0, len(rows))
 	for _, row := range rows {
@@ -68,7 +71,7 @@ func (r *SpotsRepository) List(ctx context.Context, q spots.ListQuery, tsHour, s
 			row.Country, row.City, row.Tz, row.LastVerifiedAt, row.AreaGeojson, row.HourlyScores,
 			row.Score, row.Confidence, row.CapReason, row.Reasons, row.ComputedAt))
 	}
-	return out, nil
+	return out, len(out), nil
 }
 
 func minScoreParam(v *int) pgtype.Int4 {

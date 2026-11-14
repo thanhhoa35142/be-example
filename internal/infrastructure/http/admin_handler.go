@@ -44,6 +44,12 @@ func (h *AdminHandler) Freshness(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": f})
 }
 
+// GET /v1/admin/cache — response-cache hit/miss/bypass counters per route,
+// since this API process started (in-process: each replica reports its own).
+func (h *AdminHandler) CacheStats(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"data": DefaultCacheStats.Snapshot()})
+}
+
 // parseFilter reads range + filter query params shared by metrics endpoints.
 // Supports `from`/`to` (RFC3339) or `days` (trailing window ending now).
 func parseFilter(c *gin.Context) (admin.MetricsFilter, error) {

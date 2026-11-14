@@ -22,11 +22,22 @@ services:
   redis:
     image: redis:7-alpine
     container_name: picnic-redis
-    command: ["redis-server", "--appendonly", "yes"]
+    # Pure cache + rate-limit state: no persistence (AOF/RDB off), bounded
+    # memory with LRU eviction. Every key except pic:ver:data has a TTL, so
+    # volatile-lru only ever evicts disposable entries — the version key
+    # (which has no TTL) is never evicted.
+    command:
+      - redis-server
+      - --appendonly
+      - "no"
+      - --save
+      - ""
+      - --maxmemory
+      - ${REDIS_MAXMEMORY:-256mb}
+      - --maxmemory-policy
+      - volatile-lru
     ports:
       - "127.0.0.1:6379:6379"
-    volumes:
-      - redisdata:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s
@@ -117,7 +128,6 @@ services:
 volumes:
   picnicdata:
   extracts:
-  redisdata:
 
 networks:
   pickhour:

@@ -64,8 +64,8 @@ type Repository interface {
 	// UpsertCommunity writes one community-sourced estimate.
 	UpsertCommunity(ctx context.Context, spotID uuid.UUID, dow, hour, level, nReports int) error
 	// DeleteStaleCommunity removes community estimates not refreshed in ~35d
-	// so the model can reclaim those slots.
-	DeleteStaleCommunity(ctx context.Context) error
+	// so the model can reclaim those slots. Returns rows deleted.
+	DeleteStaleCommunity(ctx context.Context) (int64, error)
 }
 
 // CommunitySlot is an aggregated (spot, dow, hour) crowd_report bucket.

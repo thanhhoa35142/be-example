@@ -387,6 +387,30 @@ func (q *Queries) ListSpotsByIDs(ctx context.Context, arg ListSpotsByIDsParams) 
 }
 
 const listSpotsInBBox = `-- name: ListSpotsInBBox :many
+WITH matched AS (
+    SELECT s.id,
+           sc.score, sc.confidence, sc.cap_reason, sc.reasons, sc.computed_at,
+           (count(*) OVER ())::int AS total_matched
+    FROM t_spots s
+    LEFT JOIN t_spot_scores sc
+      ON sc.spot_id = s.id AND sc.ts_hour = $4::timestamptz
+    WHERE s.status = 'active'
+      AND (COALESCE(cardinality($5::text[]), 0) = 0 OR s.kind = ANY($5::text[]))
+      AND (COALESCE(cardinality($6::text[]), 0) = 0
+           OR (SELECT count(*) FROM t_spot_amenities fa
+                WHERE fa.spot_id = s.id AND fa.type = ANY($6::text[]))
+              = cardinality($6::text[]))
+      AND ($7::int IS NULL OR sc.score >= $7::int)
+      AND s.geom::geometry && ST_MakeEnvelope(
+          $8::float8,
+          $9::float8,
+          $10::float8,
+          $11::float8,
+          4326
+      )
+    ORDER BY sc.score DESC NULLS LAST, s.id
+    LIMIT $12::int
+)
 SELECT s.id, s.city_pack_id, s.kind, s.name, s.names,
        ST_X(s.geom::geometry)::float8 AS lon,
        ST_Y(s.geom::geometry)::float8 AS lat,
@@ -394,7 +418,7 @@ SELECT s.id, s.city_pack_id, s.kind, s.name, s.names,
        (CASE WHEN $1::bool AND s.area IS NOT NULL
             THEN ST_AsGeoJSON(ST_Multi(ST_SimplifyPreserveTopology(s.area, 0.00005)), 6)::jsonb
        END)::jsonb AS area_geojson,
-       sc.score, sc.confidence, sc.cap_reason, sc.reasons, sc.computed_at,
+       m.score, m.confidence, m.cap_reason, m.reasons, m.computed_at,
        (SELECT jsonb_agg(jsonb_build_object(
                   'tsHour', to_char(h.ts_hour AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
                   'score', h.score,
@@ -402,24 +426,11 @@ SELECT s.id, s.city_pack_id, s.kind, s.name, s.names,
           FROM t_spot_scores h
          WHERE h.spot_id = s.id
            AND h.ts_hour >= $2::timestamptz
-           AND h.ts_hour <  $3::timestamptz)::jsonb AS hourly_scores
-FROM t_spots s
-LEFT JOIN t_spot_scores sc
-  ON sc.spot_id = s.id AND sc.ts_hour = $4::timestamptz
-WHERE s.status = 'active'
-  AND (COALESCE(cardinality($5::text[]), 0) = 0 OR s.kind = ANY($5::text[]))
-  AND (COALESCE(cardinality($6::text[]), 0) = 0
-       OR (SELECT count(*) FROM t_spot_amenities fa
-            WHERE fa.spot_id = s.id AND fa.type = ANY($6::text[]))
-          = cardinality($6::text[]))
-  AND ($7::int IS NULL OR sc.score >= $7::int)
-  AND s.geom::geometry && ST_MakeEnvelope(
-      $8::float8,
-      $9::float8,
-      $10::float8,
-      $11::float8,
-      4326
-  )
+           AND h.ts_hour <  $3::timestamptz)::jsonb AS hourly_scores,
+       m.total_matched
+FROM matched m
+JOIN t_spots s ON s.id = m.id
+ORDER BY m.score DESC NULLS LAST, s.id
 `
 
 type ListSpotsInBBoxParams struct {
@@ -434,6 +445,7 @@ type ListSpotsInBBoxParams struct {
 	South       float64     `json:"south"`
 	East        float64     `json:"east"`
 	North       float64     `json:"north"`
+	MaxRows     pgtype.Int4 `json:"max_rows"`
 }
 
 type ListSpotsInBBoxRow struct {
@@ -455,12 +467,18 @@ type ListSpotsInBBoxRow struct {
 	Reasons        []byte             `json:"reasons"`
 	ComputedAt     pgtype.Timestamptz `json:"computed_at"`
 	HourlyScores   []byte             `json:"hourly_scores"`
+	TotalMatched   int32              `json:"total_matched"`
 }
 
 // Filters: empty kinds/amenities and NULL min_score = no filter; amenities are AND;
 // min_score excludes spots with no score at ts_hour.
 // include_area adds the park outline simplified to ~5 m (0.00005 deg),
 // coordinates rounded to 6 decimals. NULL for point spots.
+// max_rows caps the result (NULL = everything): the cheap `matched` CTE ranks
+// every spot in the box by score at ts_hour (best first, unscored last, id as
+// the deterministic tie-break) and counts them, LIMIT keeps the top max_rows,
+// and only those rows pay for area / hourly_scores below. total_matched is the
+// uncapped match count, so callers can tell the result was truncated.
 func (q *Queries) ListSpotsInBBox(ctx context.Context, arg ListSpotsInBBoxParams) ([]ListSpotsInBBoxRow, error) {
 	rows, err := q.db.Query(ctx, listSpotsInBBox,
 		arg.IncludeArea,
@@ -474,6 +492,7 @@ func (q *Queries) ListSpotsInBBox(ctx context.Context, arg ListSpotsInBBoxParams
 		arg.South,
 		arg.East,
 		arg.North,
+		arg.MaxRows,
 	)
 	if err != nil {
 		return nil, err
@@ -501,6 +520,7 @@ func (q *Queries) ListSpotsInBBox(ctx context.Context, arg ListSpotsInBBoxParams
 			&i.Reasons,
 			&i.ComputedAt,
 			&i.HourlyScores,
+			&i.TotalMatched,
 		); err != nil {
 			return nil, err
 		}

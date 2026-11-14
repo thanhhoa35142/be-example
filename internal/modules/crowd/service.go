@@ -27,6 +27,8 @@ type Stats struct {
 	Slots   int // model slots computed
 	Written int // rows actually inserted or changed (unchanged rows are skipped)
 	Skipped int
+	// Deleted is stale community estimates removed (AggregateCommunity only).
+	Deleted int
 }
 
 // Refresh recomputes the weekly crowd profile (dow × hour) for every active
@@ -223,9 +225,11 @@ func (s *Service) AggregateCommunity(ctx context.Context) (Stats, error) {
 		}
 		st.Written++
 	}
-	if err := s.repo.DeleteStaleCommunity(ctx); err != nil {
+	n, err := s.repo.DeleteStaleCommunity(ctx)
+	if err != nil {
 		return st, err
 	}
+	st.Deleted = int(n)
 	return st, nil
 }
 

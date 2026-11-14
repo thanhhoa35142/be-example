@@ -51,7 +51,11 @@ paths:
   /v1/spots:
     get:
       summary: Spots in viewport (GeoJSON FeatureCollection)
-      description: Returns raw GeoJSON — NOT wrapped in `data`.
+      description: >-
+        Returns raw GeoJSON — NOT wrapped in `data`. Viewports wider or taller
+        than 0.12 degrees (after the server snaps the box to a 0.02 degree grid)
+        return only the top N spots by score at the requested hour; the response
+        then carries top-level `truncated: true` and `total`.
       parameters:
         - name: bbox
           in: query
@@ -664,6 +668,12 @@ components:
       required: [type, features]
       properties:
         type: { type: string, enum: [FeatureCollection] }
+        truncated:
+          type: boolean
+          description: Present (true) only when a wide viewport was capped to the best-scoring spots.
+        total:
+          type: integer
+          description: Number of spots matching the query before the cap; present only with `truncated`.
         features:
           type: array
           items:

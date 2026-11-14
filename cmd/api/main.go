@@ -105,16 +105,16 @@ func main() {
 		rdb = redis.NewClient(opts)
 		pctx, pcancel := context.WithTimeout(context.Background(), 3*time.Second)
 		if err := rdb.Ping(pctx).Err(); err != nil {
-			log.Printf("redis unreachable (%v) — rate limits fail open, cache disabled", err)
-			rdb = nil
+			// Keep the client: go-redis reconnects on its own, the rate
+			// limiter falls back to in-memory buckets while Redis is down,
+			// and the cache breaker bypasses it — all without a restart.
+			log.Printf("redis unreachable at boot (%v) — using in-memory rate limits, cache bypassed until it recovers", err)
 		} else {
 			log.Printf("redis enabled (%s): shared rate limits + response cache", opts.Addr)
 		}
 		pcancel()
-		if rdb != nil {
-			limiterFor = func(r ratelimit.Rule, ns string) ratelimit.Checker {
-				return ratelimit.NewRedis(rdb, r, ns)
-			}
+		limiterFor = func(r ratelimit.Rule, ns string) ratelimit.Checker {
+			return ratelimit.NewRedis(rdb, r, ns)
 		}
 	}
 

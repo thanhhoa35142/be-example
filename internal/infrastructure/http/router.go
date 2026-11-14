@@ -78,7 +78,7 @@ func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error
 	if err := r.SetTrustedProxies(opts.TrustedProxies); err != nil {
 		return nil, fmt.Errorf("trusted proxies: %w", err)
 	}
-	r.Use(RequestID(), ClientInfo(), Logger(), Recovery(),
+	r.Use(RequestID(), ClientInfo(), Logger(), Recovery(), Gzip(),
 		RateLimit(limits, limiterFor),
 		BodyLimit(opts.MaxBodyBytes, map[string]int64{
 			"/v1/events":                 maxEventsBody,
@@ -104,7 +104,8 @@ func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error
 	}
 
 	// GET response cache. Versioned entries invalidate when the worker bumps
-	// the data version after ingest/weather/crowd/scoring; TTL is the
+	// the data version after ingest/scoring (weather: its own version, see
+	// cacheGetWeather); TTL is the
 	// fallback. Nil client = middleware passes through.
 	cacheGet := func(ttl time.Duration, versioned bool, normalize ...func(url.Values)) gin.HandlerFunc {
 		copts := CacheOptions{TTL: ttl, Versioned: versioned}
@@ -113,15 +114,24 @@ func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error
 		}
 		return Cache(opts.Cache, copts)
 	}
+	// cacheGetWeather is cacheGet for routes that return raw weather rows
+	// (forecast) or the weather provider (spot detail): they also die on
+	// weather.refresh, which does not bump the shared data version.
+	cacheGetWeather := func(ttl time.Duration, normalize func(url.Values)) gin.HandlerFunc {
+		return Cache(opts.Cache, CacheOptions{TTL: ttl, Versioned: true, WeatherVersioned: true, Normalize: normalize})
+	}
 
 	v1 := r.Group("/v1")
 	{
 		if h.Spots != nil {
 			spots := v1.Group("/spots")
-			spots.GET("", cacheGet(10*time.Minute, true), h.Spots.List)
-			spots.GET("/:id", cacheGet(10*time.Minute, true), h.Spots.Get)
-			spots.GET("/:id/forecast", cacheGet(10*time.Minute, true), h.Spots.Forecast)
-			v1.GET("/packs", cacheGet(30*time.Minute, true), h.Spots.Packs)
+			// SpotsNormalize snaps bbox to the grid the handler queries and
+			// drops params the handler ignores; the param-less routes drop
+			// every query param so junk can't mint entries.
+			spots.GET("", cacheGet(10*time.Minute, true, SpotsNormalize), h.Spots.List)
+			spots.GET("/:id", cacheGetWeather(10*time.Minute, DropQueryParams), h.Spots.Get)
+			spots.GET("/:id/forecast", cacheGetWeather(10*time.Minute, DropQueryParams), h.Spots.Forecast)
+			v1.GET("/packs", cacheGet(30*time.Minute, true, DropQueryParams), h.Spots.Packs)
 		}
 		if h.Recommendations != nil {
 			v1.GET("/recommendations", cacheGet(10*time.Minute, true, RecNormalize), h.Recommendations.List)
@@ -166,6 +176,7 @@ func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error
 			admin.GET("/metrics", h.Admin.Metrics)
 			admin.GET("/events", h.Admin.Events)
 			admin.GET("/events/breakdown", h.Admin.EventBreakdown)
+			admin.GET("/cache", h.Admin.CacheStats)
 			admin.GET("/jobs", h.Admin.Jobs)
 			admin.GET("/jobs/schedules", h.Admin.JobSchedules)
 			admin.PATCH("/jobs/:job/schedule", h.Admin.UpdateJobSchedule)

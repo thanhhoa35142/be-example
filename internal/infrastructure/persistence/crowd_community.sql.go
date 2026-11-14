@@ -64,15 +64,18 @@ func (q *Queries) AggregateCommunityCrowd(ctx context.Context, dollar_1 interfac
 	return items, nil
 }
 
-const deleteStaleCommunityEstimates = `-- name: DeleteStaleCommunityEstimates :exec
+const deleteStaleCommunityEstimates = `-- name: DeleteStaleCommunityEstimates :execrows
 DELETE FROM t_crowd_estimates
 WHERE source = 'community'
   AND updated_at < now() - interval '35 days'
 `
 
-func (q *Queries) DeleteStaleCommunityEstimates(ctx context.Context) error {
-	_, err := q.db.Exec(ctx, deleteStaleCommunityEstimates)
-	return err
+func (q *Queries) DeleteStaleCommunityEstimates(ctx context.Context) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteStaleCommunityEstimates)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const upsertCommunityEstimate = `-- name: UpsertCommunityEstimate :exec

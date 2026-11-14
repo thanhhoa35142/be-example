@@ -24,7 +24,7 @@ ON CONFLICT (spot_id, dow, hour) DO UPDATE SET
     n_reports  = EXCLUDED.n_reports,
     updated_at = EXCLUDED.updated_at;
 
--- name: DeleteStaleCommunityEstimates :exec
+-- name: DeleteStaleCommunityEstimates :execrows
 DELETE FROM t_crowd_estimates
 WHERE source = 'community'
   AND updated_at < now() - interval '35 days';
