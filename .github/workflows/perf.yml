@@ -1,0 +1,94 @@
+name: perf
+
+# Performance test against the docker-compose.perf.yml stack (resource-
+# limited to ~3 vCPU / 6 GB, matching the target small VM). k6 scenarios:
+# smoke | load | stress | spike | soak — see perf/k6.js.
+#
+# Caveat: the load generator shares the runner CPU, so absolute numbers
+# are a regression baseline, not production SLOs.
+#
+# Usage: Actions → perf → Run workflow. Artifacts: k6 summary.json +
+# report.html under perf/out/.
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "k6 scenario"
+        type: choice
+        options: [smoke, load, stress, spike, soak]
+        default: smoke
+      duration:
+        description: "Test duration (e.g. 10m, 30m for soak)"
+        type: string
+        default: "10m"
+      rps:
+        description: "Target requests/sec for load/soak profiles"
+        type: string
+        default: "30"
+      vus:
+        description: "Max virtual users (stress/spike ceiling)"
+        type: string
+        default: "50"
+      spots:
+        description: "Synthetic spots to seed"
+        type: string
+        default: "3000"
+
+concurrency:
+  group: perf-${{ inputs.profile }}
+  cancel-in-progress: false
+
+jobs:
+  perf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build images
+        run: docker compose -f docker-compose.perf.yml build
+
+      - name: Start stack
+        run: docker compose -f docker-compose.perf.yml up -d
+
+      - name: Wait for API
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:18080/healthz >/dev/null; then
+              echo "api healthy"; exit 0
+            fi
+            sleep 2
+          done
+          docker compose -f docker-compose.perf.yml logs api
+          exit 1
+
+      - name: Seed perf data
+        run: |
+          docker compose -f docker-compose.perf.yml exec -T db \
+            psql -U picnic -d picnic -v ON_ERROR_STOP=1 -v spots=${{ inputs.spots }} \
+            < perf/seed.sql
+
+      - name: Run k6 (${{ inputs.profile }})
+        env:
+          PROFILE: ${{ inputs.profile }}
+          DURATION: ${{ inputs.duration }}
+          RPS: ${{ inputs.rps }}
+          VUS: ${{ inputs.vus }}
+          SPOTS: ${{ inputs.spots }}
+        run: |
+          mkdir -p perf/out
+          docker compose -f docker-compose.perf.yml --profile loadgen run --rm k6
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-${{ inputs.profile }}-${{ github.run_id }}
+          path: perf/out/
+          retention-days: 30
+
+      - name: Stack logs (on failure)
+        if: failure()
+        run: docker compose -f docker-compose.perf.yml logs --tail=200
