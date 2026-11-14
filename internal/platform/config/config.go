@@ -13,6 +13,7 @@ import (
 type Config struct {
 	Port              string
 	DatabaseURL       string
+	RedisURL          string // REDIS_URL: shared rate-limit buckets; empty = in-memory
 	WeatherProvider   string // "open-meteo" (default) | "weatherkit"
 	WeatherH3Res      int    // H3 resolution for weather cells (default 6)
 	WeatherDailyLimit int    // max provider calls/day (default 9000)
@@ -51,6 +52,7 @@ func Load() (Config, error) {
 	cfg := Config{
 		Port:              getEnv("PORT", "8080"),
 		DatabaseURL:       os.Getenv("DATABASE_URL"),
+		RedisURL:          os.Getenv("REDIS_URL"),
 		WeatherProvider:   getEnv("WEATHER_PROVIDER", "open-meteo"),
 		WeatherH3Res:      getEnvInt("WEATHER_H3_RES", 6),
 		WeatherDailyLimit: getEnvInt("WEATHER_DAILY_LIMIT", 9000),

@@ -2,9 +2,12 @@ package http
 
 import (
 	"fmt"
+	"net/url"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 	"github.com/thanhhoa35142/be-example/internal/platform/ratelimit"
 )
 
@@ -23,6 +26,11 @@ type Options struct {
 	AdminToken string
 	// AdminFailed rate-limits failed admin auth per IP (default 10/min).
 	AdminFailed *ratelimit.Rule
+	// LimiterFor builds rate-limit checkers per (rule, namespace). Nil =
+	// in-memory limiters; set to ratelimit.NewRedis for shared buckets.
+	LimiterFor func(ratelimit.Rule, string) ratelimit.Checker
+	// Cache is the Redis client for GET response caching. Nil disables it.
+	Cache *redis.Client
 }
 
 const (
@@ -59,6 +67,10 @@ func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error
 	if opts.AdminFailed != nil {
 		adminFail = *opts.AdminFailed
 	}
+	limiterFor := opts.LimiterFor
+	if limiterFor == nil {
+		limiterFor = func(r ratelimit.Rule, _ string) ratelimit.Checker { return ratelimit.New(r) }
+	}
 
 	r := gin.New()
 	// Gin trusts every proxy by default, which makes ClientIP() spoofable via
@@ -67,7 +79,7 @@ func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error
 		return nil, fmt.Errorf("trusted proxies: %w", err)
 	}
 	r.Use(RequestID(), ClientInfo(), Logger(), Recovery(),
-		RateLimit(limits),
+		RateLimit(limits, limiterFor),
 		BodyLimit(opts.MaxBodyBytes, map[string]int64{
 			"/v1/events":                 maxEventsBody,
 			"/v1/appstore/notifications": maxAppStoreBody,
@@ -91,17 +103,28 @@ func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error
 		r.GET("/.well-known/apple-app-site-association", h.Share.AppleAppSiteAssociation)
 	}
 
+	// GET response cache. Versioned entries invalidate when the worker bumps
+	// the data version after ingest/weather/crowd/scoring; TTL is the
+	// fallback. Nil client = middleware passes through.
+	cacheGet := func(ttl time.Duration, versioned bool, normalize ...func(url.Values)) gin.HandlerFunc {
+		copts := CacheOptions{TTL: ttl, Versioned: versioned}
+		if len(normalize) > 0 {
+			copts.Normalize = normalize[0]
+		}
+		return Cache(opts.Cache, copts)
+	}
+
 	v1 := r.Group("/v1")
 	{
 		if h.Spots != nil {
 			spots := v1.Group("/spots")
-			spots.GET("", h.Spots.List)
-			spots.GET("/:id", h.Spots.Get)
-			spots.GET("/:id/forecast", h.Spots.Forecast)
-			v1.GET("/packs", h.Spots.Packs)
+			spots.GET("", cacheGet(10*time.Minute, true), h.Spots.List)
+			spots.GET("/:id", cacheGet(10*time.Minute, true), h.Spots.Get)
+			spots.GET("/:id/forecast", cacheGet(10*time.Minute, true), h.Spots.Forecast)
+			v1.GET("/packs", cacheGet(30*time.Minute, true), h.Spots.Packs)
 		}
 		if h.Recommendations != nil {
-			v1.GET("/recommendations", h.Recommendations.List)
+			v1.GET("/recommendations", cacheGet(10*time.Minute, true, RecNormalize), h.Recommendations.List)
 		}
 		if h.Devices != nil {
 			v1.POST("/devices", h.Devices.Register)
@@ -136,7 +159,7 @@ func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error
 
 	// Staff surface — disabled unless ADMIN_TOKEN is configured.
 	if h.Admin != nil {
-		admin := v1.Group("/admin", AdminAudit(), AdminAuth(opts.AdminToken, ratelimit.New(adminFail)))
+		admin := v1.Group("/admin", AdminAudit(), AdminAuth(opts.AdminToken, limiterFor(adminFail, "authfail")))
 		{
 			admin.GET("/overview", h.Admin.Overview)
 			admin.GET("/freshness", h.Admin.Freshness)

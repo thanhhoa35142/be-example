@@ -1,7 +1,6 @@
-// Package ratelimit provides a per-key (client IP) in-memory token-bucket
-// limiter with idle eviction, so the key map cannot grow without bound.
-// In-memory means limits are per replica; revisit (shared store) if the API
-// ever scales horizontally and limits must stay exact.
+// Package ratelimit provides per-key (client IP) token-bucket limiters.
+// Limiter is in-memory (per process); RedisLimiter shares buckets across
+// replicas via Redis when REDIS_URL is configured.
 package ratelimit
 
 import (

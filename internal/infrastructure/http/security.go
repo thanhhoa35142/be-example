@@ -53,8 +53,15 @@ func tooManyRequests(c *gin.Context, retryAfter time.Duration, detail string) {
 // writes a tighter one, and POST /v1/devices the tightest (device ids are free
 // to mint). /healthz and /readyz are exempt. The client IP is c.ClientIP(),
 // which only honours X-Forwarded-For from the engine's trusted proxies.
-func RateLimit(l RateLimits) gin.HandlerFunc {
-	read, write, device := ratelimit.New(l.Read), ratelimit.New(l.Write), ratelimit.New(l.Device)
+// mk builds the checker per rule class; nil = in-memory limiters.
+func RateLimit(l RateLimits, mk ...func(ratelimit.Rule, string) ratelimit.Checker) gin.HandlerFunc {
+	newLim := func(r ratelimit.Rule, ns string) ratelimit.Checker {
+		if len(mk) > 0 && mk[0] != nil {
+			return mk[0](r, ns)
+		}
+		return ratelimit.New(r)
+	}
+	read, write, device := newLim(l.Read, "read"), newLim(l.Write, "write"), newLim(l.Device, "device")
 	return func(c *gin.Context) {
 		if isHealthPath(c.Request.URL.Path) {
 			c.Next()
@@ -137,7 +144,7 @@ func AdminAudit() gin.HandlerFunc {
 // disables the admin surface entirely (404). The comparison is constant time
 // and failed attempts are rate-limited per client IP (successful requests do
 // not consume the budget).
-func AdminAuth(token string, failed *ratelimit.Limiter) gin.HandlerFunc {
+func AdminAuth(token string, failed ratelimit.Checker) gin.HandlerFunc {
 	want := sha256.Sum256([]byte(token))
 	return func(c *gin.Context) {
 		if token == "" {

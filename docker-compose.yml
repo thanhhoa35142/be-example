@@ -56,10 +56,13 @@ services:
       PORT: "8080"
       RUN_MIGRATIONS: "false"
       DATABASE_URL: postgres://picnic:picnic@db:5432/picnic?sslmode=disable
+      REDIS_URL: redis://redis:6379
     ports:
       - "127.0.0.1:8080:8080"
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
@@ -77,12 +80,15 @@ services:
     environment:
       RUN_MIGRATIONS: "false"
       DATABASE_URL: postgres://picnic:picnic@db:5432/picnic?sslmode=disable
+      REDIS_URL: redis://redis:6379
       INGEST_SOURCE: osmium
       INGEST_EXTRACT_DIR: /data/extracts
     volumes:
       - extracts:/data/extracts
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully

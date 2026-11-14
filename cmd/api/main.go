@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 	infrahttp "github.com/thanhhoa35142/be-example/internal/infrastructure/http"
 	"github.com/thanhhoa35142/be-example/internal/infrastructure/persistence"
 	"github.com/thanhhoa35142/be-example/internal/modules/admin"
@@ -91,6 +92,32 @@ func main() {
 		Device: ratelimit.PerMinute(float64(cfg.RateDevicePerHour)/60, cfg.RateDeviceBurst),
 	}
 	authFail := ratelimit.PerMinute(float64(cfg.RateAuthFailPerMin), cfg.RateAuthFailPerMin)
+
+	// Shared rate-limit buckets + GET response cache when REDIS_URL is set;
+	// nil = per-process in-memory limiters, no cache. Both fail open.
+	var rdb *redis.Client
+	var limiterFor func(ratelimit.Rule, string) ratelimit.Checker
+	if cfg.RedisURL != "" {
+		opts, err := redis.ParseURL(cfg.RedisURL)
+		if err != nil {
+			log.Fatalf("redis url: %v", err)
+		}
+		rdb = redis.NewClient(opts)
+		pctx, pcancel := context.WithTimeout(context.Background(), 3*time.Second)
+		if err := rdb.Ping(pctx).Err(); err != nil {
+			log.Printf("redis unreachable (%v) — rate limits fail open, cache disabled", err)
+			rdb = nil
+		} else {
+			log.Printf("redis enabled (%s): shared rate limits + response cache", opts.Addr)
+		}
+		pcancel()
+		if rdb != nil {
+			limiterFor = func(r ratelimit.Rule, ns string) ratelimit.Checker {
+				return ratelimit.NewRedis(rdb, r, ns)
+			}
+		}
+	}
+
 	router, err := infrahttp.NewRouter(pool, infrahttp.Handlers{
 		Spots:           infrahttp.NewSpotsHandler(spotsSvc),
 		Recommendations: infrahttp.NewRecommendationsHandler(recSvc),
@@ -111,6 +138,8 @@ func main() {
 		Limits:         &limits,
 		AdminToken:     os.Getenv("ADMIN_TOKEN"),
 		AdminFailed:    &authFail,
+		LimiterFor:     limiterFor,
+		Cache:          rdb,
 	})
 	if err != nil {
 		log.Fatalf("router: %v", err)

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 	"github.com/thanhhoa35142/be-example/internal/infrastructure/persistence"
 	"github.com/thanhhoa35142/be-example/internal/modules/admin"
 	"github.com/thanhhoa35142/be-example/internal/modules/alerts"
@@ -27,6 +28,7 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/modules/notifier"
 	"github.com/thanhhoa35142/be-example/internal/modules/scoring"
 	"github.com/thanhhoa35142/be-example/internal/modules/weather"
+	"github.com/thanhhoa35142/be-example/internal/platform/cache"
 	"github.com/thanhhoa35142/be-example/internal/platform/config"
 	"github.com/thanhhoa35142/be-example/internal/platform/httpx"
 	"github.com/thanhhoa35142/be-example/internal/platform/jobs"
@@ -104,6 +106,38 @@ func main() {
 		log.Fatalf("db connect: %v", err)
 	}
 	defer pool.Close()
+
+	// Redis bumps the shared data version after jobs that change data behind
+	// cached API GETs; nil = caching disabled (API falls back to TTL only).
+	var rdb *redis.Client
+	if cfg.RedisURL != "" {
+		if opts, err := redis.ParseURL(cfg.RedisURL); err == nil {
+			rdb = redis.NewClient(opts)
+			pctx, pcancel := context.WithTimeout(ctx, 3*time.Second)
+			if err := rdb.Ping(pctx).Err(); err != nil {
+				logger.Warn("redis unreachable — cache version bumps disabled", "error", err)
+				rdb = nil
+			}
+			pcancel()
+		} else {
+			logger.Warn("bad REDIS_URL — cache version bumps disabled", "error", err)
+		}
+	}
+	bumpCache := func(fn func(context.Context) error) func(context.Context) error {
+		return func(ctx context.Context) error {
+			if err := fn(ctx); err != nil {
+				return err
+			}
+			if rdb != nil {
+				bctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+				if err := cache.Bump(bctx, rdb); err != nil {
+					logger.Warn("cache version bump failed", "error", err)
+				}
+				cancel()
+			}
+			return nil
+		}
+	}
 
 	queries := persistence.New(pool)
 
@@ -278,21 +312,21 @@ func main() {
 		{
 			name:         "weather.refresh",
 			initialDelay: 0, // provider-bound: goes first
-			fn: func(ctx context.Context) error {
+			fn: bumpCache(func(ctx context.Context) error {
 				stats, err := weatherSvc.Refresh(ctx)
 				if err != nil {
 					return err
 				}
 				logger.Info("weather done", "provider", weatherProvider.Name(), "cells", stats.Cells, "rows", stats.Fetched, "failed", stats.Failed)
 				return nil
-			},
+			}),
 		},
 		{
 			// Weekly, offline (rickar/cal): must have run before the next
 			// crowd.refresh to be seen, so it goes ahead of it.
 			name:         "holidays.refresh",
 			initialDelay: 6 * time.Minute,
-			fn: func(ctx context.Context) error {
+			fn: bumpCache(func(ctx context.Context) error {
 				stats, err := holidaysSvc.Refresh(ctx, time.Now())
 				if bag, ok := ctx.Value(jobStatsKey{}).(*jobStatsBag); ok {
 					bag.set("countries", stats.Countries)
@@ -306,43 +340,43 @@ func main() {
 				}
 				logger.Info("holidays done", "countries", stats.Countries, "rows", stats.Rows, "uncovered", stats.Uncovered)
 				return nil
-			},
+			}),
 		},
 		{
 			name:         "crowd.refresh",
 			initialDelay: 7 * time.Minute, // daily, heaviest — offset far out
-			fn: func(ctx context.Context) error {
+			fn: bumpCache(func(ctx context.Context) error {
 				stats, err := crowdSvc.Refresh(ctx)
 				if err != nil {
 					return err
 				}
 				logger.Info("crowd done", "spots", stats.Spots, "slots", stats.Slots, "written", stats.Written, "skipped", stats.Skipped)
 				return nil
-			},
+			}),
 		},
 		{
 			name:         "crowd.aggregate",
 			initialDelay: 2 * time.Minute,
-			fn: func(ctx context.Context) error {
+			fn: bumpCache(func(ctx context.Context) error {
 				stats, err := crowdSvc.AggregateCommunity(ctx)
 				if err != nil {
 					return err
 				}
 				logger.Info("crowd aggregate done", "written", stats.Written)
 				return nil
-			},
+			}),
 		},
 		{
 			name:         "scoring.recompute",
 			initialDelay: 4 * time.Minute, // after weather+crowd have fresh data
-			fn: func(ctx context.Context) error {
+			fn: bumpCache(func(ctx context.Context) error {
 				stats, err := scoringSvc.Recompute(ctx)
 				if err != nil {
 					return err
 				}
 				logger.Info("scoring done", "spots", stats.Spots, "hours", stats.Hours, "written", stats.Written, "unchanged", stats.Hours-stats.Written, "skipped", stats.Skipped)
 				return nil
-			},
+			}),
 		},
 		{
 			name:         "alerts.evaluate",
@@ -383,7 +417,7 @@ func main() {
 		{
 			name:         "ingest.osm",
 			initialDelay: 5 * time.Minute,
-			fn:           runIngest,
+			fn:           bumpCache(runIngest),
 		},
 		{
 			name:         "ingest.extract.refresh",
@@ -412,7 +446,7 @@ func main() {
 		{
 			name:         "retention.purge",
 			initialDelay: 10 * time.Minute, // daily, lowest priority — runs last
-			fn: func(ctx context.Context) error {
+			fn: bumpCache(func(ctx context.Context) error {
 				stats, err := persistence.NewRetentionRepo(queries).Purge(ctx)
 				if err != nil {
 					return err
@@ -423,7 +457,7 @@ func main() {
 					"job_runs", stats.JobRuns, "deliveries", stats.AlertDeliveries,
 					"payloads_scrubbed", stats.PayloadsScrubbed)
 				return nil
-			},
+			}),
 		},
 	}
 
