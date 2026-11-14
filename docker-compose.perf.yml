@@ -1,0 +1,139 @@
+# Perf-test stack: same services as docker-compose.yml but sized for a
+# ~3 vCPU / 6 GB VM (GitHub runner is 4c/16GB — limits keep numbers
+# comparable to the target box; absolute values still skew because the
+# load generator shares the host).
+#
+# Usage:
+#   docker compose -f docker-compose.perf.yml up -d          # stack only
+#   docker compose -f docker-compose.perf.yml exec -T db \
+#     psql -U picnic -d picnic -v spots=3000 < perf/seed.sql # seed data
+#   PROFILE=load DURATION=10m RPS=30 \
+#     docker compose -f docker-compose.perf.yml --profile loadgen run --rm k6
+#
+# API is also published on 127.0.0.1:18080 for ad-hoc curl checks.
+name: pickhour-perf
+
+services:
+  db:
+    image: postgis/postgis:18-3.6
+    container_name: perf-postgres
+    environment:
+      POSTGRES_USER: picnic
+      POSTGRES_PASSWORD: picnic
+      POSTGRES_DB: picnic
+    # Small-VM postgres tuning.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - effective_cache_size=2GB
+      - -c
+      - work_mem=16MB
+      - -c
+      - max_connections=100
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - perfdata:/var/lib/postgresql
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 2G }
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U picnic -d picnic"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+    networks: [pickhour]
+
+  redis:
+    image: redis:7-alpine
+    container_name: perf-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - perfredis:/data
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 256M }
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+    networks: [pickhour]
+
+  migrate:
+    build: .
+    image: pickhour-backend:latest
+    container_name: perf-migrate
+    command: ["/app/migrate"]
+    environment:
+      DATABASE_URL: postgres://picnic:picnic@db:5432/picnic?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 512M }
+    networks: [pickhour]
+
+  api:
+    build: .
+    image: pickhour-backend:latest
+    container_name: perf-api
+    command: ["/app/api"]
+    environment:
+      PORT: "8080"
+      RUN_MIGRATIONS: "false"
+      DATABASE_URL: postgres://picnic:picnic@db:5432/picnic?sslmode=disable
+      REDIS_URL: redis://redis:6379
+      # Perf runs use generous rate limits so the limiter doesn't become
+      # the bottleneck under test (it has its own unit coverage).
+      RATE_READ_PER_MIN: "100000"
+      RATE_WRITE_PER_MIN: "100000"
+      RATE_DEVICE_PER_HOUR: "1000000"
+      RATE_AUTH_FAIL_PER_MIN: "100000"
+    ports:
+      - "127.0.0.1:18080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits: { cpus: "1.5", memory: 1536M }
+    restart: unless-stopped
+    networks: [pickhour]
+
+  # Load generator — opt-in via --profile loadgen so `up -d` stays cheap.
+  k6:
+    image: grafana/k6:latest
+    container_name: perf-k6
+    profiles: ["loadgen"]
+    # k6 image runs as non-root 'k6'; root so it can write /perf/out.
+    user: "0:0"
+    volumes:
+      - ./perf:/perf
+    environment:
+      BASE_URL: http://api:8080
+      PROFILE: ${PROFILE:-smoke}
+      DURATION: ${DURATION:-1m}
+      RPS: ${RPS:-30}
+      VUS: ${VUS:-10}
+      SPOTS: ${SPOTS:-3000}
+    command: ["run", "/perf/k6.js"]
+    depends_on:
+      api:
+        condition: service_started
+    networks: [pickhour]
+
+volumes:
+  perfdata:
+  perfredis:
+
+networks:
+  pickhour:
