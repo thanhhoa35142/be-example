@@ -48,6 +48,37 @@ type recOut struct {
 	DistanceM float64 `json:"distanceM"`
 }
 
+type bboxResult struct {
+	Spots        []spotOut `json:"spots"`
+	TotalMatched int       `json:"totalMatched"`
+	Truncated    bool      `json:"truncated"`
+}
+
+type packOut struct {
+	Slug        string     `json:"slug"`
+	Name        string     `json:"name"`
+	Country     string     `json:"country"`
+	TZ          string     `json:"tz"`
+	Center      [2]float64 `json:"center"` // lon, lat
+	BBox        [4]float64 `json:"bbox"`   // west, south, east, north
+	ActiveSpots int        `json:"activeSpots"`
+}
+
+// All MCP tools are read-only against closed-world data (our own DB), so
+// every tool carries the same annotations — clients can auto-approve them.
+var readOnlyAnnotations = &mcp.ToolAnnotations{
+	ReadOnlyHint:   true,
+	IdempotentHint: true,
+	OpenWorldHint:  new(bool),
+}
+
+func toPackOut(p spots.Pack) packOut {
+	return packOut{
+		Slug: p.Slug, Name: p.Name, Country: p.Country, TZ: p.TZ,
+		Center: p.Center, BBox: p.BBox, ActiveSpots: p.ActiveSpots,
+	}
+}
+
 func toScoreOut(s *spots.ScoreSnapshot) *scoreOut {
 	if s == nil {
 		return nil
@@ -146,24 +177,43 @@ func parseSpotID(s string) (uuid.UUID, error) {
 func registerTools(s *mcp.Server, spotsSvc *spots.Service, recSvc *recommendations.Service, keysSvc *apikeys.Service) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "spots_in_bbox",
-		Description: "List picnic spots with their 0-100 score inside a bounding box. Scores are hourly; pass 'when' (RFC3339) to pick a different hour, default is now.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args bboxArgs) (*mcp.CallToolResult, []spotOut, error) {
+		Description: "List picnic spots with their 0-100 score inside a bounding box. Wide areas return only the top spots — check 'truncated'/'totalMatched' and narrow the box (see list_packs for pack bboxes). Scores are hourly; pass 'when' (RFC3339) to pick a different hour, default is now.",
+		Annotations: readOnlyAnnotations,
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args bboxArgs) (*mcp.CallToolResult, bboxResult, error) {
 		if err := requireScope(ctx, keysSvc, "spots", "read"); err != nil {
-			return nil, nil, err
+			return nil, bboxResult{}, err
 		}
 		when, err := parseWhen(args.When)
 		if err != nil {
+			return nil, bboxResult{}, err
+		}
+		bbox := spots.BBox{West: args.West, South: args.South, East: args.East, North: args.North}
+		page, err := spotsSvc.ListPage(ctx, spots.ListQuery{BBox: &bbox, When: when})
+		if err != nil {
+			return nil, bboxResult{}, toolError(ctx, "spots_in_bbox", err)
+		}
+		out := bboxResult{Spots: make([]spotOut, 0, len(page.Items)), TotalMatched: page.Total, Truncated: page.Truncated}
+		for _, it := range page.Items {
+			out.Spots = append(out.Spots, toSpotOut(it.Spot, it.Score))
+		}
+		return nil, out, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "list_packs",
+		Description: "List covered city packs (name, country, timezone, bounding box, active spot count). Use a pack's bbox with spots_in_bbox to explore that city.",
+		Annotations: readOnlyAnnotations,
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, []packOut, error) {
+		if err := requireScope(ctx, keysSvc, "spots", "read"); err != nil {
 			return nil, nil, err
 		}
-		items, err := spotsSvc.ListInBBox(ctx, spots.BBox{
-			West: args.West, South: args.South, East: args.East, North: args.North,
-		}, when)
+		packs, err := spotsSvc.ListPacks(ctx)
 		if err != nil {
-			return nil, nil, toolError(ctx, "spots_in_bbox", err)
+			return nil, nil, toolError(ctx, "list_packs", err)
 		}
-		out := make([]spotOut, 0, len(items))
-		for _, it := range items {
-			out = append(out, toSpotOut(it.Spot, it.Score))
+		out := make([]packOut, 0, len(packs))
+		for _, p := range packs {
+			out = append(out, toPackOut(p))
 		}
 		return nil, out, nil
 	})
@@ -171,6 +221,7 @@ func registerTools(s *mcp.Server, spotsSvc *spots.Service, recSvc *recommendatio
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "spot_get",
 		Description: "Get one spot's details: location, names, amenities, and data sources. Use spot_forecast for its hourly scores.",
+		Annotations: readOnlyAnnotations,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args spotIDArgs) (*mcp.CallToolResult, spotDetailOut, error) {
 		if err := requireScope(ctx, keysSvc, "spots", "read"); err != nil {
 			return nil, spotDetailOut{}, err
@@ -193,6 +244,7 @@ func registerTools(s *mcp.Server, spotsSvc *spots.Service, recSvc *recommendatio
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "spot_forecast",
 		Description: "Get a spot's hourly 0-100 score forecast for the next 7 days, including score components and reason codes.",
+		Annotations: readOnlyAnnotations,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args spotIDArgs) (*mcp.CallToolResult, []spots.ForecastPoint, error) {
 		if err := requireScope(ctx, keysSvc, "spots", "read"); err != nil {
 			return nil, nil, err
@@ -211,6 +263,7 @@ func registerTools(s *mcp.Server, spotsSvc *spots.Service, recSvc *recommendatio
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "recommend_spots",
 		Description: "Rank the best picnic spots around a lat/lon at a given hour. Returns up to 'limit' spots sorted by score with distance.",
+		Annotations: readOnlyAnnotations,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args recommendArgs) (*mcp.CallToolResult, []recOut, error) {
 		if err := requireScope(ctx, keysSvc, "recommendations", "read"); err != nil {
 			return nil, nil, err
