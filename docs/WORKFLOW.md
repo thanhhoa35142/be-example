@@ -44,7 +44,7 @@ Ba repo **độc lập hoàn toàn**, không submodule:
   000013 — nếu thấy không cần thiết có thể gộp/bỏ khi consolidate).
 - Mỗi thay đổi DB bắt buộc theo đúng flow:
   1. Sửa/thêm `db/migrations/NNNNNN_name.up.sql` + `.down.sql`
-     (số tiếp theo hiện tại: **000013**)
+     (số tiếp theo hiện tại: **000014**)
   2. Sửa `db/queries/*.sql` — **không bao giờ sửa tay file generated**
   3. `make sqlc` regenerate
   4. Verify `go build ./... && go test ./...`
