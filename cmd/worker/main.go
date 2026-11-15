@@ -517,7 +517,7 @@ func main() {
 				}
 				logger.Info("plans done", "plans", stats.Plans, "no_scores", stats.NoScores,
 					"changed", stats.Changed, "confirmed", stats.Confirmed, "deferred", stats.Deferred,
-					"queued", stats.Queued, "sent", stats.Sent, "failed", stats.Failed, "dead", stats.Dead)
+					"queued", stats.Queued, "held", stats.Held, "sent", stats.Sent, "failed", stats.Failed, "dead", stats.Dead)
 				return nil
 			},
 		},

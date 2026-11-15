@@ -170,8 +170,9 @@ WHERE status = 'claimed' AND claimed_at < now() - interval '5 minutes';
 
 -- name: ExpirePlanDeliveries :exec
 -- Open rows that may no longer be sent become dead: the plan was canceled
--- or has started, the local day they were meant for is over, or attempts
--- are exhausted.
+-- or has started, the local day after the one they were meant for is over
+-- (a retry held over midnight by quiet hours still goes out at 07:00), or
+-- attempts are exhausted.
 UPDATE t_plan_deliveries d SET
     status = 'dead',
     last_error = CASE WHEN d.attempts >= sqlc.arg(max_attempts)::int
@@ -179,7 +180,7 @@ UPDATE t_plan_deliveries d SET
 FROM t_plans p
 WHERE d.plan_id = p.id AND d.status IN ('pending', 'failed')
   AND (p.canceled_at IS NOT NULL OR p.start_ts <= now()
-       OR d.local_date < (now() AT TIME ZONE p.tz)::date
+       OR d.local_date < (now() AT TIME ZONE p.tz)::date - 1
        OR d.attempts >= sqlc.arg(max_attempts)::int);
 
 -- name: ClaimPlanDeliveries :many
@@ -199,6 +200,14 @@ RETURNING d.plan_id, d.device_id, d.local_date, d.kind, d.payload;
 -- name: MarkPlanDeliverySent :exec
 UPDATE t_plan_deliveries
 SET status = 'sent', sent_at = now(), apns_status = 200, last_error = NULL
+WHERE plan_id = $1 AND device_id = $2 AND local_date = $3 AND status = 'claimed';
+
+-- name: ReleasePlanDelivery :exec
+-- Quiet hours in the plan's tz: hand a claimed row back unsent, without
+-- spending an attempt; a later run outside quiet hours picks it up again.
+UPDATE t_plan_deliveries
+SET status = 'failed', attempts = GREATEST(attempts - 1, 0), claimed_at = NULL,
+    last_error = COALESCE(last_error, 'quiet hours')
 WHERE plan_id = $1 AND device_id = $2 AND local_date = $3 AND status = 'claimed';
 
 -- name: MarkPlanDeliveryFailed :exec

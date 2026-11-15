@@ -345,13 +345,14 @@ UPDATE t_plan_deliveries d SET
 FROM t_plans p
 WHERE d.plan_id = p.id AND d.status IN ('pending', 'failed')
   AND (p.canceled_at IS NOT NULL OR p.start_ts <= now()
-       OR d.local_date < (now() AT TIME ZONE p.tz)::date
+       OR d.local_date < (now() AT TIME ZONE p.tz)::date - 1
        OR d.attempts >= $1::int)
 `
 
 // Open rows that may no longer be sent become dead: the plan was canceled
-// or has started, the local day they were meant for is over, or attempts
-// are exhausted.
+// or has started, the local day after the one they were meant for is over
+// (a retry held over midnight by quiet hours still goes out at 07:00), or
+// attempts are exhausted.
 func (q *Queries) ExpirePlanDeliveries(ctx context.Context, maxAttempts int32) error {
 	_, err := q.db.Exec(ctx, expirePlanDeliveries, maxAttempts)
 	return err
@@ -717,6 +718,26 @@ func (q *Queries) PlanWindowScores(ctx context.Context, arg PlanWindowScoresPara
 		return nil, err
 	}
 	return items, nil
+}
+
+const releasePlanDelivery = `-- name: ReleasePlanDelivery :exec
+UPDATE t_plan_deliveries
+SET status = 'failed', attempts = GREATEST(attempts - 1, 0), claimed_at = NULL,
+    last_error = COALESCE(last_error, 'quiet hours')
+WHERE plan_id = $1 AND device_id = $2 AND local_date = $3 AND status = 'claimed'
+`
+
+type ReleasePlanDeliveryParams struct {
+	PlanID    uuid.UUID   `json:"plan_id"`
+	DeviceID  uuid.UUID   `json:"device_id"`
+	LocalDate pgtype.Date `json:"local_date"`
+}
+
+// Quiet hours in the plan's tz: hand a claimed row back unsent, without
+// spending an attempt; a later run outside quiet hours picks it up again.
+func (q *Queries) ReleasePlanDelivery(ctx context.Context, arg ReleasePlanDeliveryParams) error {
+	_, err := q.db.Exec(ctx, releasePlanDelivery, arg.PlanID, arg.DeviceID, arg.LocalDate)
+	return err
 }
 
 const savePlanEvaluation = `-- name: SavePlanEvaluation :exec

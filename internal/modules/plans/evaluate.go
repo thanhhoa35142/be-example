@@ -90,6 +90,9 @@ type EvalRepository interface {
 	PrepareDeliveries(ctx context.Context, maxAttempts int) error
 	ClaimDeliveries(ctx context.Context, maxAttempts, batch int) ([]Delivery, error)
 	MarkDeliverySent(ctx context.Context, d Delivery) error
+	// ReleaseDelivery returns a claimed row unsent (quiet hours) without
+	// spending an attempt.
+	ReleaseDelivery(ctx context.Context, d Delivery) error
 	// MarkDeliveryFailed sets status "failed" (retried) or "dead".
 	MarkDeliveryFailed(ctx context.Context, d Delivery, status string, apnsStatus *int, msg string) error
 }
@@ -100,6 +103,8 @@ type Sender interface {
 
 type EvalStats struct {
 	Plans, NoScores, Changed, Confirmed, Deferred, Queued, Sent, Failed, Dead int
+	// Held: claimed retries handed back unsent because of quiet hours.
+	Held int
 }
 
 type Evaluator struct {
@@ -328,7 +333,16 @@ func (e *Evaluator) dispatch(ctx context.Context, st *EvalStats) {
 		e.logger.ErrorContext(ctx, "plan delivery claim failed", "error", err)
 		return
 	}
+	now := e.now()
 	for _, d := range ds {
+		// Retries obey the same quiet hours as first sends (plan tz).
+		if loc, lerr := time.LoadLocation(d.TZ); lerr == nil && inQuiet(now.In(loc).Hour(), e.cfg) {
+			st.Held++
+			if rerr := e.repo.ReleaseDelivery(ctx, d); rerr != nil {
+				e.logger.ErrorContext(ctx, "plan delivery release failed", "plan", d.PlanID, "error", rerr)
+			}
+			continue
+		}
 		err := e.sender.SendPlan(ctx, d.DeviceID, d.Notification)
 		switch {
 		case err == nil:

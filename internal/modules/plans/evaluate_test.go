@@ -185,6 +185,8 @@ type evalFake struct {
 	claimOK  bool
 	queue    []Delivery
 	marks    map[uuid.UUID]string
+
+	oneRecipient bool
 }
 
 func (f *evalFake) EvaluablePlans(context.Context, time.Time) ([]EvalPlan, error) {
@@ -212,15 +214,46 @@ func (f *evalFake) ClaimNotification(_ context.Context, n Notification, d time.T
 	if !f.claimOK {
 		return false, 0, nil
 	}
-	f.queue = append(f.queue, Delivery{PlanID: n.PlanID, DeviceID: uuid.New(), LocalDate: d, Notification: n},
-		Delivery{PlanID: n.PlanID, DeviceID: uuid.New(), LocalDate: d, Notification: n})
-	return true, 2, nil
+	// Like ClaimPlanChange/Confirm: the plan's notified state moves.
+	for i := range f.plans {
+		if f.plans[i].ID == n.PlanID {
+			s, day := n.State, d
+			f.plans[i].LastNotifiedOn = &day
+			if n.Kind == KindChanged {
+				f.plans[i].Notified = &s
+			} else {
+				f.plans[i].Confirmed = true
+			}
+		}
+	}
+	for range f.recipients() {
+		f.queue = append(f.queue, Delivery{PlanID: n.PlanID, DeviceID: uuid.New(), LocalDate: d, Notification: n})
+	}
+	return true, int64(f.recipients()), nil
+}
+func (f *evalFake) recipients() int {
+	if f.oneRecipient {
+		return 1
+	}
+	return 2
 }
 func (f *evalFake) PrepareDeliveries(context.Context, int) error { return nil }
+
+// ClaimDeliveries returns every open row (never sent, failed or released).
 func (f *evalFake) ClaimDeliveries(context.Context, int, int) ([]Delivery, error) {
-	q := f.queue
-	f.queue = nil
-	return q, nil
+	var out []Delivery
+	for _, d := range f.queue {
+		switch f.marks[d.DeviceID] {
+		case "", "failed", "released":
+			f.marks[d.DeviceID] = "claimed"
+			out = append(out, d)
+		}
+	}
+	return out, nil
+}
+func (f *evalFake) ReleaseDelivery(_ context.Context, d Delivery) error {
+	f.marks[d.DeviceID] = "released"
+	return nil
 }
 func (f *evalFake) MarkDeliverySent(_ context.Context, d Delivery) error {
 	f.marks[d.DeviceID] = "sent"
@@ -370,5 +403,54 @@ func TestEvaluatorLostClaimAndSendErrors(t *testing.T) {
 	}
 	if _, st = newRun(true, ErrNoPushToken); st.Dead != 2 {
 		t.Fatalf("no token %+v", st)
+	}
+}
+
+// A send that fails at 21:59 is not retried during quiet hours (22:10,
+// 03:00) and goes out at 07:05; held rows spend no attempt.
+func TestEvaluatorRetryRespectsQuietHours(t *testing.T) {
+	ams, err := time.LoadLocation("Europe/Amsterdam")
+	if err != nil {
+		t.Skip("no tzdata")
+	}
+	spot := uuid.New()
+	start := time.Date(2026, 11, 21, 10, 0, 0, 0, ams)
+	f := newEvalFake()
+	f.oneRecipient = true
+	f.scores[spot] = hs(start.UTC(), 30, 30, 30)
+	f.plans = []EvalPlan{{ID: uuid.New(), SpotID: spot, Start: start, End: start.Add(3 * time.Hour),
+		TZ: "Europe/Amsterdam", Notified: ptrState(StateOK)}}
+	snd := &senderFake{err: errors.New("apns 500")}
+	e := NewEvaluator(f, snd, DefaultConfig(), nil)
+	run := func(now time.Time) EvalStats {
+		e.now = func() time.Time { return now }
+		st, err := e.Evaluate(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+
+	if st := run(time.Date(2026, 11, 20, 21, 59, 0, 0, ams)); st.Changed != 1 || st.Failed != 1 || len(snd.sent) != 1 {
+		t.Fatalf("21:59: %+v sent %d", st, len(snd.sent))
+	}
+	snd.err = nil
+	if st := run(time.Date(2026, 11, 20, 22, 10, 0, 0, ams)); len(snd.sent) != 1 || st.Held != 1 || st.Changed != 0 {
+		t.Fatalf("22:10 sent during quiet hours: %+v sent %d", st, len(snd.sent))
+	}
+	if st := run(time.Date(2026, 11, 21, 3, 0, 0, 0, ams)); len(snd.sent) != 1 || st.Held != 1 {
+		t.Fatalf("03:00: %+v sent %d", st, len(snd.sent))
+	}
+	st := run(time.Date(2026, 11, 21, 7, 5, 0, 0, ams))
+	if len(snd.sent) != 2 || st.Sent != 1 || st.Held != 0 || st.Changed != 0 {
+		t.Fatalf("07:05: %+v sent %d", st, len(snd.sent))
+	}
+	if len(f.marks) != 1 {
+		t.Fatalf("marks %v", f.marks)
+	}
+	for _, m := range f.marks {
+		if m != "sent" {
+			t.Fatalf("marks %v", f.marks)
+		}
 	}
 }

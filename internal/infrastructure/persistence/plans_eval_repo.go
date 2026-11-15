@@ -155,6 +155,12 @@ func (r *PlansRepo) MarkDeliverySent(ctx context.Context, d plans.Delivery) erro
 	})
 }
 
+func (r *PlansRepo) ReleaseDelivery(ctx context.Context, d plans.Delivery) error {
+	return r.q.ReleasePlanDelivery(ctx, ReleasePlanDeliveryParams{
+		PlanID: d.PlanID, DeviceID: d.DeviceID, LocalDate: civilDateParam(d.LocalDate),
+	})
+}
+
 func (r *PlansRepo) MarkDeliveryFailed(ctx context.Context, d plans.Delivery, status string, apnsStatus *int, msg string) error {
 	return r.q.MarkPlanDeliveryFailed(ctx, MarkPlanDeliveryFailedParams{
 		PlanID: d.PlanID, DeviceID: d.DeviceID, LocalDate: civilDateParam(d.LocalDate),
