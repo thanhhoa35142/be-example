@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,11 @@ import (
 type AdminHandler struct {
 	svc  *admin.Service
 	keys *apikeys.Service
+}
+
+// RecordAudit implements AuditRecorder for the AdminAudit middleware.
+func (h *AdminHandler) RecordAudit(ctx context.Context, e admin.AuditEvent) error {
+	return h.svc.RecordAudit(ctx, e)
 }
 
 func NewAdminHandler(svc *admin.Service, keys *apikeys.Service) *AdminHandler {
@@ -182,6 +188,46 @@ func (h *AdminHandler) JobSchedules(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"items": schedules}})
+}
+
+// GET /v1/admin/audit?limit=&cursor= — persisted admin mutation audit trail,
+// keyset-paginated (cursor = last event id).
+func (h *AdminHandler) AuditEvents(c *gin.Context) {
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	var beforeID *int64
+	if raw := c.Query("cursor"); raw != "" {
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || id <= 0 {
+			httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidQuery, "Invalid cursor", "expected an audit event id")
+			return
+		}
+		beforeID = &id
+	}
+	page, err := h.svc.AuditEvents(c.Request.Context(), limit, beforeID)
+	if err != nil {
+		httpx.WriteError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": page})
+}
+
+// GET /v1/admin/jobs/runs/:id — single job run incl. worker-reported stats.
+func (h *AdminHandler) JobRun(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidID, "Invalid id", "expected a job run id")
+		return
+	}
+	run, err := h.svc.JobRun(c.Request.Context(), id)
+	if err != nil {
+		if errors.Is(err, admin.ErrJobRunNotFound) {
+			httpx.WriteProblem(c, http.StatusNotFound, httpx.CodeNotFound, "Job run not found", "")
+			return
+		}
+		httpx.WriteError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": run})
 }
 
 type updateJobScheduleRequest struct {

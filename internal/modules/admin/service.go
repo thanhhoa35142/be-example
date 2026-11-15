@@ -149,6 +149,27 @@ func (s *Service) Jobs(ctx context.Context, limit int, beforeID *int64, status s
 	return Page[JobRun]{Items: rows}, nil
 }
 
+func (s *Service) JobRun(ctx context.Context, id int64) (JobRun, error) {
+	return s.repo.GetJobRun(ctx, id)
+}
+
+func (s *Service) RecordAudit(ctx context.Context, e AuditEvent) error {
+	return s.repo.InsertAuditEvent(ctx, e)
+}
+
+func (s *Service) AuditEvents(ctx context.Context, limit int, beforeID *int64) (Page[AuditEvent], error) {
+	limit = clampLimit(limit)
+	rows, err := s.repo.ListAuditEvents(ctx, limit+1, beforeID)
+	if err != nil {
+		return Page[AuditEvent]{}, err
+	}
+	if len(rows) > limit {
+		cur := strconv.FormatInt(rows[limit-1].ID, 10)
+		return Page[AuditEvent]{Items: rows[:limit], NextCursor: &cur}, nil
+	}
+	return Page[AuditEvent]{Items: rows}, nil
+}
+
 func (s *Service) JobSchedules(ctx context.Context) ([]JobSchedule, error) {
 	schedules, err := s.repo.ListJobSchedules(ctx)
 	if err != nil {

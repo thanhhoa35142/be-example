@@ -13,6 +13,9 @@ type Repository interface {
 
 	AbandonJobRuns(ctx context.Context, job string) error
 	ListJobRuns(ctx context.Context, limit int, beforeID *int64, status string) ([]JobRun, error)
+	GetJobRun(ctx context.Context, id int64) (JobRun, error)
+	InsertAuditEvent(ctx context.Context, e AuditEvent) error
+	ListAuditEvents(ctx context.Context, limit int, beforeID *int64) ([]AuditEvent, error)
 	ListJobSchedules(ctx context.Context) ([]JobSchedule, error)
 	GetJobSchedule(ctx context.Context, job string) (JobSchedule, error)
 	UpdateJobSchedule(ctx context.Context, job string, intervalSeconds int64) (JobSchedule, error)
@@ -40,6 +43,7 @@ type Repository interface {
 	ListPlanLimits(ctx context.Context) ([]PlanLimit, error)
 	UpdatePlanLimit(ctx context.Context, plan, feature string, limit int) (bool, error)
 	ListCityPacks(ctx context.Context) ([]CityPack, error)
+	CityPackDetail(ctx context.Context, id uuid.UUID) (CityPackDetail, error)
 
 	CityPackStatus(ctx context.Context, id uuid.UUID) (status string, imported bool, err error)
 	UpdateCityPackStatus(ctx context.Context, id uuid.UUID, status string) error

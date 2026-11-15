@@ -3,6 +3,7 @@ package persistence
 import (
 	"context"
 	"errors"
+	"sort"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -73,6 +74,114 @@ func (r *AdminRepo) ListCityPacks(ctx context.Context) ([]admin.CityPack, error)
 		})
 	}
 	return out, nil
+}
+
+var citySpotStatusOrder = []string{"pending", "active", "closed", "hidden", "merged"}
+
+func (r *AdminRepo) CityPackDetail(ctx context.Context, id uuid.UUID) (admin.CityPackDetail, error) {
+	row, err := r.q.GetAdminCityPack(ctx, id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return admin.CityPackDetail{}, admin.ErrCityPackNotFound
+	}
+	if err != nil {
+		return admin.CityPackDetail{}, err
+	}
+
+	spotRows, err := r.q.CountAdminCityPackSpotsByStatus(ctx, id)
+	if err != nil {
+		return admin.CityPackDetail{}, err
+	}
+	roleRows, err := r.q.CountAdminCityPackIngestFeatures(ctx, id)
+	if err != nil {
+		return admin.CityPackDetail{}, err
+	}
+	reasonRows, err := r.q.CountAdminCityPackExcludeReasons(ctx, id)
+	if err != nil {
+		return admin.CityPackDetail{}, err
+	}
+	pendingReports, err := r.q.CountAdminCityPackPendingReports(ctx, id)
+	if err != nil {
+		return admin.CityPackDetail{}, err
+	}
+	runRows, err := r.q.ListAdminCityPackJobRuns(ctx, ListAdminCityPackJobRunsParams{
+		CityPackID: pgtype.UUID{Bytes: id, Valid: true},
+		Limit:      10,
+	})
+	if err != nil {
+		return admin.CityPackDetail{}, err
+	}
+	spotList, err := r.q.ListAdminCityPackSpots(ctx, ListAdminCityPackSpotsParams{
+		CityPackID: id,
+		Limit:      10,
+	})
+	if err != nil {
+		return admin.CityPackDetail{}, err
+	}
+
+	d := admin.CityPackDetail{
+		CityPack: admin.CityPack{
+			ID:           row.ID,
+			Slug:         row.Slug,
+			Name:         row.Name,
+			Country:      row.Country,
+			Tz:           row.Tz,
+			Status:       row.Status,
+			LastImportAt: timePtr(row.LastImportAt),
+		},
+		OsmExtract:       textPtr(row.OsmExtract),
+		ExtractFetchedAt: timePtr(row.ExtractFetchedAt),
+		PendingReports:   pendingReports,
+		SpotCounts:       []admin.NameCount{},
+		IngestRoles:      []admin.NameCount{},
+		ExcludeReasons:   []admin.NameCount{},
+		RecentRuns:       make([]admin.JobRun, 0, len(runRows)),
+		RecentSpots:      make([]admin.CitySpot, 0, len(spotList)),
+	}
+
+	spotCounts := make([]admin.NameCount, 0, len(spotRows))
+	for _, sr := range spotRows {
+		spotCounts = append(spotCounts, admin.NameCount{Name: sr.Status, Count: sr.Count})
+		d.TotalSpots += sr.Count
+		if sr.Status == "active" {
+			d.ActiveSpots = sr.Count
+		}
+	}
+	sort.SliceStable(spotCounts, func(i, j int) bool {
+		return citySpotStatusRank(spotCounts[i].Name) < citySpotStatusRank(spotCounts[j].Name)
+	})
+	d.SpotCounts = spotCounts
+
+	for _, rr := range roleRows {
+		d.IngestRoles = append(d.IngestRoles, admin.NameCount{Name: rr.Role, Count: rr.Count})
+	}
+	for _, rr := range reasonRows {
+		d.ExcludeReasons = append(d.ExcludeReasons, admin.NameCount{
+			Name:  rr.ExcludeReason.String,
+			Count: rr.Count,
+		})
+	}
+	for _, run := range runRows {
+		d.RecentRuns = append(d.RecentRuns, jobRunFromModel(run))
+	}
+	for _, s := range spotList {
+		d.RecentSpots = append(d.RecentSpots, admin.CitySpot{
+			ID:        s.ID,
+			Name:      textPtr(s.Name),
+			Kind:      s.Kind,
+			Status:    s.Status,
+			UpdatedAt: s.UpdatedAt.UTC(),
+		})
+	}
+	return d, nil
+}
+
+func citySpotStatusRank(status string) int {
+	for i, s := range citySpotStatusOrder {
+		if s == status {
+			return i
+		}
+	}
+	return len(citySpotStatusOrder)
 }
 
 func (r *AdminRepo) CityPackStatus(ctx context.Context, id uuid.UUID) (string, bool, error) {

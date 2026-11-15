@@ -2,7 +2,9 @@ package persistence
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -64,6 +66,104 @@ func (r *AdminRepo) ListJobRuns(ctx context.Context, limit int, beforeID *int64,
 			Status:       row.Status,
 			RowsAffected: intPtr(row.RowsAffected),
 			Error:        textPtr(row.Error),
+		})
+	}
+	return out, nil
+}
+
+func (r *AdminRepo) GetJobRun(ctx context.Context, id int64) (admin.JobRun, error) {
+	row, err := r.q.GetJobRun(ctx, id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return admin.JobRun{}, admin.ErrJobRunNotFound
+	}
+	if err != nil {
+		return admin.JobRun{}, err
+	}
+	return jobRunFromModel(row), nil
+}
+
+func jobRunFromModel(row TJobRun) admin.JobRun {
+	var packID *string
+	if row.CityPackID.Valid {
+		s := uuid.UUID(row.CityPackID.Bytes).String()
+		packID = &s
+	}
+	var stats json.RawMessage
+	if len(row.Stats) > 0 {
+		stats = json.RawMessage(row.Stats)
+	}
+	return admin.JobRun{
+		ID:           row.ID,
+		Job:          row.Job,
+		CityPackID:   packID,
+		StartedAt:    row.StartedAt.UTC(),
+		FinishedAt:   tsPtr(row.FinishedAt),
+		Status:       row.Status,
+		RowsAffected: intPtr(row.RowsAffected),
+		Error:        textPtr(row.Error),
+		Stats:        stats,
+	}
+}
+
+func (r *AdminRepo) InsertAuditEvent(ctx context.Context, e admin.AuditEvent) error {
+	var uid pgtype.UUID
+	if e.AdminUserID != nil {
+		parsed, err := uuid.Parse(*e.AdminUserID)
+		if err != nil {
+			return fmt.Errorf("audit admin_user_id: %w", err)
+		}
+		uid = pgtype.UUID{Bytes: parsed, Valid: true}
+	}
+	var reqID pgtype.Text
+	if e.RequestID != nil {
+		reqID = pgtype.Text{String: *e.RequestID, Valid: true}
+	}
+	return r.q.InsertAdminAuditEvent(ctx, InsertAdminAuditEventParams{
+		AdminUserID: uid,
+		AuthMethod:  e.AuthMethod,
+		Method:      e.Method,
+		Path:        e.Path,
+		Status:      int32(e.Status),
+		ClientIp:    e.ClientIP,
+		RequestID:   reqID,
+	})
+}
+
+func (r *AdminRepo) ListAuditEvents(ctx context.Context, limit int, beforeID *int64) ([]admin.AuditEvent, error) {
+	var before pgtype.Int8
+	if beforeID != nil {
+		before = pgtype.Int8{Int64: *beforeID, Valid: true}
+	}
+	rows, err := r.q.ListAdminAuditEvents(ctx, ListAdminAuditEventsParams{Limit: int32(limit), BeforeID: before})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]admin.AuditEvent, 0, len(rows))
+	for _, row := range rows {
+		var uid, email, reqID *string
+		if row.AdminUserID.Valid {
+			s := uuid.UUID(row.AdminUserID.Bytes).String()
+			uid = &s
+		}
+		if row.Email.Valid {
+			s := row.Email.String
+			email = &s
+		}
+		if row.RequestID.Valid {
+			s := row.RequestID.String
+			reqID = &s
+		}
+		out = append(out, admin.AuditEvent{
+			ID:          row.ID,
+			AdminUserID: uid,
+			Email:       email,
+			AuthMethod:  row.AuthMethod,
+			Method:      row.Method,
+			Path:        row.Path,
+			Status:      int(row.Status),
+			ClientIP:    row.ClientIp,
+			RequestID:   reqID,
+			CreatedAt:   row.CreatedAt.UTC(),
 		})
 	}
 	return out, nil

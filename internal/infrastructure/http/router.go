@@ -145,7 +145,11 @@ func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error
 	}
 
 	if h.Admin != nil || h.AdminAuth != nil {
-		admin := v1.Group("/admin", AdminAudit(), AdminCSRF(opts.AdminAllowedOrigins))
+		var auditRec AuditRecorder
+		if h.Admin != nil {
+			auditRec = h.Admin
+		}
+		admin := v1.Group("/admin", AdminAudit(auditRec), AdminCSRF(opts.AdminAllowedOrigins))
 		var sessions SessionAuthenticator
 		if h.AdminAuth != nil {
 			sessions = h.AdminAuth.Service()
@@ -171,13 +175,16 @@ func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error
 			authed.GET("/events", h.Admin.Events)
 			authed.GET("/events/breakdown", h.Admin.EventBreakdown)
 			authed.GET("/cache", h.Admin.CacheStats)
+			authed.GET("/audit", h.Admin.AuditEvents)
 			authed.GET("/jobs", h.Admin.Jobs)
+			authed.GET("/jobs/runs/:id", h.Admin.JobRun)
 			authed.GET("/jobs/schedules", h.Admin.JobSchedules)
 			authed.PATCH("/jobs/:job/schedule", h.Admin.UpdateJobSchedule)
 			authed.POST("/jobs/:job/run", h.Admin.RunJobNow)
 			authed.GET("/plan-limits", h.Admin.PlanLimits)
 			authed.PUT("/plan-limits/:plan/:feature", h.Admin.UpdatePlanLimit)
 			authed.GET("/city-packs", h.Admin.CityPacks)
+			authed.GET("/city-packs/:id", h.Admin.CityPackDetail)
 			authed.PATCH("/city-packs/:id", h.Admin.UpdateCityPack)
 			authed.GET("/spots", h.Admin.Spots)
 			authed.PATCH("/spots/:id", h.Admin.UpdateSpot)

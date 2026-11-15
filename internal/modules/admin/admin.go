@@ -20,6 +20,7 @@ var (
 	ErrInvalidFilter       = errors.New("invalid filter")
 	ErrInvalidJobSchedule  = errors.New("invalid job schedule")
 	ErrJobScheduleNotFound = errors.New("job schedule not found")
+	ErrJobRunNotFound      = errors.New("job run not found")
 	ErrInvalidCursor       = errors.New("invalid cursor")
 )
 
@@ -54,13 +55,30 @@ func ParseReportCursor(s string) (ReportCursor, error) {
 }
 
 type JobRun struct {
-	ID           int64      `json:"id"`
-	Job          string     `json:"job"`
-	StartedAt    time.Time  `json:"startedAt"`
-	FinishedAt   *time.Time `json:"finishedAt"`
-	Status       string     `json:"status"`
-	RowsAffected *int       `json:"rowsAffected"`
-	Error        *string    `json:"error"`
+	ID           int64           `json:"id"`
+	Job          string          `json:"job"`
+	CityPackID   *string         `json:"cityPackId"`
+	StartedAt    time.Time       `json:"startedAt"`
+	FinishedAt   *time.Time      `json:"finishedAt"`
+	Status       string          `json:"status"`
+	RowsAffected *int            `json:"rowsAffected"`
+	Error        *string         `json:"error"`
+	Stats        json.RawMessage `json:"stats,omitempty"`
+}
+
+// AuditEvent is one recorded admin mutation: method + path + outcome.
+// AdminUserID/Email are nil for bearer-token (scripts/CI) calls.
+type AuditEvent struct {
+	ID          int64     `json:"id"`
+	AdminUserID *string   `json:"adminUserId"`
+	Email       *string   `json:"email"`
+	AuthMethod  string    `json:"authMethod"`
+	Method      string    `json:"method"`
+	Path        string    `json:"path"`
+	Status      int       `json:"status"`
+	ClientIP    string    `json:"clientIp"`
+	RequestID   *string   `json:"requestId"`
+	CreatedAt   time.Time `json:"createdAt"`
 }
 
 type JobSchedule struct {

@@ -60,6 +60,20 @@ func (h *AdminHandler) CityPacks(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"items": packs}})
 }
 
+func (h *AdminHandler) CityPackDetail(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidID, "Invalid id", "expected a UUID")
+		return
+	}
+	d, err := h.svc.CityPackDetail(c.Request.Context(), id)
+	if err != nil {
+		h.writeConsoleError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": d})
+}
+
 type statusRequest struct {
 	Status string `json:"status"`
 }

@@ -218,7 +218,7 @@ func TestAdminAuth(t *testing.T) {
 	build := func(token string) *gin.Engine {
 		r := gin.New()
 		r.Use(RequestID())
-		g := r.Group("/admin", AdminAudit(), AdminAuth(token, nil, ratelimit.New(ratelimit.PerMinute(60, 3))))
+		g := r.Group("/admin", AdminAudit(nil), AdminAuth(token, nil, ratelimit.New(ratelimit.PerMinute(60, 3))))
 		g.GET("/x", ok)
 		g.POST("/x", ok)
 		return r
@@ -263,7 +263,7 @@ func TestAdminAuditLogsMutatingRequestsWithoutToken(t *testing.T) {
 
 	r := gin.New()
 	r.Use(RequestID())
-	g := r.Group("/admin", AdminAudit(), AdminAuth("s3cret", nil, ratelimit.New(ratelimit.PerMinute(60, 5))))
+	g := r.Group("/admin", AdminAudit(nil), AdminAuth("s3cret", nil, ratelimit.New(ratelimit.PerMinute(60, 5))))
 	g.GET("/x", ok)
 	g.POST("/x", ok)
 
@@ -307,7 +307,7 @@ func TestAdminAuthSessionCookie(t *testing.T) {
 	sessions := fakeSessions{validToken: "tok-good", userID: uid}
 	r := gin.New()
 	r.Use(RequestID())
-	g := r.Group("/admin", AdminAudit(), AdminAuth("", sessions, ratelimit.New(ratelimit.PerMinute(60, 50))))
+	g := r.Group("/admin", AdminAudit(nil), AdminAuth("", sessions, ratelimit.New(ratelimit.PerMinute(60, 50))))
 	g.GET("/x", func(c *gin.Context) {
 		ok(c)
 	})

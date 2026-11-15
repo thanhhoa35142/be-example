@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/thanhhoa35142/be-example/internal/modules/admin"
 	"github.com/thanhhoa35142/be-example/internal/modules/adminauth"
 	"github.com/thanhhoa35142/be-example/internal/platform/httpx"
 	"github.com/thanhhoa35142/be-example/internal/platform/ratelimit"
@@ -113,20 +114,46 @@ func BodyLimit(def int64, overrides map[string]int64) gin.HandlerFunc {
 	}
 }
 
-func AdminAudit() gin.HandlerFunc {
+// AuditRecorder persists an admin mutation record. Implemented by the admin
+// service; nil disables DB persistence (tests).
+type AuditRecorder interface {
+	RecordAudit(ctx context.Context, e admin.AuditEvent) error
+}
+
+func AdminAudit(rec AuditRecorder) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Next()
 		if isSafeMethod(c.Request.Method) {
 			return
 		}
+		method := c.GetString("adminAuthMethod")
+		entry := admin.AuditEvent{
+			AuthMethod: method,
+			Method:     c.Request.Method,
+			Path:       c.Request.URL.Path,
+			Status:     c.Writer.Status(),
+			ClientIP:   c.ClientIP(),
+		}
+		if uid := c.GetString("adminUserID"); uid != "" {
+			entry.AdminUserID = &uid
+		}
+		if rid := c.GetString("requestID"); rid != "" {
+			entry.RequestID = &rid
+		}
 		slog.InfoContext(c.Request.Context(), "admin audit",
 			"request_id", c.GetString("requestID"),
-			"method", c.Request.Method,
-			"path", c.Request.URL.Path,
-			"client_ip", c.ClientIP(),
+			"method", entry.Method,
+			"path", entry.Path,
+			"client_ip", entry.ClientIP,
 			"admin_user_id", c.GetString("adminUserID"),
-			"status", c.Writer.Status(),
+			"status", entry.Status,
 		)
+		if rec != nil {
+			if err := rec.RecordAudit(c.Request.Context(), entry); err != nil {
+				slog.ErrorContext(c.Request.Context(), "admin audit write failed",
+					"request_id", entry.RequestID, "error", err)
+			}
+		}
 	}
 }
 

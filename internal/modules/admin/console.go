@@ -56,6 +56,28 @@ var packTransitions = map[string][]string{
 	"retired": {},
 }
 
+// CityPackDetail embeds CityPack (id/slug/name/country/tz/status/counts/
+// nextStatuses) plus the operational detail shown on the pack detail page.
+type CityPackDetail struct {
+	CityPack
+	OsmExtract       *string     `json:"osmExtract"`
+	ExtractFetchedAt *time.Time  `json:"extractFetchedAt"`
+	PendingReports   int64       `json:"pendingReports"`
+	SpotCounts       []NameCount `json:"spotCounts"`
+	IngestRoles      []NameCount `json:"ingestRoles"`
+	ExcludeReasons   []NameCount `json:"excludeReasons"`
+	RecentRuns       []JobRun    `json:"recentRuns"`
+	RecentSpots      []CitySpot  `json:"recentSpots"`
+}
+
+type CitySpot struct {
+	ID        uuid.UUID `json:"id"`
+	Name      *string   `json:"name"`
+	Kind      string    `json:"kind"`
+	Status    string    `json:"status"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
 func nextPackStatuses(status string, imported bool) []string {
 	out := []string{}
 	for _, next := range packTransitions[status] {
@@ -148,6 +170,15 @@ func (s *Service) CityPacks(ctx context.Context) ([]CityPack, error) {
 		packs[i].NextStatuses = nextPackStatuses(packs[i].Status, packs[i].LastImportAt != nil)
 	}
 	return packs, nil
+}
+
+func (s *Service) CityPackDetail(ctx context.Context, id uuid.UUID) (CityPackDetail, error) {
+	d, err := s.repo.CityPackDetail(ctx, id)
+	if err != nil {
+		return CityPackDetail{}, err
+	}
+	d.NextStatuses = nextPackStatuses(d.Status, d.LastImportAt != nil)
+	return d, nil
 }
 
 func (s *Service) SetCityPackStatus(ctx context.Context, id uuid.UUID, status string) error {

@@ -16,6 +16,26 @@ WHERE (sqlc.narg('before_id')::bigint IS NULL OR id < sqlc.narg('before_id'))
 ORDER BY id DESC
 LIMIT $1;
 
+-- name: InsertAdminAuditEvent :exec
+INSERT INTO t_admin_audit_events
+    (admin_user_id, auth_method, method, path, status, client_ip, request_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7);
+
+-- name: ListAdminAuditEvents :many
+SELECT e.id, e.admin_user_id, u.email, e.auth_method, e.method, e.path,
+       e.status, e.client_ip, e.request_id, e.created_at
+FROM t_admin_audit_events e
+LEFT JOIN t_admin_users u ON u.id = e.admin_user_id
+WHERE (sqlc.narg('before_id')::bigint IS NULL OR e.id < sqlc.narg('before_id'))
+ORDER BY e.id DESC
+LIMIT $1;
+
+-- name: GetJobRun :one
+SELECT id, job, city_pack_id, started_at, finished_at, status,
+       rows_affected, error, stats
+FROM t_job_runs
+WHERE id = $1;
+
 -- name: AbandonJobRuns :exec
 -- Called after a job wins its advisory lock: any 'running' rows for that job
 -- are orphans from a dead worker and move to 'abandoned'.
@@ -239,6 +259,53 @@ SELECT status, last_import_at FROM t_city_packs WHERE id = $1;
 
 -- name: UpdateCityPackStatus :execrows
 UPDATE t_city_packs SET status = $2 WHERE id = $1;
+
+-- name: GetAdminCityPack :one
+SELECT id, slug, name, country, tz, status, osm_extract,
+       last_import_at, extract_fetched_at
+FROM t_city_packs
+WHERE id = $1;
+
+-- name: CountAdminCityPackSpotsByStatus :many
+SELECT status, count(*)::bigint AS count
+FROM t_spots
+WHERE city_pack_id = $1
+GROUP BY status;
+
+-- name: CountAdminCityPackIngestFeatures :many
+SELECT role, count(*)::bigint AS count
+FROM t_ingest_features
+WHERE pack_id = $1
+GROUP BY role;
+
+-- name: CountAdminCityPackExcludeReasons :many
+SELECT exclude_reason, count(*)::bigint AS count
+FROM t_ingest_features
+WHERE pack_id = $1 AND role = 'excluded' AND exclude_reason IS NOT NULL
+GROUP BY exclude_reason
+ORDER BY count DESC
+LIMIT 10;
+
+-- name: CountAdminCityPackPendingReports :one
+SELECT count(*)::bigint
+FROM t_spot_reports r
+JOIN t_spots s ON s.id = r.spot_id
+WHERE s.city_pack_id = $1 AND r.status = 'pending';
+
+-- name: ListAdminCityPackJobRuns :many
+SELECT id, job, city_pack_id, started_at, finished_at, status,
+       rows_affected, error, stats
+FROM t_job_runs
+WHERE city_pack_id = $1
+ORDER BY id DESC
+LIMIT $2;
+
+-- name: ListAdminCityPackSpots :many
+SELECT id, name, kind, status, updated_at
+FROM t_spots
+WHERE city_pack_id = $1
+ORDER BY updated_at DESC
+LIMIT $2;
 
 -- name: SearchAdminSpots :many
 -- Staff lookup across every status. `q` is an already-escaped ILIKE pattern.
