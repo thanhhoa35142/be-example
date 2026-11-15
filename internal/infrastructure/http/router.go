@@ -38,6 +38,7 @@ type Handlers struct {
 	Entitlement     *EntitlementHandler
 	Admin           *AdminHandler
 	AdminAuth       *AdminAuthHandler
+	GoAuth          *GoAuthHandler
 	Events          *EventsHandler
 	Digest          *DigestHandler
 	Share           *ShareHandler
@@ -167,6 +168,12 @@ func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error
 			authed.POST("/auth/recovery-codes", h.AdminAuth.RecoveryCodes)
 			authed.GET("/auth/sessions", h.AdminAuth.Sessions)
 			authed.POST("/auth/sessions/revoke-others", h.AdminAuth.RevokeOtherSessions)
+		}
+		if h.GoAuth != nil {
+			authed.GET("/integrations/google/connect", h.GoAuth.Connect)
+			authed.GET("/integrations/google/callback", h.GoAuth.Callback)
+			authed.GET("/integrations/google", h.GoAuth.Status)
+			authed.DELETE("/integrations/google", h.GoAuth.Disconnect)
 		}
 		if h.Admin != nil {
 			authed.GET("/overview", h.Admin.Overview)

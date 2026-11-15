@@ -52,6 +52,10 @@ type Config struct {
 	MFAMaxFailures      int
 	MFALockoutTTL       time.Duration
 
+	GoogleClientID     string
+	GoogleClientSecret string
+	GoogleRedirectURI  string
+
 	DBStatementTimeout string
 	DBLockTimeout      string
 	DBMaxConns         int32
@@ -115,6 +119,10 @@ func Load() (Config, error) {
 		MFASessionIdleTTL:   mfaSessionIdleTTL,
 		MFAMaxFailures:      getEnvInt("MFA_MAX_FAILURES", 5),
 		MFALockoutTTL:       mfaLockoutTTL,
+
+		GoogleClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
+		GoogleClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
+		GoogleRedirectURI:  os.Getenv("GOOGLE_REDIRECT_URI"),
 
 		DBStatementTimeout: getEnv("DB_STATEMENT_TIMEOUT", "5s"),
 		DBLockTimeout:      getEnv("DB_LOCK_TIMEOUT", "2s"),

@@ -32,6 +32,16 @@ type TAdminAuthChallenge struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+type TAdminGoogleToken struct {
+	AdminUserID  uuid.UUID `json:"admin_user_id"`
+	GoogleSub    string    `json:"google_sub"`
+	GoogleEmail  string    `json:"google_email"`
+	RefreshToken []byte    `json:"refresh_token"`
+	Scopes       string    `json:"scopes"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
 type TAdminRecoveryCode struct {
 	ID          uuid.UUID          `json:"id"`
 	AdminUserID uuid.UUID          `json:"admin_user_id"`

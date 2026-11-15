@@ -25,6 +25,7 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/modules/entitlement"
 	"github.com/thanhhoa35142/be-example/internal/modules/events"
 	"github.com/thanhhoa35142/be-example/internal/modules/geo"
+	"github.com/thanhhoa35142/be-example/internal/modules/goauth"
 	"github.com/thanhhoa35142/be-example/internal/modules/notifier"
 	"github.com/thanhhoa35142/be-example/internal/modules/recommendations"
 	"github.com/thanhhoa35142/be-example/internal/modules/reports"
@@ -135,6 +136,32 @@ func main() {
 		logger.Warn("MFA_SECRET_KEYS unset: admin account login disabled, MFA_SECRET_KEYS_CLI bearer only")
 	}
 
+	var goAuthHandler *infrahttp.GoAuthHandler
+	if cfg.GoogleClientID != "" || cfg.GoogleClientSecret != "" || cfg.GoogleRedirectURI != "" {
+		if cfg.MFASecretKeys == "" {
+			logger.Warn("GOOGLE_* set but MFA_SECRET_KEYS unset: Google account link disabled")
+		} else {
+			goAuthCfg := goauth.Config{
+				ClientID:     cfg.GoogleClientID,
+				ClientSecret: cfg.GoogleClientSecret,
+				RedirectURL:  cfg.GoogleRedirectURI,
+			}
+			key, err := hex.DecodeString(cfg.MFASecretKeys)
+			if err != nil || len(key) != 32 {
+				log.Fatalf("MFA_SECRET_KEYS must be 64 hex chars (32 bytes)")
+			}
+			goAuthSvc, err := goauth.NewService(persistence.NewGoAuthRepo(queries), key, goAuthCfg)
+			if err != nil {
+				log.Fatalf("goauth: %v", err)
+			}
+			if !goAuthCfg.Ready() {
+				logger.Warn("GOOGLE_CLIENT_ID/SECRET/REDIRECT_URI incomplete: Google account link disabled")
+			} else {
+				goAuthHandler = infrahttp.NewGoAuthHandler(goAuthSvc)
+			}
+		}
+	}
+
 	router, err := infrahttp.NewRouter(pool, infrahttp.Handlers{
 		Spots:           infrahttp.NewSpotsHandler(spotsSvc),
 		Recommendations: infrahttp.NewRecommendationsHandler(recSvc),
@@ -144,6 +171,7 @@ func main() {
 		Entitlement:     infrahttp.NewEntitlementHandler(entitlementSvc),
 		Admin:           infrahttp.NewAdminHandler(adminSvc, keysSvc),
 		AdminAuth:       adminAuthHandler,
+		GoAuth:          goAuthHandler,
 		Events:          infrahttp.NewEventsHandler(eventsSvc),
 		Digest:          infrahttp.NewDigestHandler(digestSvc),
 		Share: infrahttp.NewShareHandler(spotsSvc, infrahttp.ShareOptions{
