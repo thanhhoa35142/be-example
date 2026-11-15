@@ -332,7 +332,14 @@ func strParamOpt(s *string) pgtype.Text {
 }
 
 func (r *AdminRepo) Metrics(ctx context.Context, f admin.MetricsFilter) (admin.Metrics, error) {
-	var m admin.Metrics
+	// Slices must be non-nil: a nil slice marshals to null and the console's
+	// zod schemas expect arrays.
+	m := admin.Metrics{
+		Feedback:      []admin.VerdictCount{},
+		Reports:       []admin.ReportCount{},
+		Subscriptions: []admin.StatusCount{},
+		Deliveries:    []admin.DeliveryCount{},
+	}
 
 	scoreParams := ScoreDistributionParams{
 		FromTs: f.From, ToTs: f.To,
@@ -406,7 +413,10 @@ func (r *AdminRepo) Metrics(ctx context.Context, f admin.MetricsFilter) (admin.M
 }
 
 func (r *AdminRepo) EventSummary(ctx context.Context, f admin.MetricsFilter) (admin.EventSummary, error) {
-	var s admin.EventSummary
+	s := admin.EventSummary{
+		ByName: []admin.NameCount{},
+		ByDay:  []admin.DayCount{},
+	}
 	s.From, s.To = f.From, f.To
 	names, err := r.q.AdminEventNameCounts(ctx, AdminEventNameCountsParams{
 		FromTs: f.From, ToTs: f.To, Name: strParamOpt(f.EventName),
