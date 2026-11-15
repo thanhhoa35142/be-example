@@ -46,7 +46,7 @@ func (h *ReportsHandler) SpotReport(c *gin.Context) {
 }
 
 type crowdReportRequest struct {
-	Level    int `json:"level"`
+	Level int `json:"level"`
 }
 
 func (h *ReportsHandler) CrowdReport(c *gin.Context) {
@@ -69,9 +69,9 @@ func (h *ReportsHandler) CrowdReport(c *gin.Context) {
 }
 
 type scoreFeedbackRequest struct {
-	SpotID   string    `json:"spotId"`
-	TSHour   time.Time `json:"tsHour"`
-	Verdict  int       `json:"verdict"`
+	SpotID  string    `json:"spotId"`
+	TSHour  time.Time `json:"tsHour"`
+	Verdict int       `json:"verdict"`
 }
 
 func (h *ReportsHandler) ScoreFeedback(c *gin.Context) {

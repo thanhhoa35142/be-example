@@ -12,21 +12,21 @@ import (
 )
 
 type Config struct {
-	Port              string
-	MCPPort           string
-	DatabaseURL       string
-	RedisURL          string
-	WeatherProvider   string
-	WeatherH3Res      int
-	WeatherDailyLimit int
+	Port                   string
+	MCPPort                string
+	DatabaseURL            string
+	RedisURL               string
+	WeatherProvider        string
+	WeatherH3Res           int
+	WeatherDailyLimit      int
 	WeatherOpenMeteoURL    string
 	WeatherOpenMeteoModels string
-	RunMigrations     bool
-	OverpassURL       string
-	IngestExtractDir  string
-	IngestSource      string
-	OsmiumPBF         string
-	OsmiumCmd         string
+	RunMigrations          bool
+	OverpassURL            string
+	IngestExtractDir       string
+	IngestSource           string
+	OsmiumPBF              string
+	OsmiumCmd              string
 
 	AppEnv string
 
@@ -110,19 +110,19 @@ func Load() (Config, error) {
 		// full domain set). Empty models keeps public-API behavior.
 		WeatherOpenMeteoURL:    getEnv("OPEN_METEO_URL", ""),
 		WeatherOpenMeteoModels: getEnv("OPEN_METEO_MODELS", ""),
-		RunMigrations:     getEnv("RUN_MIGRATIONS", "true") != "false",
-		OverpassURL:       getEnv("OVERPASS_URL", "https://overpass-api.de/api/interpreter"),
-		IngestExtractDir:  getEnv("INGEST_EXTRACT_DIR", "./data/extracts"),
-		IngestSource:      getEnv("INGEST_SOURCE", "overpass"),
-		OsmiumPBF:         os.Getenv("OSMIUM_PBF"),
-		OsmiumCmd:         os.Getenv("OSMIUM_CMD"),
+		RunMigrations:          getEnv("RUN_MIGRATIONS", "true") != "false",
+		OverpassURL:            getEnv("OVERPASS_URL", "https://overpass-api.de/api/interpreter"),
+		IngestExtractDir:       getEnv("INGEST_EXTRACT_DIR", "./data/extracts"),
+		IngestSource:           getEnv("INGEST_SOURCE", "overpass"),
+		OsmiumPBF:              os.Getenv("OSMIUM_PBF"),
+		OsmiumCmd:              os.Getenv("OSMIUM_CMD"),
 
-		AppEnv:               appEnv,
-		AppStoreBundleID:     os.Getenv("APPSTORE_BUNDLE_ID"),
-		AppStoreAllowSandbox:  getEnv("APPSTORE_ALLOW_SANDBOX", sandboxDefault) != "false",
+		AppEnv:                 appEnv,
+		AppStoreBundleID:       os.Getenv("APPSTORE_BUNDLE_ID"),
+		AppStoreAllowSandbox:   getEnv("APPSTORE_ALLOW_SANDBOX", sandboxDefault) != "false",
 		AppStorePlusProductIDs: splitList(os.Getenv("APPSTORE_PLUS_PRODUCT_IDS")),
-		AppleAppIDs:          splitList(os.Getenv("APPLE_APP_IDS")),
-		AppStoreAppID:        strings.TrimSpace(os.Getenv("APPSTORE_APP_ID")),
+		AppleAppIDs:            splitList(os.Getenv("APPLE_APP_IDS")),
+		AppStoreAppID:          strings.TrimSpace(os.Getenv("APPSTORE_APP_ID")),
 
 		TrustedProxies: splitList(os.Getenv("TRUSTED_PROXIES")),
 		MaxBodyBytes:   int64(getEnvInt("BODY_MAX_BYTES", 64<<10)),

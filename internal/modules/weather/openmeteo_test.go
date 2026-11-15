@@ -16,13 +16,13 @@ func TestOpenMeteoSendsModelsParam(t *testing.T) {
 		gotQuery = r.URL.RawQuery
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"hourly": map[string]any{
-				"time":                     []string{"2026-01-01T00:00"},
-				"temperature_2m":           []any{10.0},
-				"apparent_temperature":     []any{8.0},
+				"time":                      []string{"2026-01-01T00:00"},
+				"temperature_2m":            []any{10.0},
+				"apparent_temperature":      []any{8.0},
 				"precipitation_probability": []any{20},
-				"wind_speed_10m":           []any{12.0},
-				"uv_index":                 []any{1.0},
-				"cloud_cover":              []any{50},
+				"wind_speed_10m":            []any{12.0},
+				"uv_index":                  []any{1.0},
+				"cloud_cover":               []any{50},
 			},
 		})
 	}))
