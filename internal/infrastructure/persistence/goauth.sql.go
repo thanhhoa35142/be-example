@@ -7,6 +7,7 @@ package persistence
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -21,20 +22,35 @@ func (q *Queries) DeleteAdminGoogleToken(ctx context.Context, adminUserID uuid.U
 }
 
 const getAdminGoogleToken = `-- name: GetAdminGoogleToken :one
-SELECT admin_user_id, google_sub, google_email, refresh_token, scopes, created_at, updated_at
+SELECT admin_user_id, google_sub, google_email, refresh_token, scopes,
+       gsc_site_url, ga4_property_id, created_at, updated_at
 FROM t_admin_google_tokens
 WHERE admin_user_id = $1
 `
 
-func (q *Queries) GetAdminGoogleToken(ctx context.Context, adminUserID uuid.UUID) (TAdminGoogleToken, error) {
+type GetAdminGoogleTokenRow struct {
+	AdminUserID   uuid.UUID `json:"admin_user_id"`
+	GoogleSub     string    `json:"google_sub"`
+	GoogleEmail   string    `json:"google_email"`
+	RefreshToken  []byte    `json:"refresh_token"`
+	Scopes        string    `json:"scopes"`
+	GscSiteUrl    string    `json:"gsc_site_url"`
+	Ga4PropertyID string    `json:"ga4_property_id"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+func (q *Queries) GetAdminGoogleToken(ctx context.Context, adminUserID uuid.UUID) (GetAdminGoogleTokenRow, error) {
 	row := q.db.QueryRow(ctx, getAdminGoogleToken, adminUserID)
-	var i TAdminGoogleToken
+	var i GetAdminGoogleTokenRow
 	err := row.Scan(
 		&i.AdminUserID,
 		&i.GoogleSub,
 		&i.GoogleEmail,
 		&i.RefreshToken,
 		&i.Scopes,
+		&i.GscSiteUrl,
+		&i.Ga4PropertyID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)

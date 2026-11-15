@@ -126,11 +126,79 @@ func (s *Service) Status(ctx context.Context, userID uuid.UUID) (*Status, error)
 		return nil, err
 	}
 	return &Status{
-		Email:     t.GoogleEmail,
-		Scopes:    t.Scopes,
-		CreatedAt: t.CreatedAt,
-		UpdatedAt: t.UpdatedAt,
+		Email:         t.GoogleEmail,
+		Scopes:        t.Scopes,
+		GSCSiteURL:    t.GSCSiteURL,
+		GA4PropertyID: t.GA4PropertyID,
+		CreatedAt:     t.CreatedAt,
+		UpdatedAt:     t.UpdatedAt,
 	}, nil
+}
+
+// SetConfig records which GSC site and GA4 property this link syncs.
+// Empty strings clear the selection.
+func (s *Service) SetConfig(ctx context.Context, userID uuid.UUID, gscSiteURL, ga4PropertyID string) error {
+	if _, err := s.repo.Get(ctx, userID); err != nil {
+		return err
+	}
+	return s.repo.SetConfig(ctx, userID, gscSiteURL, ga4PropertyID)
+}
+
+// LinkedAccounts lists every stored link for the sync worker. Tokens stay
+// sealed — callers get accounts, not credentials.
+func (s *Service) LinkedAccounts(ctx context.Context) ([]Account, error) {
+	tokens, err := s.repo.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	accounts := make([]Account, 0, len(tokens))
+	for _, t := range tokens {
+		accounts = append(accounts, Account{
+			AdminUserID:   t.AdminUserID,
+			GoogleSub:     t.GoogleSub,
+			GoogleEmail:   t.GoogleEmail,
+			GSCSiteURL:    t.GSCSiteURL,
+			GA4PropertyID: t.GA4PropertyID,
+			Scopes:        t.Scopes,
+		})
+	}
+	return accounts, nil
+}
+
+// AccessToken exchanges the stored refresh token for a short-lived access
+// token. Only the sync worker and the resources endpoint call this.
+func (s *Service) AccessToken(ctx context.Context, userID uuid.UUID) (string, error) {
+	t, err := s.repo.Get(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	plain, err := s.cipher.Open(t.RefreshToken)
+	if err != nil {
+		return "", err
+	}
+	form := url.Values{
+		"refresh_token": {string(plain)},
+		"client_id":     {s.cfg.ClientID},
+		"client_secret": {s.cfg.ClientSecret},
+		"grant_type":    {"refresh_token"},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL,
+		strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	res, err := s.http.Do(req)
+	if err != nil {
+		return "", ErrExchangeFailed
+	}
+	defer func() { _ = res.Body.Close() }()
+	var tok tokenResponse
+	if err := json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&tok); err != nil ||
+		res.StatusCode != http.StatusOK || tok.AccessToken == "" {
+		return "", ErrExchangeFailed
+	}
+	return tok.AccessToken, nil
 }
 
 // Disconnect removes the stored link and best-effort revokes the token at
@@ -235,7 +303,7 @@ func (s *Service) exchangeCode(ctx context.Context, code string) (*tokenResponse
 	if err != nil {
 		return nil, ErrExchangeFailed
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	var tok tokenResponse
 	if err := json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&tok); err != nil || res.StatusCode != http.StatusOK {
 		return nil, ErrExchangeFailed
@@ -253,7 +321,7 @@ func (s *Service) userInfo(ctx context.Context, accessToken string) (email, sub 
 	if err != nil {
 		return "", "", ErrUserInfoFailed
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	var info struct {
 		Email string `json:"email"`
 		Sub   string `json:"sub"`
@@ -277,6 +345,6 @@ func (s *Service) revoke(ctx context.Context, token string) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	res, err := s.http.Do(req)
 	if err == nil {
-		res.Body.Close()
+		_ = res.Body.Close()
 	}
 }

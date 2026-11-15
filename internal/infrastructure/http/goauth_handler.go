@@ -88,12 +88,75 @@ func (h *GoAuthHandler) Status(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{
-		"linked":    true,
-		"email":     st.Email,
-		"scopes":    st.Scopes,
-		"createdAt": st.CreatedAt,
-		"updatedAt": st.UpdatedAt,
+		"linked":        true,
+		"email":         st.Email,
+		"scopes":        st.Scopes,
+		"gscSiteUrl":    st.GSCSiteURL,
+		"ga4PropertyId": st.GA4PropertyID,
+		"createdAt":     st.CreatedAt,
+		"updatedAt":     st.UpdatedAt,
 	}})
+}
+
+// Resources lists the GSC sites and GA4 properties the linked Google
+// account can read, so the console can offer pickers for sync config.
+func (h *GoAuthHandler) Resources(c *gin.Context) {
+	id, ok := h.adminUserID(c)
+	if !ok {
+		return
+	}
+	ctx := c.Request.Context()
+	token, err := h.svc.AccessToken(ctx, id)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	sites, err := h.svc.ListGSCSites(ctx, token)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	props, err := h.svc.ListGA4Properties(ctx, token)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{
+		"sites":      sites,
+		"properties": props,
+	}})
+}
+
+// Config saves which GSC site and GA4 property the daily sync pulls.
+func (h *GoAuthHandler) Config(c *gin.Context) {
+	id, ok := h.adminUserID(c)
+	if !ok {
+		return
+	}
+	var body struct {
+		GSCSiteURL    string `json:"gscSiteUrl"`
+		GA4PropertyID string `json:"ga4PropertyId"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody,
+			"Invalid body", "expected {gscSiteUrl, ga4PropertyId}")
+		return
+	}
+	if len(body.GSCSiteURL) > 2048 || len(body.GA4PropertyID) > 256 {
+		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody,
+			"Invalid body", "value too long")
+		return
+	}
+	if err := h.svc.SetConfig(c.Request.Context(), id, body.GSCSiteURL, body.GA4PropertyID); err != nil {
+		if errors.Is(err, goauth.ErrNotFound) {
+			httpx.WriteProblem(c, http.StatusNotFound, "not_linked",
+				"Google account not linked", "connect a Google account first")
+			return
+		}
+		h.writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"status": "saved"}})
 }
 
 func (h *GoAuthHandler) Disconnect(c *gin.Context) {

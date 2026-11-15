@@ -9,7 +9,8 @@ SET google_sub = EXCLUDED.google_sub,
     updated_at = now();
 
 -- name: GetAdminGoogleToken :one
-SELECT admin_user_id, google_sub, google_email, refresh_token, scopes, created_at, updated_at
+SELECT admin_user_id, google_sub, google_email, refresh_token, scopes,
+       gsc_site_url, ga4_property_id, created_at, updated_at
 FROM t_admin_google_tokens
 WHERE admin_user_id = $1;
 

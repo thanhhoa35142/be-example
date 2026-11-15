@@ -39,6 +39,7 @@ type Handlers struct {
 	Admin           *AdminHandler
 	AdminAuth       *AdminAuthHandler
 	GoAuth          *GoAuthHandler
+	Traffic         *TrafficHandler
 	Events          *EventsHandler
 	Digest          *DigestHandler
 	Share           *ShareHandler
@@ -173,7 +174,13 @@ func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error
 			authed.GET("/integrations/google/connect", h.GoAuth.Connect)
 			authed.GET("/integrations/google/callback", h.GoAuth.Callback)
 			authed.GET("/integrations/google", h.GoAuth.Status)
+			authed.PUT("/integrations/google/config", h.GoAuth.Config)
+			authed.GET("/integrations/google/resources", h.GoAuth.Resources)
 			authed.DELETE("/integrations/google", h.GoAuth.Disconnect)
+		}
+		if h.Traffic != nil {
+			authed.GET("/traffic/gsc", h.Traffic.Gsc)
+			authed.GET("/traffic/ga4", h.Traffic.Ga4)
 		}
 		if h.Admin != nil {
 			authed.GET("/overview", h.Admin.Overview)

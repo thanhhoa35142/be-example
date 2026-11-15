@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -24,11 +25,13 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/modules/digest"
 	"github.com/thanhhoa35142/be-example/internal/modules/entitlement"
 	"github.com/thanhhoa35142/be-example/internal/modules/geo"
+	"github.com/thanhhoa35142/be-example/internal/modules/goauth"
 	"github.com/thanhhoa35142/be-example/internal/modules/holidays"
 	"github.com/thanhhoa35142/be-example/internal/modules/ingest"
 	"github.com/thanhhoa35142/be-example/internal/modules/ingest/osm"
 	"github.com/thanhhoa35142/be-example/internal/modules/notifier"
 	"github.com/thanhhoa35142/be-example/internal/modules/scoring"
+	"github.com/thanhhoa35142/be-example/internal/modules/traffic"
 	"github.com/thanhhoa35142/be-example/internal/modules/weather"
 	"github.com/thanhhoa35142/be-example/internal/platform/cache"
 	"github.com/thanhhoa35142/be-example/internal/platform/config"
@@ -185,6 +188,32 @@ func main() {
 	crowdSvc := crowd.NewService(persistence.NewCrowdRepo(queries))
 	holidaysSvc := holidays.NewService(persistence.NewHolidaysRepo(queries))
 	adminSvc := admin.NewService(persistence.NewAdminRepo(queries))
+
+	// Google traffic sync needs the OAuth link config + the sealing key.
+	// Without it the job still registers (so the schedule row resolves) but
+	// Sync() is a no-op.
+	var trafficSvc *traffic.Service
+	if cfg.GoogleClientID != "" && cfg.GoogleClientSecret != "" &&
+		cfg.GoogleRedirectURI != "" && cfg.MFASecretKeys != "" {
+		if key, err := hex.DecodeString(cfg.MFASecretKeys); err == nil && len(key) == 32 {
+			if goAuthSvc, err := goauth.NewService(persistence.NewGoAuthRepo(queries), key, goauth.Config{
+				ClientID:     cfg.GoogleClientID,
+				ClientSecret: cfg.GoogleClientSecret,
+				RedirectURL:  cfg.GoogleRedirectURI,
+			}); err == nil {
+				trafficSvc = traffic.NewService(goAuthSvc, persistence.NewTrafficRepo(queries), logger)
+			} else {
+				logger.Warn("google sync disabled: goauth init failed", "error", err)
+			}
+		} else {
+			logger.Warn("google sync disabled: MFA_SECRET_KEYS is not 64 hex chars")
+		}
+	} else {
+		logger.Info("google sync disabled: GOOGLE_* or MFA_SECRET_KEYS not configured")
+	}
+	if trafficSvc == nil {
+		trafficSvc = traffic.NewService(nil, persistence.NewTrafficRepo(queries), logger)
+	}
 	entitlementSvc := entitlement.NewService(persistence.NewEntitlementRepo(queries, pool))
 	alertsRepo := persistence.NewAlertsRepo(queries, pool)
 	apnsClient, err := notifier.ClientFromEnv()
@@ -477,6 +506,29 @@ func main() {
 			},
 		},
 		{
+			name:         "google.sync",
+			initialDelay: 7 * time.Minute,
+			fn: func(ctx context.Context) error {
+				stats, err := trafficSvc.Sync(ctx)
+				if bag, ok := ctx.Value(jobStatsKey{}).(*jobStatsBag); ok && stats != nil {
+					bag.set("accounts", stats.Accounts)
+					bag.set("synced", stats.Synced)
+					bag.set("skipped", stats.Skipped)
+					bag.set("failed", stats.Failed)
+					bag.set("gsc_rows", stats.GscRows)
+					bag.set("ga4_rows", stats.Ga4Rows)
+				}
+				if err != nil {
+					return err
+				}
+				logger.Info("google sync done",
+					"accounts", stats.Accounts, "synced", stats.Synced,
+					"skipped", stats.Skipped, "failed", stats.Failed,
+					"gsc_rows", stats.GscRows, "ga4_rows", stats.Ga4Rows)
+				return nil
+			},
+		},
+		{
 			name:         "retention.purge",
 			initialDelay: 10 * time.Minute,
 
@@ -640,8 +692,8 @@ func executeJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, ad
 	if len(statsBag.m) > 0 {
 		statsJSON, _ = json.Marshal(statsBag.m)
 	}
-	switch {
-	case jobErr == nil:
+	switch jobErr {
+	case nil:
 		logger.Info("job ok", "job", j.name)
 		if runID != 0 {
 			adminSvc.RecordJobFinish(ctx, runID, "succeeded", nil, nil, statsJSON)

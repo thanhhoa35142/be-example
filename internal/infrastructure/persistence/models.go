@@ -33,13 +33,15 @@ type TAdminAuthChallenge struct {
 }
 
 type TAdminGoogleToken struct {
-	AdminUserID  uuid.UUID `json:"admin_user_id"`
-	GoogleSub    string    `json:"google_sub"`
-	GoogleEmail  string    `json:"google_email"`
-	RefreshToken []byte    `json:"refresh_token"`
-	Scopes       string    `json:"scopes"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	AdminUserID   uuid.UUID `json:"admin_user_id"`
+	GoogleSub     string    `json:"google_sub"`
+	GoogleEmail   string    `json:"google_email"`
+	RefreshToken  []byte    `json:"refresh_token"`
+	Scopes        string    `json:"scopes"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+	GscSiteUrl    string    `json:"gsc_site_url"`
+	Ga4PropertyID string    `json:"ga4_property_id"`
 }
 
 type TAdminRecoveryCode struct {
@@ -391,6 +393,41 @@ type TSubscription struct {
 	RevokedAt             pgtype.Timestamptz `json:"revoked_at"`
 	LastSignedDate        time.Time          `json:"last_signed_date"`
 	UpdatedAt             time.Time          `json:"updated_at"`
+}
+
+type TTrafficGa4Daily struct {
+	Date                  pgtype.Date   `json:"date"`
+	PropertyID            string        `json:"property_id"`
+	Sessions              int64         `json:"sessions"`
+	TotalUsers            int64         `json:"total_users"`
+	NewUsers              int64         `json:"new_users"`
+	PageViews             int64         `json:"page_views"`
+	EngagementRate        pgtype.Float8 `json:"engagement_rate"`
+	AvgSessionDurationSec pgtype.Float8 `json:"avg_session_duration_sec"`
+	SyncedAt              time.Time     `json:"synced_at"`
+}
+
+type TTrafficGscDaily struct {
+	Date        pgtype.Date `json:"date"`
+	SiteUrl     string      `json:"site_url"`
+	Clicks      int64       `json:"clicks"`
+	Impressions int64       `json:"impressions"`
+	Ctr         float64     `json:"ctr"`
+	Position    float64     `json:"position"`
+	SyncedAt    time.Time   `json:"synced_at"`
+}
+
+type TTrafficGscDim struct {
+	SiteUrl     string      `json:"site_url"`
+	Dimension   string      `json:"dimension"`
+	Key         string      `json:"key"`
+	Clicks      int64       `json:"clicks"`
+	Impressions int64       `json:"impressions"`
+	Ctr         float64     `json:"ctr"`
+	Position    float64     `json:"position"`
+	PeriodStart pgtype.Date `json:"period_start"`
+	PeriodEnd   pgtype.Date `json:"period_end"`
+	SyncedAt    time.Time   `json:"synced_at"`
 }
 
 type TWeatherHourlyForecast struct {

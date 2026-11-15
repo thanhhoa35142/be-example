@@ -38,6 +38,7 @@ var jobScheduleLimits = map[string]jobScheduleLimit{
 	"retention.purge":        {min: 60 * 60, max: 30 * 24 * 60 * 60, desc: "Delete expired job runs, events and reports"},
 	"ingest.osm":             {min: 60 * 60, max: 7 * 24 * 60 * 60, desc: "Import OSM city packs"},
 	"ingest.extract.refresh": {min: 24 * 60 * 60, max: 30 * 24 * 60 * 60, desc: "Download fresh OSM extracts"},
+	"google.sync":            {min: 60 * 60, max: 7 * 24 * 60 * 60, desc: "Sync Search Console + GA4 traffic data"},
 }
 
 type Service struct {

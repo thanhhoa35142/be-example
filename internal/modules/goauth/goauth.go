@@ -35,25 +35,42 @@ func (c Config) Ready() bool {
 // Token is the stored link. RefreshToken is the sealed (encrypted) value;
 // callers must never see plaintext outside the service.
 type Token struct {
-	AdminUserID  uuid.UUID
-	GoogleSub    string
-	GoogleEmail  string
-	RefreshToken []byte
-	Scopes       string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	AdminUserID   uuid.UUID
+	GoogleSub     string
+	GoogleEmail   string
+	RefreshToken  []byte
+	Scopes        string
+	GSCSiteURL    string
+	GA4PropertyID string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
 // Status is the safe public view — no token material.
 type Status struct {
-	Email     string    `json:"email"`
-	Scopes    string    `json:"scopes"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	Email         string    `json:"email"`
+	Scopes        string    `json:"scopes"`
+	GSCSiteURL    string    `json:"gscSiteUrl"`
+	GA4PropertyID string    `json:"ga4PropertyId"`
+	CreatedAt     time.Time `json:"createdAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
+}
+
+// Account is the worker-facing view of a linked Google account: enough to
+// sync traffic data, never any token material.
+type Account struct {
+	AdminUserID   uuid.UUID
+	GoogleSub     string
+	GoogleEmail   string
+	GSCSiteURL    string
+	GA4PropertyID string
+	Scopes        string
 }
 
 type Repository interface {
 	Upsert(ctx context.Context, t Token) error
 	Get(ctx context.Context, userID uuid.UUID) (*Token, error)
+	List(ctx context.Context) ([]Token, error)
+	SetConfig(ctx context.Context, userID uuid.UUID, gscSiteURL, ga4PropertyID string) error
 	Delete(ctx context.Context, userID uuid.UUID) error
 }

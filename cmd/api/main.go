@@ -30,6 +30,7 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/modules/recommendations"
 	"github.com/thanhhoa35142/be-example/internal/modules/reports"
 	"github.com/thanhhoa35142/be-example/internal/modules/spots"
+	"github.com/thanhhoa35142/be-example/internal/modules/traffic"
 	"github.com/thanhhoa35142/be-example/internal/platform/config"
 	platformlog "github.com/thanhhoa35142/be-example/internal/platform/log"
 	"github.com/thanhhoa35142/be-example/internal/platform/ratelimit"
@@ -136,6 +137,7 @@ func main() {
 		logger.Warn("MFA_SECRET_KEYS unset: admin account login disabled, MFA_SECRET_KEYS_CLI bearer only")
 	}
 
+	var goAuthSvc *goauth.Service
 	var goAuthHandler *infrahttp.GoAuthHandler
 	if cfg.GoogleClientID != "" || cfg.GoogleClientSecret != "" || cfg.GoogleRedirectURI != "" {
 		if cfg.MFASecretKeys == "" {
@@ -150,17 +152,22 @@ func main() {
 			if err != nil || len(key) != 32 {
 				log.Fatalf("MFA_SECRET_KEYS must be 64 hex chars (32 bytes)")
 			}
-			goAuthSvc, err := goauth.NewService(persistence.NewGoAuthRepo(queries), key, goAuthCfg)
+			svc, err := goauth.NewService(persistence.NewGoAuthRepo(queries), key, goAuthCfg)
 			if err != nil {
 				log.Fatalf("goauth: %v", err)
 			}
 			if !goAuthCfg.Ready() {
 				logger.Warn("GOOGLE_CLIENT_ID/SECRET/REDIRECT_URI incomplete: Google account link disabled")
 			} else {
-				goAuthHandler = infrahttp.NewGoAuthHandler(goAuthSvc)
+				goAuthSvc = svc
+				goAuthHandler = infrahttp.NewGoAuthHandler(svc)
 			}
 		}
 	}
+
+	// Traffic reads work even without Google config — they just return empty
+	// until the worker has synced something.
+	trafficSvc := traffic.NewService(goAuthSvc, persistence.NewTrafficRepo(queries), logger)
 
 	router, err := infrahttp.NewRouter(pool, infrahttp.Handlers{
 		Spots:           infrahttp.NewSpotsHandler(spotsSvc),
@@ -172,6 +179,7 @@ func main() {
 		Admin:           infrahttp.NewAdminHandler(adminSvc, keysSvc),
 		AdminAuth:       adminAuthHandler,
 		GoAuth:          goAuthHandler,
+		Traffic:         infrahttp.NewTrafficHandler(trafficSvc),
 		Events:          infrahttp.NewEventsHandler(eventsSvc),
 		Digest:          infrahttp.NewDigestHandler(digestSvc),
 		Share: infrahttp.NewShareHandler(spotsSvc, infrahttp.ShareOptions{
