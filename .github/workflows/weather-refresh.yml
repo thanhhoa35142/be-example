@@ -87,7 +87,7 @@ jobs:
 
       - name: Restore dump
         run: |
-          docker run --rm --network host -v /tmp:/w postgis/postgis:18-3.6 \
+          docker run --rm --network host -e PGPASSWORD=test -v /tmp:/w postgis/postgis:18-3.6 \
             pg_restore -h localhost -U postgres -d picnic_test --no-owner --no-privileges /w/picnic_test.dump
 
       - name: Sanity check cells
