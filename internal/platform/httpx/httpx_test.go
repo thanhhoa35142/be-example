@@ -73,7 +73,7 @@ func TestTransportRetries429ThenSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status %d", resp.StatusCode)
 	}
@@ -98,7 +98,7 @@ func TestTransportDoesNotRetry404(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status %d", resp.StatusCode)
 	}
@@ -125,7 +125,7 @@ func TestTransportRateLimits(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 
 	if elapsed := time.Since(start); elapsed < 30*time.Millisecond {

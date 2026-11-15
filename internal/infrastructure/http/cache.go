@@ -347,7 +347,7 @@ func (w *cacheWriter) decide(first int) {
 	}
 	w.decided = true
 	switch {
-	case w.ResponseWriter.Status() != http.StatusOK:
+	case w.Status() != http.StatusOK:
 		w.reason = bypassStatus
 	case !strings.Contains(w.Header().Get("Content-Type"), "application/json"):
 		w.reason = bypassContent

@@ -252,7 +252,7 @@ func (s *osmiumSnapshot) Close() error {
 
 func (s *osmiumSnapshot) Features() iter.Seq2[RawFeature, error] {
 	return func(yield func(RawFeature, error) bool) {
-		defer s.file.Close()
+		defer func() { _ = s.file.Close() }()
 		for {
 			raw, err := s.reader.ReadBytes('\n')
 			if len(raw) > 0 {

@@ -32,7 +32,7 @@ func TestSpotCap(t *testing.T) {
 	}
 
 	plain, h12, heavy := SpotCap(box(0.3), 0, false), SpotCap(box(0.3), 12, false), SpotCap(box(0.3), 24, true)
-	if !(plain > h12 && h12 > heavy) {
+	if plain <= h12 || h12 <= heavy {
 		t.Fatalf("cap must shrink with payload weight: %d %d %d", plain, h12, heavy)
 	}
 	if heavy*(featureBaseBytes+featureHourBytes*24+featureAreaBytes) > ResponseBudgetBytes {

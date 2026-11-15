@@ -61,7 +61,7 @@ func (o *OpenMeteo) Forecast(ctx context.Context, lat, lng float64, from, to tim
 	if err != nil {
 		return nil, fmt.Errorf("open-meteo: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return nil, fmt.Errorf("open-meteo: status %d: %s", resp.StatusCode, body)

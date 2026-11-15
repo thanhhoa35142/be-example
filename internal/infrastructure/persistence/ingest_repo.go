@@ -88,7 +88,7 @@ func (r *IngestRepo) WithTx(ctx context.Context, packID uuid.UUID, dryRun bool, 
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	store := &ingestStore{q: New(tx), packID: packID}
 	if err := fn(store); err != nil {
@@ -286,24 +286,7 @@ func (s *ingestStore) SpotsNear(ctx context.Context, lon, lat, radiusM float64) 
 	}
 	out := make([]ingest.SpotRow, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, spotRowFrom(ListPackSpotsRow{
-			ID:           r.ID,
-			Status:       r.Status,
-			Quality:      r.Quality,
-			Curated:      r.Curated,
-			MergedInto:   r.MergedInto,
-			Kind:         r.Kind,
-			Name:         r.Name,
-			Names:        r.Names,
-			Attrs:        r.Attrs,
-			Country:      r.Country,
-			Tz:           r.Tz,
-			CellID:       r.CellID,
-			StatusReason: r.StatusReason,
-			Lon:          r.Lon,
-			Lat:          r.Lat,
-			AreaGeojson:  r.AreaGeojson,
-		}))
+		out = append(out, spotRowFrom(ListPackSpotsRow(r)))
 	}
 	return out, nil
 }

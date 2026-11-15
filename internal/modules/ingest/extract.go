@@ -93,7 +93,7 @@ func download(ctx context.Context, client *http.Client, url, dest string) error 
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("status %d", resp.StatusCode)
 	}
@@ -103,21 +103,21 @@ func download(ctx context.Context, client *http.Client, url, dest string) error 
 	}
 	n, err := io.Copy(f, resp.Body)
 	if err != nil {
-		f.Close()
-		os.Remove(tmp)
+		_ = f.Close()
+		_ = os.Remove(tmp)
 		return err
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return err
 	}
 
 	if resp.ContentLength > 0 && n != resp.ContentLength {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return fmt.Errorf("truncated download: got %d of %d bytes", n, resp.ContentLength)
 	}
 	if n == 0 {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return fmt.Errorf("empty download")
 	}
 

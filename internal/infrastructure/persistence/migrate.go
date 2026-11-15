@@ -18,7 +18,7 @@ func RunMigrations(databaseURL string) error {
 	if err != nil {
 		return fmt.Errorf("migrate init: %w", err)
 	}
-	defer m.Close()
+	defer func() { _, _ = m.Close() }()
 
 	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
 		return fmt.Errorf("migrate up: %w", err)

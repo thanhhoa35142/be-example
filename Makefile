@@ -43,8 +43,8 @@ build: ## Build binary
 test: ## Run unit tests
 	go test ./...
 
-lint: ## Vet + gofmt check
-	go vet ./...
+lint: ## golangci-lint + gofmt check
+	golangci-lint run ./...
 	@test -z "$$(gofmt -l .)" || (gofmt -l . && exit 1)
 
 tidy: ## Tidy modules

@@ -246,7 +246,7 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 	if err != nil {
 		return st, fmt.Errorf("open snapshot: %w", err)
 	}
-	defer snap.Close()
+	defer func() { _ = snap.Close() }()
 
 	st.StageMs = map[string]int64{}
 	stageStart := time.Now()

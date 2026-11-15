@@ -175,7 +175,7 @@ func (s *OverpassSource) Open(ctx context.Context, p Pack) (Snapshot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("overpass request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("overpass status %d", resp.StatusCode)
 	}

@@ -64,7 +64,7 @@ func TestRedisDenyDoesNotConsume(t *testing.T) {
 
 func TestRedisLimiterFallsBackToMemory(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 	l := NewRedis(rdb, PerMinute(60, 2), "t")
 
 	key := fmt.Sprintf("test:%d", time.Now().UnixNano())

@@ -2,7 +2,6 @@ package persistence_test
 
 import (
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
@@ -92,7 +91,7 @@ func TestListSpotsInBBoxCapsToTopScores(t *testing.T) {
 	again, _, _ := repo.List(ctx, q, hour, time.Time{}, time.Time{}, 2)
 	for i := range got {
 		if got[i].ID != again[i].ID {
-			t.Fatal(fmt.Sprintf("unstable order at %d", i))
+			t.Fatalf("unstable order at %d", i)
 		}
 	}
 }

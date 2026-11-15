@@ -166,17 +166,3 @@ func int2Ptr(v pgtype.Int2) *int {
 	i := int(v.Int16)
 	return &i
 }
-
-func int2FromPtr(v *int) pgtype.Int2 {
-	if v == nil {
-		return pgtype.Int2{}
-	}
-	return pgtype.Int2{Int16: int16(*v), Valid: true}
-}
-
-func textFromPtr(v *string) pgtype.Text {
-	if v == nil {
-		return pgtype.Text{}
-	}
-	return pgtype.Text{String: *v, Valid: true}
-}

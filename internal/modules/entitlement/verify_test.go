@@ -58,21 +58,21 @@ func TestVerifyPayloadRejects(t *testing.T) {
 		jws string
 		v   *AppleVerifier
 	}{
-		"forged unsigned (old behaviour)": {enc([]byte(`{"alg":"ES256"}`)) + "." + enc([]byte(`{"a":1}`)) + "." + enc([]byte("sig")), v},
-		"tampered payload":                {parts[0] + "." + enc([]byte(`{"a":2}`)) + "." + parts[2], v},
-		"alg none":                        {hdr(func(h map[string]any) { h["alg"] = "none" }), v},
-		"alg HS256":                       {hdr(func(h map[string]any) { h["alg"] = "HS256" }), v},
-		"missing x5c":                     {hdr(func(h map[string]any) { delete(h, "x5c") }), v},
-		"leaf only":                       {hdr(func(h map[string]any) { h["x5c"] = h["x5c"].([]string)[:1] }), v},
-		"x5c not base64":                  {hdr(func(h map[string]any) { h["x5c"] = []string{"@@@", "@@@"} }), v},
-		"untrusted root":                  {pki.sign(t, `{"a":1}`), otherPKI.verifier(t)},
-		"DER signature":                   {derJWS, v},
-		"other key signature":             {wrongKey, v},
-		"zero signature":                  {zero, v},
-		"short signature":                 {parts[0] + "." + parts[1] + "." + enc([]byte("sig")), v},
-		"two segments":                    {parts[0] + "." + parts[1], v},
-		"garbage":                         {"not a jws", v},
-		"empty":                           {"", v},
+		"forged unsigned (old behavior)": {enc([]byte(`{"alg":"ES256"}`)) + "." + enc([]byte(`{"a":1}`)) + "." + enc([]byte("sig")), v},
+		"tampered payload":               {parts[0] + "." + enc([]byte(`{"a":2}`)) + "." + parts[2], v},
+		"alg none":                       {hdr(func(h map[string]any) { h["alg"] = "none" }), v},
+		"alg HS256":                      {hdr(func(h map[string]any) { h["alg"] = "HS256" }), v},
+		"missing x5c":                    {hdr(func(h map[string]any) { delete(h, "x5c") }), v},
+		"leaf only":                      {hdr(func(h map[string]any) { h["x5c"] = h["x5c"].([]string)[:1] }), v},
+		"x5c not base64":                 {hdr(func(h map[string]any) { h["x5c"] = []string{"@@@", "@@@"} }), v},
+		"untrusted root":                 {pki.sign(t, `{"a":1}`), otherPKI.verifier(t)},
+		"DER signature":                  {derJWS, v},
+		"other key signature":            {wrongKey, v},
+		"zero signature":                 {zero, v},
+		"short signature":                {parts[0] + "." + parts[1] + "." + enc([]byte("sig")), v},
+		"two segments":                   {parts[0] + "." + parts[1], v},
+		"garbage":                        {"not a jws", v},
+		"empty":                          {"", v},
 	}
 	for name, c := range cases {
 		if _, err := c.v.VerifyPayload(c.jws); !errors.Is(err, ErrInvalidJWS) {
