@@ -590,7 +590,12 @@ func main() {
 	if *jobName != "" {
 		for _, j := range registry {
 			if j.name == *jobName {
-				executeJob(ctx, pool, logger, adminSvc, j)
+				_, jobErr := executeJob(ctx, pool, logger, adminSvc, j)
+				if jobErr != nil {
+					// One-shot mode (CI weather-refresh): a failed job must
+					// fail the process so the workflow step goes red.
+					log.Fatalf("job %s failed: %v", j.name, jobErr)
+				}
 				return
 			}
 		}
@@ -742,22 +747,23 @@ func runJobFunc(ctx context.Context, fn func(context.Context) error) (err error)
 // executeJob runs one job under its advisory lock. It reports whether the
 // lock was acquired and the job actually ran — callers that trigger runs
 // indirectly (ingest notify) use this to re-arm instead of dropping work.
-func executeJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, adminSvc *admin.Service, j job) bool {
+func executeJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, adminSvc *admin.Service, j job) (ran bool, jobErr error) {
 	// Top-level recovery: panics in job bookkeeping (not just j.fn) must not
 	// kill the worker process. Registered first so it runs after release().
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Error("job panicked", "job", j.name, "panic", r, "stack", string(debug.Stack()))
+			jobErr = fmt.Errorf("job panic: %v", r)
 		}
 	}()
 
 	release, err := jobs.Acquire(ctx, pool, j.name)
 	if errors.Is(err, jobs.ErrLockNotAcquired) {
-		return false
+		return false, nil
 	}
 	if err != nil {
 		logger.Error("job lock failed", "job", j.name, "error", err)
-		return false
+		return false, nil
 	}
 	defer release()
 
@@ -774,7 +780,7 @@ func executeJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, ad
 	}
 	statsBag := &jobStatsBag{}
 	ctx = context.WithValue(ctx, jobStatsKey{}, statsBag)
-	jobErr := runJobFunc(ctx, j.fn)
+	jobErr = runJobFunc(ctx, j.fn)
 	var statsJSON []byte
 	if len(statsBag.m) > 0 {
 		statsJSON, _ = json.Marshal(statsBag.m)
@@ -791,7 +797,7 @@ func executeJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, ad
 			adminSvc.RecordJobFinish(ctx, runID, "failed", nil, jobErr, statsJSON)
 		}
 	}
-	return true
+	return true, jobErr
 }
 
 // ingestDebounce is how long ingest notifications are coalesced before
@@ -913,7 +919,7 @@ func listenSession(
 			*timerC = nil
 			if *pending {
 				logger.Info("ingest notify received, running scoring.recompute")
-				if executeJob(ctx, pool, logger, adminSvc, *scoring) {
+				if ran, _ := executeJob(ctx, pool, logger, adminSvc, *scoring); ran {
 					*pending = false
 					continue
 				}
