@@ -577,7 +577,7 @@ func main() {
 					"events", stats.Events, "crowd_reports", stats.CrowdReports,
 					"job_runs", stats.JobRuns, "deliveries", stats.AlertDeliveries,
 					"payloads_scrubbed", stats.PayloadsScrubbed,
-					"admin_sessions", stats.AdminSessions)
+					"admin_sessions", stats.AdminSessions, "plans", stats.Plans)
 				return nil
 			},
 		},

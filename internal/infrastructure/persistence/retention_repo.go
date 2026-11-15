@@ -24,6 +24,7 @@ type PurgeStats struct {
 	AlertDeliveries  int64
 	PayloadsScrubbed int64
 	AdminSessions    int64
+	Plans            int64
 }
 
 var (
@@ -34,6 +35,9 @@ var (
 	jobRunRetention    = 30 * 24 * time.Hour
 	deliveryRetention  = 30 * 24 * time.Hour
 	notificationMaxAge = 90 * 24 * time.Hour
+	// Plans (and their followers) are kept 30 days after the window ended or
+	// the plan was canceled, whichever came first.
+	planRetention = 30 * 24 * time.Hour
 )
 
 func (r *RetentionRepo) Purge(ctx context.Context) (PurgeStats, error) {
@@ -82,6 +86,12 @@ func (r *RetentionRepo) Purge(ctx context.Context) (PurgeStats, error) {
 	}
 	if st.AlertDeliveries, err = purge(now.Add(-deliveryRetention), func(b time.Time) (int64, error) {
 		return r.q.PurgeAlertDeliveries(ctx, PurgeAlertDeliveriesParams{WindowStart: b, Limit: purgeBatch})
+	}); err != nil {
+		return st, err
+	}
+
+	if st.Plans, err = purge(now.Add(-planRetention), func(b time.Time) (int64, error) {
+		return r.q.PurgePlans(ctx, PurgePlansParams{Before: b, Batch: purgeBatch})
 	}); err != nil {
 		return st, err
 	}

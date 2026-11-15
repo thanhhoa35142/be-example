@@ -94,6 +94,29 @@ func (q *Queries) PurgeJobRuns(ctx context.Context, arg PurgeJobRunsParams) (int
 	return result.RowsAffected(), nil
 }
 
+const purgePlans = `-- name: PurgePlans :execrows
+DELETE FROM t_plans
+WHERE ctid IN (
+    SELECT ctid FROM t_plans AS p
+    WHERE LEAST(p.end_ts, COALESCE(p.canceled_at, p.end_ts)) < $1 LIMIT $2
+)
+`
+
+type PurgePlansParams struct {
+	Before time.Time `json:"before"`
+	Batch  int32     `json:"batch"`
+}
+
+// Plans whose end (or cancellation) is older than $1; followers (and the
+// push outbox) cascade.
+func (q *Queries) PurgePlans(ctx context.Context, arg PurgePlansParams) (int64, error) {
+	result, err := q.db.Exec(ctx, purgePlans, arg.Before, arg.Batch)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const purgeSpotScores = `-- name: PurgeSpotScores :execrows
 DELETE FROM t_spot_scores
 WHERE ctid IN (

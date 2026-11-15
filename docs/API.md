@@ -56,6 +56,14 @@ Every non-GeoJSON success response is wrapped:
 | `merged_spot` | 301 | spot merged — follow `Location` header |
 | `conflict` | 409 | only a lost race between concurrent registrations of the same `apnsToken` — retry |
 | `device_limit` | 409 | `POST /v1/entitlement/link`: the subscription is already linked to the maximum number of active devices (5) |
+| `follower_limit` | 409 | `POST /v1/plan-follows/{token}`: the plan already has the maximum followers (20) |
+| `own_plan` | 409 | `POST /v1/plan-follows/{token}`: a device cannot follow its own plan |
+| `follow_limit` | 403 | `POST /v1/plan-follows/{token}`: the device already follows the maximum number of active plans (50) |
+| `plan_limit` | 403 | active alert rules / active plans over the device's Free/Plus limit |
+| `plan_start_past` | 400 | `POST /v1/plans`: `start` is not in the future |
+| `plan_window_invalid` | 400 | `POST /v1/plans`: `end - start` outside 1–12 h |
+| `plan_beyond_horizon` | 400 | `POST /v1/plans`: `end` past the 7-day scoring horizon |
+| `invalid_tz` | 400 | `tz` is not an IANA zone name |
 | `payload_too_large` | 413 | request body over the size cap (64 KiB default; `POST /v1/events` 512 KiB; App Store webhook 256 KiB) |
 | `rate_limited` | 429 | too many requests (per-IP limit, carries `Retry-After`) or too many reports/feedback per device per 24h |
 | `service_unavailable` | 503 | server-side App Store verification is not configured — retry later |
@@ -65,7 +73,7 @@ Every non-GeoJSON success response is wrapped:
 ### Request headers
 
 - `X-Request-ID: <id>` (optional) — sent for support correlation; echoed in responses if 1-64 chars of `[A-Za-z0-9._-]`, otherwise the server generates one.
-- `X-Device-ID: <uuid>` — the device id on routes that have no `:id` path parameter (`/v1/alerts*`, reports, `/v1/events`, `/v1/entitlement/link`).
+- `X-Device-ID: <uuid>` — the device id on routes that have no `:id` path parameter (`/v1/alerts*`, `/v1/plans*`, `/v1/plan-follows/*`, reports, `/v1/events`, `/v1/entitlement/link`).
 - `X-Device-Token: <secret>` — the per-device credential issued by `POST /v1/devices` (returned once as `deviceSecret`, kept in the iOS Keychain). **Required on every device-scoped route** together with `X-Device-ID` (or the `:id` path parameter for `/v1/devices/{id}/*`). Missing/invalid → `401 unauthorized`. It is deliberately not `Authorization`: arbitrary Authorization headers must not interact with the public response cache.
 - `X-Client: pickhour-ios` — identifies the app; sent by the official client.
 - `X-Client-Version: <semver>+<build>` — app version, e.g. `0.1.0+3`.
@@ -74,7 +82,7 @@ Every non-GeoJSON success response is wrapped:
 
 ### Rate limits and size limits
 
-- **Per client IP**, in-memory token buckets (defaults, configurable by env): reads (`GET`) 600/min burst 120; writes (`POST/PUT/PATCH/DELETE`) 60/min burst 30; `POST /v1/devices` 30/hour burst 10. `/healthz` and `/readyz` are exempt. Over budget: `429 rate_limited` with a `Retry-After` header (seconds) — back off for at least that long.
+- **Per client IP**, in-memory token buckets (defaults, configurable by env): reads (`GET`) 600/min burst 120; writes (`POST/PUT/PATCH/DELETE`) 60/min burst 30; `POST /v1/devices` 30/hour burst 10; share-token routes (`/p/{token}`, `/v1/shared-plans/{token}`, `/v1/plan-follows/{token}`) additionally 30/min burst 10, one bucket across those routes. `/healthz` and `/readyz` are exempt. Over budget: `429 rate_limited` with a `Retry-After` header (seconds) — back off for at least that long.
 - **Per device**, rolling 24h: 30 crowd reports, 30 spot reports, 100 score-feedback submissions, 5000 analytics events (`429 rate_limited`).
 - **Request bodies** are capped (`413 payload_too_large`): 64 KiB by default, 512 KiB for `POST /v1/events`, 256 KiB for `POST /v1/appstore/notifications`.
 
@@ -386,7 +394,7 @@ Re-registering an `id` that was deleted via `DELETE /v1/devices/{id}` works but 
 
 ### `DELETE /v1/devices/{id}`
 
-Soft-delete (GDPR/CCPA unlink). In the same statement it hard-deletes the device's alert rules (their delivery log cascades), weekend digest, analytics events (`t_events`) and subscription links (so Plus is lost until the purchase is restored on a device), and clears the stored push token, attestation key, locale, tz, app version and prefs. Crowd reports, spot reports and score feedback are kept on purpose (they only feed anonymous aggregates; the device row no longer holds personal data). `204` on success, `404` if unknown/already deleted.
+Soft-delete (GDPR/CCPA unlink). In the same statement it hard-deletes the device's alert rules (their delivery log cascades), weekend digest, plans it owns (their followers cascade), its follows of other plans, analytics events (`t_events`) and subscription links (so Plus is lost until the purchase is restored on a device), and clears the stored push token, attestation key, locale, tz, app version and prefs. Crowd reports, spot reports and score feedback are kept on purpose (they only feed anonymous aggregates; the device row no longer holds personal data). `204` on success, `404` if unknown/already deleted.
 Requires `X-Device-Token` for that device id.
 
 ---
@@ -587,6 +595,87 @@ Sent by worker job `digest.weekly` through the same APNs client as alerts (colla
 - Window search: the coming Saturday and Sunday (device-local dates; on a Sunday only that day), 08:00–20:00 in **each spot's own timezone**, per spot the best contiguous run of 2–4 hours where every hourly score is ≥ 60 (`t_spot_scores`), ranked by mean score (ties: longer, then earlier). The single best (spot, day, window) wins; `score` is the rounded mean. If nothing qualifies, no push is sent.
 - Localization keys only ([`PUSH_KEYS.md`](PUSH_KEYS.md)): the day is the key variant (`DIGEST_WHEN_SATURDAY` / `DIGEST_WHEN_SUNDAY`), the window is two 24-hour `HH:MM` args in the **spot's** timezone. Custom keys are top-level next to `aps`. The app routes taps on `kind == "digest.weekend"` + `spotId` to spot detail.
 - Idempotent: at most one send (or silent skip) per device per local date. A transient APNs failure releases the slot so the next hourly run retries inside the same local hour.
+
+## Plans (C2)
+
+A device plans one time window at one spot. The server keeps the plan, re-evaluates it after every scoring run (`plans.evaluate`) and pushes the owner and its followers when the window turns `worse` or `bad`, or confirms it the evening before. Others join with the plan's `shareToken` (128 random bits, 22 base64url chars) — the token is the only capability, there is no listing or search of plans.
+
+Device auth (`X-Device-ID` + `X-Device-Token`) on every route except the anonymous `GET /v1/shared-plans/{token}`.
+
+**Limits:** active owned plans (not canceled, not ended) — Free 1, Plus 20 (`plan_limit`, 403; atomic under concurrent creates). Followers per plan 20 (`follower_limit`, 409). Active followed plans per device 50 (`follow_limit`, 403).
+
+**Retention:** plans and their followers are deleted with the owning device (`DELETE /v1/devices/{id}`), a device's follows are deleted with it, and every plan is purged 30 days after its window ended or it was canceled (whichever came first). Lists show plans until 1 day after `end`.
+
+### Plan object
+
+```json
+{
+  "id": "0193…",
+  "role": "owner",
+  "status": "upcoming",
+  "shareToken": "q3Zr7l0bVQpX2b9kz8w1Hg",
+  "spot": { "id": "0192…", "name": "Vondelpark", "kind": "park" },
+  "start": "2026-11-15T10:00:00Z",
+  "end": "2026-11-15T13:00:00Z",
+  "tz": "Europe/Amsterdam",
+  "state": "ok",
+  "score": 78,
+  "capReason": null,
+  "alternative": null,
+  "createdAt": "2026-11-14T08:12:00Z",
+  "baselineScore": 80,
+  "followerCount": 2
+}
+```
+
+- `role`: `owner` | `follower`. `baselineScore` and `followerCount` are only on owner items.
+- `status`: `upcoming` | `started` | `ended` | `canceled` (derived at response time).
+- `state` / `score` / `capReason`: the latest evaluation — `ok` | `worse` | `bad`, the window's mean score, the first `rain`/`heat`/`cold` cap in the window. All `null` until the window has scores.
+  - `bad`: any hour in the window capped by rain, heat or cold, or the mean below 60.
+  - `worse`: the mean at least 15 below `baselineScore` (the window mean when the plan was created, or at its first evaluation with scores).
+- `alternative` (when `worse`/`bad`): `{"type":"time","start","end","score"}` (another window of the same length the same local day at this spot), `{"type":"spot","spotId","spotName","spotKind","score"}` (a spot within 5 km for this window), or `{"type":"none"}`. `null` while `ok`.
+- `start`/`end` are stored to the minute; the evaluated hours are every hourly score from the hour containing `start` up to `end`. `tz` (IANA) is the plan's local time for quiet hours, "tomorrow" and the clock times in pushes; default: the spot's timezone.
+
+### `POST /v1/plans` — create (201)
+
+```json
+{ "spotId": "0192…", "start": "2026-11-15T10:00:00Z", "end": "2026-11-15T13:00:00Z", "tz": "Europe/Amsterdam" }
+```
+
+`201 {"data": <plan>}`. Rules: `start` in the future (`plan_start_past`), `end - start` 1–12 h (`plan_window_invalid`), `end` within the 7-day scoring horizon (`plan_beyond_horizon`), `tz` an IANA name (`invalid_tz`). `not_found` (404) if `spotId` is not an active spot. Errors carry only a `code`; the app owns the wording.
+
+### `GET /v1/plans`
+
+`200 {"data": {"items": [<plan>, …]}}` — owned and followed plans, canceled ones included (so a follower sees the cancel), until 1 day after `end`; ordered by `start`.
+
+### `DELETE /v1/plans/{id}` — cancel (204)
+
+Owner only; idempotent. `404 not_found` if the plan is not the caller's. Cancelling sends no push; followers see `status: "canceled"` in their list and the share link stops working.
+
+### `POST /v1/plan-follows/{token}` — follow (200)
+
+`200 {"data": <plan with role "follower">}`; already following is a no-op `200`. `404 not_found` for an unknown, malformed, canceled or ended token (one response for all). `own_plan` (409), `follower_limit` (409), `follow_limit` (403).
+
+### `DELETE /v1/plan-follows/{token}` — unfollow (204)
+
+Idempotent; always `204` (never reveals whether the token exists).
+
+### `GET /v1/shared-plans/{token}` — anonymous read
+
+No device auth. One window only, nothing about devices: no plan id, owner, followers, baseline or alternative.
+
+```json
+{
+  "data": {
+    "spot": { "id": "0192…", "name": "Vondelpark", "kind": "park" },
+    "start": "2026-11-15T10:00:00Z", "end": "2026-11-15T13:00:00Z", "tz": "Europe/Amsterdam",
+    "state": "ok", "score": 78, "capReason": null,
+    "reasons": [ { "code": "sunny" } ]
+  }
+}
+```
+
+`score` is the live window mean, `reasons` at most 3 reason codes of the window's lowest hour (translate client-side, see Reason codes). `state`/`score` are `null` before the window has scores. Unknown, malformed, canceled and ended tokens all return the same `404 not_found`. Headers: `Cache-Control: private, max-age=60`, `X-Robots-Tag: noindex, nofollow`, `Referrer-Policy: no-referrer`.
 
 ## Entitlement (Free / Plus)
 

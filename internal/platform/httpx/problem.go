@@ -26,6 +26,13 @@ const (
 	CodePlanLimit     = "plan_limit"
 	CodeInternal      = "internal_error"
 
+	// Plans (C2): a plan already has the maximum followers; the device
+	// already follows the maximum number of plans; a device cannot follow
+	// its own plan.
+	CodeFollowerLimit = "follower_limit"
+	CodeFollowLimit   = "follow_limit"
+	CodeOwnPlan       = "own_plan"
+
 	CodePayloadTooLarge = "payload_too_large"
 
 	CodeUnauthorized = "unauthorized"

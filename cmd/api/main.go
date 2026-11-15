@@ -27,6 +27,7 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/modules/geo"
 	"github.com/thanhhoa35142/be-example/internal/modules/goauth"
 	"github.com/thanhhoa35142/be-example/internal/modules/notifier"
+	"github.com/thanhhoa35142/be-example/internal/modules/plans"
 	"github.com/thanhhoa35142/be-example/internal/modules/recommendations"
 	"github.com/thanhhoa35142/be-example/internal/modules/reports"
 	"github.com/thanhhoa35142/be-example/internal/modules/spots"
@@ -85,6 +86,7 @@ func main() {
 	keysSvc := apikeys.NewService(persistence.NewAPIKeysRepo(queries, pool))
 	eventsSvc := events.NewService(persistence.NewEventsRepo(queries))
 	digestSvc := digest.NewService(persistence.NewDigestRepo(queries), entitlementSvc, nil, logger)
+	plansSvc := plans.NewService(persistence.NewPlansRepo(queries, pool), entitlementSvc, plansConfig(cfg))
 
 	cfg.ConfigureGinMode(gin.SetMode)
 
@@ -94,6 +96,7 @@ func main() {
 		Device: ratelimit.PerMinute(float64(cfg.RateDevicePerHour)/60, cfg.RateDeviceBurst),
 	}
 	authFail := ratelimit.PerMinute(float64(cfg.RateAuthFailPerMin), cfg.RateAuthFailPerMin)
+	tokenLimit := ratelimit.PerMinute(float64(cfg.RateTokenPerMin), cfg.RateTokenBurst)
 
 	var rdb *redis.Client
 	redisHealthy := false
@@ -194,6 +197,7 @@ func main() {
 		Traffic:         infrahttp.NewTrafficHandler(trafficSvc),
 		Events:          infrahttp.NewEventsHandler(eventsSvc),
 		Digest:          infrahttp.NewDigestHandler(digestSvc),
+		Plans:           infrahttp.NewPlansHandler(plansSvc),
 		Share: infrahttp.NewShareHandler(spotsSvc, infrahttp.ShareOptions{
 			AppleAppIDs:   cfg.AppleAppIDs,
 			AppStoreAppID: cfg.AppStoreAppID,
@@ -207,6 +211,7 @@ func main() {
 		AdminFailed:         &authFail,
 		LimiterFor:          limiterFor,
 		Cache:               rdb,
+		TokenLimit:          &tokenLimit,
 	})
 	if err != nil {
 		log.Fatalf("router: %v", err)

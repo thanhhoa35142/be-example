@@ -262,6 +262,34 @@ type TJobRun struct {
 	Stats        []byte             `json:"stats"`
 }
 
+type TPlan struct {
+	ID             uuid.UUID          `json:"id"`
+	ShareToken     string             `json:"share_token"`
+	DeviceID       uuid.UUID          `json:"device_id"`
+	SpotID         uuid.UUID          `json:"spot_id"`
+	StartTs        time.Time          `json:"start_ts"`
+	EndTs          time.Time          `json:"end_ts"`
+	Tz             string             `json:"tz"`
+	BaselineScore  pgtype.Int2        `json:"baseline_score"`
+	State          pgtype.Text        `json:"state"`
+	Score          pgtype.Int2        `json:"score"`
+	CapReason      pgtype.Text        `json:"cap_reason"`
+	Alternative    []byte             `json:"alternative"`
+	EvaluatedAt    pgtype.Timestamptz `json:"evaluated_at"`
+	NotifiedState  pgtype.Text        `json:"notified_state"`
+	LastNotifiedOn pgtype.Date        `json:"last_notified_on"`
+	LastNotifiedAt pgtype.Timestamptz `json:"last_notified_at"`
+	ConfirmedAt    pgtype.Timestamptz `json:"confirmed_at"`
+	CanceledAt     pgtype.Timestamptz `json:"canceled_at"`
+	CreatedAt      time.Time          `json:"created_at"`
+}
+
+type TPlanFollower struct {
+	PlanID    uuid.UUID `json:"plan_id"`
+	DeviceID  uuid.UUID `json:"device_id"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 type TPlanLimit struct {
 	Plan       string      `json:"plan"`
 	Feature    string      `json:"feature"`
