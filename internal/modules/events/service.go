@@ -17,7 +17,6 @@ func NewService(repo Repository) *Service {
 	return &Service{repo: repo}
 }
 
-// TrackBatch validates and stores a batch of events for a device.
 func (s *Service) TrackBatch(ctx context.Context, deviceID uuid.UUID, batch []Input) error {
 	if len(batch) == 0 || len(batch) > MaxBatchSize {
 		return fmt.Errorf("%w: batch must contain 1..%d events", ErrInvalidEvent, MaxBatchSize)
@@ -34,7 +33,7 @@ func (s *Service) TrackBatch(ctx context.Context, deviceID uuid.UUID, batch []In
 	if !exists {
 		return ErrDeviceInvalid
 	}
-	// Abuse guard: cap events per device per day.
+
 	count, err := s.repo.CountSince(ctx, deviceID, time.Now().Add(-24*time.Hour))
 	if err != nil {
 		return err

@@ -7,6 +7,7 @@ package persistence
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -15,9 +16,14 @@ import (
 const aggregateCommunityCrowd = `-- name: AggregateCommunityCrowd :many
 SELECT spot_id, local_dow, local_hour,
        count(*) AS n_reports,
-       round(avg(level)::numeric, 2) AS avg_level
-FROM crowd_report
-WHERE created_at >= now() - interval '30 days'
+       round(avg(device_level)::numeric, 2) AS avg_level
+FROM (
+    SELECT spot_id, local_dow, local_hour, device_id,
+           avg(level) AS device_level
+    FROM t_crowd_reports
+    WHERE created_at >= now() - interval '30 days'
+    GROUP BY spot_id, local_dow, local_hour, device_id
+) per_device
 GROUP BY spot_id, local_dow, local_hour
 HAVING count(*) >= $1
 `
@@ -30,6 +36,9 @@ type AggregateCommunityCrowdRow struct {
 	AvgLevel  pgtype.Numeric `json:"avg_level"`
 }
 
+// A slot needs at least $1 DISTINCT devices (n_reports = distinct devices),
+// and each device counts once: its own reports are averaged first, so one
+// device (or a few fake ones) cannot dominate or unlock a slot.
 func (q *Queries) AggregateCommunityCrowd(ctx context.Context, dollar_1 interface{}) ([]AggregateCommunityCrowdRow, error) {
 	rows, err := q.db.Query(ctx, aggregateCommunityCrowd, dollar_1)
 	if err != nil {
@@ -56,19 +65,26 @@ func (q *Queries) AggregateCommunityCrowd(ctx context.Context, dollar_1 interfac
 	return items, nil
 }
 
-const deleteStaleCommunityEstimates = `-- name: DeleteStaleCommunityEstimates :exec
-DELETE FROM crowd_estimate
+const deleteUnrefreshedCommunityEstimates = `-- name: DeleteUnrefreshedCommunityEstimates :execrows
+DELETE FROM t_crowd_estimates
 WHERE source = 'community'
-  AND updated_at < now() - interval '35 days'
+  AND updated_at < $1::timestamptz
 `
 
-func (q *Queries) DeleteStaleCommunityEstimates(ctx context.Context) error {
-	_, err := q.db.Exec(ctx, deleteStaleCommunityEstimates)
-	return err
+// Community estimates not rewritten by the current aggregate run are stale:
+// their slot dropped below MinCommunityReports or aged out of the 30-day
+// report window. The caller passes the run start; upserted rows carry
+// updated_at = now() > run start and survive.
+func (q *Queries) DeleteUnrefreshedCommunityEstimates(ctx context.Context, runStart time.Time) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteUnrefreshedCommunityEstimates, runStart)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const upsertCommunityEstimate = `-- name: UpsertCommunityEstimate :exec
-INSERT INTO crowd_estimate (spot_id, dow, hour, level, source, n_reports, updated_at)
+INSERT INTO t_crowd_estimates (spot_id, dow, hour, level, source, n_reports, updated_at)
 VALUES ($1, $2, $3, $4, 'community', $5, now())
 ON CONFLICT (spot_id, dow, hour) DO UPDATE SET
     level      = EXCLUDED.level,

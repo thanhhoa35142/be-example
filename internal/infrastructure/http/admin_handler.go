@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,21 +11,28 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 	"github.com/thanhhoa35142/be-example/internal/modules/admin"
 	"github.com/thanhhoa35142/be-example/internal/modules/apikeys"
+	"github.com/thanhhoa35142/be-example/internal/platform/cache"
 	"github.com/thanhhoa35142/be-example/internal/platform/httpx"
 )
 
 type AdminHandler struct {
 	svc  *admin.Service
 	keys *apikeys.Service
+	rdb  *redis.Client
 }
 
-func NewAdminHandler(svc *admin.Service, keys *apikeys.Service) *AdminHandler {
-	return &AdminHandler{svc: svc, keys: keys}
+// RecordAudit implements AuditRecorder for the AdminAudit middleware.
+func (h *AdminHandler) RecordAudit(ctx context.Context, e admin.AuditEvent) error {
+	return h.svc.RecordAudit(ctx, e)
 }
 
-// GET /v1/admin/overview — headline counts.
+func NewAdminHandler(svc *admin.Service, keys *apikeys.Service, rdb *redis.Client) *AdminHandler {
+	return &AdminHandler{svc: svc, keys: keys, rdb: rdb}
+}
+
 func (h *AdminHandler) Overview(c *gin.Context) {
 	o, err := h.svc.Overview(c.Request.Context())
 	if err != nil {
@@ -34,7 +42,6 @@ func (h *AdminHandler) Overview(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": o})
 }
 
-// GET /v1/admin/freshness — newest timestamp per pipeline stage.
 func (h *AdminHandler) Freshness(c *gin.Context) {
 	f, err := h.svc.Freshness(c.Request.Context())
 	if err != nil {
@@ -44,8 +51,23 @@ func (h *AdminHandler) Freshness(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": f})
 }
 
-// parseFilter reads range + filter query params shared by metrics endpoints.
-// Supports `from`/`to` (RFC3339) or `days` (trailing window ending now).
+func (h *AdminHandler) CacheStats(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"data": DefaultCacheStats.Snapshot()})
+}
+
+// RefreshCache bumps the admin aggregate cache version so the next read of
+// /overview, /metrics and /events recomputes instead of serving Redis.
+// No-op when Redis is not configured (nothing is cached then anyway).
+func (h *AdminHandler) RefreshCache(c *gin.Context) {
+	if h.rdb != nil {
+		if err := cache.BumpAdminAgg(c.Request.Context(), h.rdb); err != nil {
+			httpx.WriteError(c, err)
+			return
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"ok": true}})
+}
+
 func parseFilter(c *gin.Context) (admin.MetricsFilter, error) {
 	var f admin.MetricsFilter
 	parseTime := func(key string) (time.Time, error) {
@@ -103,8 +125,6 @@ func parseFilter(c *gin.Context) (admin.MetricsFilter, error) {
 	return f, nil
 }
 
-// GET /v1/admin/metrics — analytical counters. Query: from,to (RFC3339) or
-// days; filters cityPackId, kind, spotId, type, status, name.
 func (h *AdminHandler) Metrics(c *gin.Context) {
 	f, err := parseFilter(c)
 	if err != nil {
@@ -119,7 +139,6 @@ func (h *AdminHandler) Metrics(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": m})
 }
 
-// GET /v1/admin/events?days=30&name=&from=&to= — event counts by name/day.
 func (h *AdminHandler) Events(c *gin.Context) {
 	f, err := parseFilter(c)
 	if err != nil {
@@ -134,8 +153,24 @@ func (h *AdminHandler) Events(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": s})
 }
 
-// GET /v1/admin/jobs?limit=&cursor= — recent job_run rows, keyset-paginated
-// (cursor = last job run id).
+func (h *AdminHandler) EventBreakdown(c *gin.Context) {
+	in := admin.EventBreakdownInput{Name: c.Query("name"), Prop: c.Query("prop"), By: c.Query("by")}
+	if v := c.Query("since"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidQuery, "Invalid query", "since must be RFC3339")
+			return
+		}
+		in.Since = t
+	}
+	b, err := h.svc.EventBreakdown(c.Request.Context(), in, time.Now())
+	if err != nil {
+		h.writeConfigError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": b})
+}
+
 func (h *AdminHandler) Jobs(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
 	var beforeID *int64
@@ -147,7 +182,14 @@ func (h *AdminHandler) Jobs(c *gin.Context) {
 		}
 		beforeID = &id
 	}
-	page, err := h.svc.Jobs(c.Request.Context(), limit, beforeID)
+	status := c.Query("status")
+	switch status {
+	case "", "succeeded", "failed", "running", "abandoned":
+	default:
+		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidQuery, "Invalid status", "unknown job run status")
+		return
+	}
+	page, err := h.svc.Jobs(c.Request.Context(), limit, beforeID, status)
 	if err != nil {
 		httpx.WriteError(c, err)
 		return
@@ -155,7 +197,6 @@ func (h *AdminHandler) Jobs(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": page})
 }
 
-// GET /v1/admin/jobs/schedules — intervals for registered worker jobs.
 func (h *AdminHandler) JobSchedules(c *gin.Context) {
 	schedules, err := h.svc.JobSchedules(c.Request.Context())
 	if err != nil {
@@ -165,11 +206,50 @@ func (h *AdminHandler) JobSchedules(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"items": schedules}})
 }
 
+// GET /v1/admin/audit?limit=&cursor= — persisted admin mutation audit trail,
+// keyset-paginated (cursor = last event id).
+func (h *AdminHandler) AuditEvents(c *gin.Context) {
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	var beforeID *int64
+	if raw := c.Query("cursor"); raw != "" {
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || id <= 0 {
+			httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidQuery, "Invalid cursor", "expected an audit event id")
+			return
+		}
+		beforeID = &id
+	}
+	page, err := h.svc.AuditEvents(c.Request.Context(), limit, beforeID)
+	if err != nil {
+		httpx.WriteError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": page})
+}
+
+// GET /v1/admin/jobs/runs/:id — single job run incl. worker-reported stats.
+func (h *AdminHandler) JobRun(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidID, "Invalid id", "expected a job run id")
+		return
+	}
+	run, err := h.svc.JobRun(c.Request.Context(), id)
+	if err != nil {
+		if errors.Is(err, admin.ErrJobRunNotFound) {
+			httpx.WriteProblem(c, http.StatusNotFound, httpx.CodeNotFound, "Job run not found", "")
+			return
+		}
+		httpx.WriteError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": run})
+}
+
 type updateJobScheduleRequest struct {
 	IntervalSeconds int64 `json:"intervalSeconds"`
 }
 
-// PATCH /v1/admin/jobs/:job/schedule — update a registered job interval.
 func (h *AdminHandler) UpdateJobSchedule(c *gin.Context) {
 	var req updateJobScheduleRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -191,8 +271,6 @@ func (h *AdminHandler) UpdateJobSchedule(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": schedule})
 }
 
-// GET /v1/admin/reports?status=pending&limit=&cursor= — moderation queue,
-// keyset-paginated (cursor = "<unixnano>|<reportId>" from nextCursor).
 func (h *AdminHandler) Reports(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
 	var after *admin.ReportCursor
@@ -216,7 +294,6 @@ type moderateRequest struct {
 	Status string `json:"status"`
 }
 
-// PATCH /v1/admin/reports/:id — accept or reject a spot report.
 func (h *AdminHandler) ModerateReport(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -234,6 +311,8 @@ func (h *AdminHandler) ModerateReport(c *gin.Context) {
 			httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Invalid status", "expected accepted or rejected")
 		case errors.Is(err, admin.ErrReportNotFound):
 			httpx.WriteProblem(c, http.StatusNotFound, httpx.CodeNotFound, "Report not found", "")
+		case errors.Is(err, admin.ErrReportConflict):
+			httpx.WriteProblem(c, http.StatusConflict, httpx.CodeConflict, "Report already moderated", "")
 		default:
 			httpx.WriteError(c, err)
 		}
@@ -242,7 +321,6 @@ func (h *AdminHandler) ModerateReport(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"status": req.Status}})
 }
 
-// GET /v1/admin/scoring-config — all versions.
 func (h *AdminHandler) ScoringConfigs(c *gin.Context) {
 	cfgs, err := h.svc.ListScoringConfigs(c.Request.Context())
 	if err != nil {
@@ -258,7 +336,6 @@ type scoringConfigRequest struct {
 	Activate   bool            `json:"activate"`
 }
 
-// POST /v1/admin/scoring-config — create a new version (draft or active).
 func (h *AdminHandler) CreateScoringConfig(c *gin.Context) {
 	var req scoringConfigRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -275,7 +352,6 @@ func (h *AdminHandler) CreateScoringConfig(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"data": cfg})
 }
 
-// POST /v1/admin/scoring-config/:version/activate — make a version live.
 func (h *AdminHandler) ActivateScoringConfig(c *gin.Context) {
 	v, err := strconv.ParseInt(c.Param("version"), 10, 16)
 	if err != nil {

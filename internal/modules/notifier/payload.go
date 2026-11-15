@@ -6,18 +6,6 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/modules/alerts"
 )
 
-// Payload is the APNs HTTP/2 JSON body sent to /3/device/{token}.
-//
-// Contract with the iOS client (App/NotificationDelegate.swift):
-//   - aps.alert.title/body   — banner text, already localized server-side
-//   - aps.sound              — "default"
-//   - kind                   — "alert.window" (future routing discriminator)
-//   - spotId                 — UUID string; tap opens SpotDetail for this spot
-//   - ruleId                 — UUID string of the alert_rule that fired
-//   - score                  — spot score 0–100 at fire time
-//   - windowStart            — RFC3339 UTC start of the alert window
-//
-// APNs requires custom keys at the top level next to "aps" — do not nest them.
 type Payload struct {
 	APS         APSBody `json:"aps"`
 	Kind        string  `json:"kind"`
@@ -30,7 +18,6 @@ type Payload struct {
 type APSBody struct {
 	Alert AlertContent `json:"alert"`
 	Sound string       `json:"sound"`
-	// Badge is omitted: the app does not track a server-side badge count yet.
 }
 
 type AlertContent struct {
@@ -38,8 +25,6 @@ type AlertContent struct {
 	Body  string `json:"body"`
 }
 
-// buildPayload renders the push for the device's locale (BCP-47 prefix match,
-// e.g. "nl-NL" → "nl"). Unknown/missing locales fall back to English.
 func buildPayload(d alerts.Delivery, locale string) Payload {
 	title, body := alertCopy(locale, d)
 	return Payload{
@@ -55,9 +40,6 @@ func buildPayload(d alerts.Delivery, locale string) Payload {
 	}
 }
 
-// alertCopy is the server-side banner catalog. Keep in sync with the app's
-// supported locales; the app itself never sees these strings (they are baked
-// into the push), so add a language here when the app ships it.
 func alertCopy(locale string, d alerts.Delivery) (title, body string) {
 	switch baseLang(locale) {
 	case "nl":
@@ -79,7 +61,7 @@ func baseLang(locale string) string {
 	if locale == "" {
 		return "en"
 	}
-	// ASCII fold: "NL" → "nl"; non-ASCII stays as-is and misses the catalog.
+
 	b := []byte(locale)
 	for i, c := range b {
 		if c >= 'A' && c <= 'Z' {

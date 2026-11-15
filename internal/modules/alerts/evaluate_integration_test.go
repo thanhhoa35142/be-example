@@ -2,7 +2,6 @@ package alerts_test
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
@@ -11,14 +10,12 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/modules/alerts"
 	"github.com/thanhhoa35142/be-example/internal/modules/entitlement"
 	"github.com/thanhhoa35142/be-example/internal/modules/notifier"
+	"github.com/thanhhoa35142/be-example/internal/platform/testdb"
 	"log/slog"
 )
 
 func TestEvaluateSmoke(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
+	dsn := testdb.DSN(t)
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
@@ -26,10 +23,10 @@ func TestEvaluateSmoke(t *testing.T) {
 	}
 	defer pool.Close()
 	q := persistence.New(pool)
-	alertsRepo := persistence.NewAlertsRepo(q)
+	alertsRepo := persistence.NewAlertsRepo(q, pool)
 	svc := alerts.NewService(
 		alertsRepo,
-		entitlement.NewService(persistence.NewEntitlementRepo(q)),
+		entitlement.NewService(persistence.NewEntitlementRepo(q, pool)),
 		notifier.NewSender(slog.Default(), alertsRepo, nil),
 	)
 	start := time.Now()

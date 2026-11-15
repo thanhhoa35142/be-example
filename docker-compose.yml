@@ -1,3 +1,5 @@
+name: backend
+
 services:
   db:
     image: postgis/postgis:18-3.6
@@ -6,6 +8,12 @@ services:
       POSTGRES_USER: picnic
       POSTGRES_PASSWORD: picnic
       POSTGRES_DB: picnic
+    # pg_stat_statements for local query-cost inspection (migration 000012
+    # creates the extension; no-op until the library is preloaded + restart).
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
     ports:
       - "127.0.0.1:4343:5432"
     volumes:
@@ -17,9 +25,115 @@ services:
       retries: 10
     networks: [pickhour]
 
+  redis:
+    image: redis:7-alpine
+    container_name: picnic-redis
+    # Pure cache + rate-limit state: no persistence (AOF/RDB off), bounded
+    # memory with LRU eviction. Every key except pic:ver:data has a TTL, so
+    # volatile-lru only ever evicts disposable entries — the version key
+    # (which has no TTL) is never evicted.
+    command:
+      - redis-server
+      - --appendonly
+      - "no"
+      - --save
+      - ""
+      - --maxmemory
+      - ${REDIS_MAXMEMORY:-256mb}
+      - --maxmemory-policy
+      - volatile-lru
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+    networks: [pickhour]
+
+  migrate:
+    build: .
+    image: pickhour-backend:latest
+    container_name: picnic-migrate
+    command: ["/app/migrate"]
+    environment:
+      DATABASE_URL: postgres://picnic:picnic@db:5432/picnic?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    networks: [pickhour]
+
+  api:
+    build: .
+    image: pickhour-backend:latest
+    container_name: picnic-api
+    command: ["/app/api"]
+    environment:
+      PORT: "8080"
+      RUN_MIGRATIONS: "false"
+      DATABASE_URL: postgres://picnic:picnic@db:5432/picnic?sslmode=disable
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    networks: [pickhour]
+
+  worker:
+    # Separate debian target: ships osmium-tool for the OSM ingest.
+    build:
+      context: .
+      target: worker
+    image: pickhour-worker:latest
+    container_name: picnic-worker
+    command: ["/app/worker"]
+    environment:
+      RUN_MIGRATIONS: "false"
+      DATABASE_URL: postgres://picnic:picnic@db:5432/picnic?sslmode=disable
+      REDIS_URL: redis://redis:6379
+      INGEST_SOURCE: osmium
+      INGEST_EXTRACT_DIR: /data/extracts
+    volumes:
+      - extracts:/data/extracts
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    networks: [pickhour]
+
+  mcp:
+    build: .
+    image: pickhour-backend:latest
+    container_name: picnic-mcp
+    command: ["/app/mcp"]
+    environment:
+      MCP_PORT: "8081"
+      RUN_MIGRATIONS: "false"
+      DATABASE_URL: postgres://picnic:picnic@db:5432/picnic?sslmode=disable
+    ports:
+      - "127.0.0.1:8081:8081"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    networks: [pickhour]
+
 volumes:
   picnicdata:
+  extracts:
 
 networks:
   pickhour:
-    external: true

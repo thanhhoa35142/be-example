@@ -1,5 +1,3 @@
-// Package jobs runs background jobs guarded by Postgres advisory locks so
-// overlapping workers never execute the same job twice.
 package jobs
 
 import (
@@ -13,27 +11,38 @@ import (
 
 var ErrLockNotAcquired = errors.New("job lock not acquired")
 
-// RunWithLock executes fn while holding a session-level advisory lock derived
-// from name. If another session holds the lock, it returns ErrLockNotAcquired
-// without running fn.
-func RunWithLock(ctx context.Context, pool *pgxpool.Pool, name string, fn func(ctx context.Context) error) error {
+func Acquire(ctx context.Context, pool *pgxpool.Pool, name string) (func(), error) {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
-		return fmt.Errorf("acquire conn: %w", err)
+		return nil, fmt.Errorf("acquire conn: %w", err)
 	}
-	defer conn.Release()
 
 	var acquired bool
 	if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", lockKey(name)).Scan(&acquired); err != nil {
-		return fmt.Errorf("advisory lock: %w", err)
+		conn.Release()
+		return nil, fmt.Errorf("advisory lock: %w", err)
 	}
 	if !acquired {
-		return ErrLockNotAcquired
+		conn.Release()
+		return nil, ErrLockNotAcquired
 	}
-	defer func() {
-		_, _ = conn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", lockKey(name))
-	}()
+	return func() {
+		if _, err := conn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", lockKey(name)); err != nil {
+			// A failed unlock may leave the session-level lock held; destroy
+			// the connection instead of returning a still-locked conn to the pool.
+			_ = conn.Hijack().Close(context.Background())
+			return
+		}
+		conn.Release()
+	}, nil
+}
 
+func RunWithLock(ctx context.Context, pool *pgxpool.Pool, name string, fn func(ctx context.Context) error) error {
+	release, err := Acquire(ctx, pool, name)
+	if err != nil {
+		return err
+	}
+	defer release()
 	return fn(ctx)
 }
 

@@ -5,23 +5,24 @@ import (
 	"time"
 )
 
-// Repository is the persistence port for the entitlement module.
 type Repository interface {
-	// DeviceExists reports whether an active device exists.
 	DeviceExists(ctx context.Context, deviceID string) (bool, error)
-	// UpsertSubscription inserts or refreshes a subscription row.
-	UpsertSubscription(ctx context.Context, s Subscription) error
-	// LinkDevice attaches a subscription to a device.
-	LinkDevice(ctx context.Context, deviceID, originalTransactionID string) error
-	// ActiveSubscription returns the device's current entitled subscription.
+
+	UpsertSubscription(ctx context.Context, s Subscription) (applied bool, err error)
+
+	LinkDevice(ctx context.Context, deviceID, originalTransactionID string, maxDevices int) error
+
 	ActiveSubscription(ctx context.Context, deviceID string) (*Subscription, error)
-	// RecordNotification stores an App Store Server Notification for audit.
+
 	RecordNotification(ctx context.Context, n NotificationRecord) error
-	// MarkNotificationProcessed stamps processed_at.
+
+	SubscriptionLastSignedDate(ctx context.Context, originalTransactionID string) (signedAt time.Time, ok bool, err error)
+
 	MarkNotificationProcessed(ctx context.Context, uuid string) error
+	MarkNotificationIgnored(ctx context.Context, uuid string) error
+	MarkNotificationFailed(ctx context.Context, uuid string, lastError string) error
 }
 
-// NotificationRecord is the audit row for apple_notification.
 type NotificationRecord struct {
 	UUID                  string
 	Type                  string

@@ -16,13 +16,17 @@ func NewRecommendationsRepo(q *Queries) *RecommendationsRepo {
 	return &RecommendationsRepo{q: q}
 }
 
-func (r *RecommendationsRepo) Nearby(ctx context.Context, lat, lon, radiusM float64, tsHour time.Time, limit int) ([]recommendations.Item, error) {
+func (r *RecommendationsRepo) Nearby(ctx context.Context, lat, lon, radiusM float64, tsHour time.Time, limit int, f spots.Filter) ([]recommendations.Item, error) {
+	f = f.Normalized()
 	rows, err := r.q.ListRecommendedSpots(ctx, ListRecommendedSpotsParams{
 		StMakepoint:   lat,
 		StMakepoint_2: lon,
 		TsHour:        tsHour,
 		StDwithin:     radiusM,
 		Limit:         int32(limit),
+		Kinds:         f.Kinds,
+		Amenities:     f.Amenities,
+		MinScore:      minScoreParam(f.MinScore),
 	})
 	if err != nil {
 		return nil, err

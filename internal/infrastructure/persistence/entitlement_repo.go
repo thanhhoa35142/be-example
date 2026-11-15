@@ -9,15 +9,17 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/thanhhoa35142/be-example/internal/modules/entitlement"
 )
 
 type EntitlementRepo struct {
-	q *Queries
+	q    *Queries
+	pool *pgxpool.Pool
 }
 
-func NewEntitlementRepo(q *Queries) *EntitlementRepo {
-	return &EntitlementRepo{q: q}
+func NewEntitlementRepo(q *Queries, pool *pgxpool.Pool) *EntitlementRepo {
+	return &EntitlementRepo{q: q, pool: pool}
 }
 
 func (r *EntitlementRepo) DeviceExists(ctx context.Context, deviceID string) (bool, error) {
@@ -35,8 +37,8 @@ func tsParam(t *time.Time) pgtype.Timestamptz {
 	return pgtype.Timestamptz{Time: *t, Valid: true}
 }
 
-func (r *EntitlementRepo) UpsertSubscription(ctx context.Context, s entitlement.Subscription) error {
-	return r.q.UpsertSubscription(ctx, UpsertSubscriptionParams{
+func (r *EntitlementRepo) UpsertSubscription(ctx context.Context, s entitlement.Subscription) (bool, error) {
+	n, err := r.q.UpsertSubscription(ctx, UpsertSubscriptionParams{
 		OriginalTransactionID: s.OriginalTransactionID,
 		ProductID:             s.ProductID,
 		Status:                s.Status,
@@ -49,17 +51,45 @@ func (r *EntitlementRepo) UpsertSubscription(ctx context.Context, s entitlement.
 		RevokedAt:             tsParam(s.RevokedAt),
 		LastSignedDate:        s.LastSignedDate,
 	})
+	return n > 0, err
 }
 
-func (r *EntitlementRepo) LinkDevice(ctx context.Context, deviceID, originalTransactionID string) error {
+func (r *EntitlementRepo) LinkDevice(ctx context.Context, deviceID, originalTransactionID string, maxDevices int) error {
 	id, err := uuid.Parse(deviceID)
 	if err != nil {
 		return entitlement.ErrDeviceNotFound
 	}
-	return r.q.LinkDeviceSubscription(ctx, LinkDeviceSubscriptionParams{
-		DeviceID:              id,
-		OriginalTransactionID: originalTransactionID,
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	q := r.q.WithTx(tx)
+
+	if _, err := q.LockSubscription(ctx, originalTransactionID); err != nil {
+		return err
+	}
+	linked, err := q.IsDeviceLinkedToSubscription(ctx, IsDeviceLinkedToSubscriptionParams{
+		DeviceID: id, OriginalTransactionID: originalTransactionID,
 	})
+	if err != nil {
+		return err
+	}
+	if !linked {
+		n, err := q.CountActiveDevicesForSubscription(ctx, originalTransactionID)
+		if err != nil {
+			return err
+		}
+		if int(n) >= maxDevices {
+			return entitlement.ErrDeviceLimit
+		}
+		if err := q.LinkDeviceSubscription(ctx, LinkDeviceSubscriptionParams{
+			DeviceID: id, OriginalTransactionID: originalTransactionID,
+		}); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *EntitlementRepo) ActiveSubscription(ctx context.Context, deviceID string) (*entitlement.Subscription, error) {
@@ -109,10 +139,42 @@ func (r *EntitlementRepo) RecordNotification(ctx context.Context, n entitlement.
 	})
 }
 
+func (r *EntitlementRepo) SubscriptionLastSignedDate(ctx context.Context, originalTransactionID string) (time.Time, bool, error) {
+	t, err := r.q.SubscriptionLastSignedDate(ctx, originalTransactionID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	return t, true, nil
+}
+
 func (r *EntitlementRepo) MarkNotificationProcessed(ctx context.Context, uuidStr string) error {
+	return r.markNotification(ctx, uuidStr, func(id uuid.UUID) error {
+		return r.q.MarkNotificationProcessed(ctx, id)
+	})
+}
+
+func (r *EntitlementRepo) MarkNotificationIgnored(ctx context.Context, uuidStr string) error {
+	return r.markNotification(ctx, uuidStr, func(id uuid.UUID) error {
+		return r.q.MarkNotificationIgnored(ctx, id)
+	})
+}
+
+func (r *EntitlementRepo) MarkNotificationFailed(ctx context.Context, uuidStr, lastError string) error {
+	return r.markNotification(ctx, uuidStr, func(id uuid.UUID) error {
+		return r.q.MarkNotificationFailed(ctx, MarkNotificationFailedParams{
+			NotificationUuid: id,
+			LastError:        pgtype.Text{String: lastError, Valid: lastError != ""},
+		})
+	})
+}
+
+func (r *EntitlementRepo) markNotification(ctx context.Context, uuidStr string, fn func(uuid.UUID) error) error {
 	id, err := uuid.Parse(uuidStr)
 	if err != nil {
-		return nil // unparseable uuid can't be in the table anyway
+		return nil
 	}
-	return r.q.MarkNotificationProcessed(ctx, id)
+	return fn(id)
 }

@@ -13,7 +13,7 @@ import (
 )
 
 const deleteWeatherBefore = `-- name: DeleteWeatherBefore :exec
-DELETE FROM weather_hourly
+DELETE FROM t_weather_hourly_forecasts
 WHERE ts < $1
 `
 
@@ -23,7 +23,7 @@ func (q *Queries) DeleteWeatherBefore(ctx context.Context, ts time.Time) error {
 }
 
 const deleteWeatherCellRange = `-- name: DeleteWeatherCellRange :exec
-DELETE FROM weather_hourly
+DELETE FROM t_weather_hourly_forecasts
 WHERE cell_id = $1 AND ts >= $2 AND ts <= $3
 `
 
@@ -40,7 +40,7 @@ func (q *Queries) DeleteWeatherCellRange(ctx context.Context, arg DeleteWeatherC
 
 const distinctSpotCells = `-- name: DistinctSpotCells :many
 SELECT DISTINCT cell_id
-FROM spot
+FROM t_spots
 WHERE status = 'active'
 `
 
@@ -62,6 +62,35 @@ func (q *Queries) DistinctSpotCells(ctx context.Context) ([]int64, error) {
 		return nil, err
 	}
 	return items, nil
+}
+
+const reserveProviderQuota = `-- name: ReserveProviderQuota :one
+INSERT INTO t_provider_quotas (provider, day, used)
+SELECT $1, (now() AT TIME ZONE 'UTC')::date, $2
+WHERE $2 <= $3::integer
+ON CONFLICT (provider, day) DO UPDATE
+SET used = t_provider_quotas.used + EXCLUDED.used,
+    updated_at = now()
+WHERE t_provider_quotas.used + EXCLUDED.used <= $3::integer
+RETURNING used
+`
+
+type ReserveProviderQuotaParams struct {
+	Provider   string `json:"provider"`
+	Weight     int32  `json:"weight"`
+	QuotaLimit int32  `json:"quota_limit"`
+}
+
+// Atomically adds `weight` to the provider's UTC-day budget, but only while
+// the result stays within `limit`. The INSERT branch is guarded by
+// `SELECT ... WHERE weight <= limit` so a first call of the day cannot exceed
+// the cap either. Returns the new `used` value; no row is returned
+// (sqlc.ErrNoRows) when the budget would be exceeded.
+func (q *Queries) ReserveProviderQuota(ctx context.Context, arg ReserveProviderQuotaParams) (int32, error) {
+	row := q.db.QueryRow(ctx, reserveProviderQuota, arg.Provider, arg.Weight, arg.QuotaLimit)
+	var used int32
+	err := row.Scan(&used)
+	return used, err
 }
 
 type UpsertWeatherHourlyParams struct {

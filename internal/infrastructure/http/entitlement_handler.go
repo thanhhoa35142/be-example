@@ -18,7 +18,6 @@ func NewEntitlementHandler(svc *entitlement.Service) *EntitlementHandler {
 	return &EntitlementHandler{svc: svc}
 }
 
-// GET /v1/devices/:id/entitlement — resolved plan for a device.
 func (h *EntitlementHandler) Get(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -44,26 +43,24 @@ func (h *EntitlementHandler) Get(c *gin.Context) {
 }
 
 type linkTransactionRequest struct {
-	DeviceID          string `json:"deviceId"`
 	SignedTransaction string `json:"signedTransaction"`
 }
 
-// POST /v1/entitlement/link — attach a StoreKit signed transaction to a device.
 func (h *EntitlementHandler) Link(c *gin.Context) {
 	var req linkTransactionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Invalid body", "expected JSON with deviceId and signedTransaction")
+		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Invalid body", "expected JSON with signedTransaction")
 		return
 	}
-	if _, err := uuid.Parse(req.DeviceID); err != nil {
-		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidID, "Invalid deviceId", "expected a UUID")
+	deviceID, ok := requestDeviceID(c)
+	if !ok {
 		return
 	}
 	if req.SignedTransaction == "" {
 		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Missing signedTransaction", "")
 		return
 	}
-	e, err := h.svc.LinkTransaction(c.Request.Context(), req.DeviceID, req.SignedTransaction)
+	e, err := h.svc.LinkTransaction(c.Request.Context(), deviceID.String(), req.SignedTransaction)
 	if err != nil {
 		h.writeError(c, err)
 		return
@@ -75,9 +72,6 @@ type appStoreNotificationRequest struct {
 	SignedPayload string `json:"signedPayload"`
 }
 
-// POST /v1/appstore/notifications — App Store Server Notifications V2 webhook.
-// TODO(production): authenticate the caller (Apple does not sign the outer
-// request; verify the JWS payload chain before trusting contents).
 func (h *EntitlementHandler) AppStoreNotification(c *gin.Context) {
 	var req appStoreNotificationRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -99,6 +93,13 @@ func (h *EntitlementHandler) writeError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, entitlement.ErrDeviceNotFound):
 		httpx.WriteProblem(c, http.StatusNotFound, httpx.CodeNotFound, "Device not found", "")
+	case errors.Is(err, entitlement.ErrDeviceLimit):
+		httpx.WriteProblem(c, http.StatusConflict, httpx.CodeDeviceLimit, "Device limit reached",
+			"this subscription is already linked to the maximum number of devices")
+	case errors.Is(err, entitlement.ErrAccountTokenMismatch):
+		httpx.WriteProblem(c, http.StatusForbidden, httpx.CodeAccountMismatch, "Transaction belongs to another device", "")
+	case errors.Is(err, entitlement.ErrNotConfigured):
+		httpx.WriteProblem(c, http.StatusServiceUnavailable, httpx.CodeUnavailable, "Subscription verification unavailable", "")
 	case errors.Is(err, entitlement.ErrInvalidJWS), errors.Is(err, entitlement.ErrInvalidNotice):
 		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Invalid signed payload", "")
 	default:

@@ -2,12 +2,14 @@ package persistence
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/thanhhoa35142/be-example/internal/modules/crowd"
+	"github.com/thanhhoa35142/be-example/internal/modules/holidays"
 )
 
 type CrowdRepo struct {
@@ -99,10 +101,17 @@ func (r *CrowdRepo) Holidays(ctx context.Context, countries []string, from, to t
 	return holidays, nil
 }
 
-func (r *CrowdRepo) Upsert(ctx context.Context, spotID uuid.UUID, dow, hour int, level int) error {
-	return r.q.UpsertCrowdEstimate(ctx, UpsertCrowdEstimateParams{
-		SpotID: spotID, Dow: int16(dow), Hour: int16(hour), Level: int16(level),
-	})
+func (r *CrowdRepo) UpsertModelBatch(ctx context.Context, rows []crowd.ModelEstimate) (int64, error) {
+	p := UpsertCrowdEstimatesBatchParams{
+		SpotIds: make([]uuid.UUID, len(rows)),
+		Dows:    make([]int16, len(rows)),
+		Hours:   make([]int16, len(rows)),
+		Levels:  make([]int16, len(rows)),
+	}
+	for i, r := range rows {
+		p.SpotIds[i], p.Dows[i], p.Hours[i], p.Levels[i] = r.SpotID, int16(r.Dow), int16(r.Hour), int16(r.Level)
+	}
+	return r.q.UpsertCrowdEstimatesBatch(ctx, p)
 }
 
 func (r *CrowdRepo) CommunityStats(ctx context.Context, minReports int) ([]crowd.CommunitySlot, error) {
@@ -135,6 +144,31 @@ func (r *CrowdRepo) UpsertCommunity(ctx context.Context, spotID uuid.UUID, dow, 
 	})
 }
 
-func (r *CrowdRepo) DeleteStaleCommunity(ctx context.Context) error {
-	return r.q.DeleteStaleCommunityEstimates(ctx)
+func (r *CrowdRepo) DeleteStaleCommunity(ctx context.Context, runStart time.Time) (int64, error) {
+	return r.q.DeleteUnrefreshedCommunityEstimates(ctx, runStart)
+}
+
+type HolidaysRepo struct{ q *Queries }
+
+func NewHolidaysRepo(q *Queries) *HolidaysRepo { return &HolidaysRepo{q: q} }
+
+func (r *HolidaysRepo) Countries(ctx context.Context) ([]string, error) {
+	return r.q.ListHolidayCountries(ctx)
+}
+
+func (r *HolidaysRepo) Upsert(ctx context.Context, rows []holidays.Row) (int64, error) {
+	type jsonRow struct {
+		Country string `json:"country"`
+		Date    string `json:"date"`
+		Name    string `json:"name"`
+	}
+	payload := make([]jsonRow, len(rows))
+	for i, row := range rows {
+		payload[i] = jsonRow{row.Country, row.Date.Format("2006-01-02"), row.Name}
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return 0, err
+	}
+	return r.q.UpsertHolidays(ctx, raw)
 }

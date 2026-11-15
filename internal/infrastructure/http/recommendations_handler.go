@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/thanhhoa35142/be-example/internal/modules/recommendations"
+	"github.com/thanhhoa35142/be-example/internal/modules/spots"
 	"github.com/thanhhoa35142/be-example/internal/platform/httpx"
 )
 
@@ -18,8 +19,8 @@ func NewRecommendationsHandler(svc *recommendations.Service) *RecommendationsHan
 	return &RecommendationsHandler{svc: svc}
 }
 
-// GET /v1/recommendations?lat=&lon=&radius=&when=&limit=
 func (h *RecommendationsHandler) List(c *gin.Context) {
+
 	lat, err := strconv.ParseFloat(c.Query("lat"), 64)
 	if err != nil {
 		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidQuery, "Invalid lat", "expected decimal degrees")
@@ -30,6 +31,7 @@ func (h *RecommendationsHandler) List(c *gin.Context) {
 		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidQuery, "Invalid lon", "expected decimal degrees")
 		return
 	}
+	lat, lon = canonGeo(90)(lat), canonGeo(180)(lon)
 
 	q := recommendations.Query{Lat: lat, Lon: lon, When: time.Now().UTC()}
 
@@ -39,7 +41,7 @@ func (h *RecommendationsHandler) List(c *gin.Context) {
 			httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidQuery, "Invalid radius", "expected meters")
 			return
 		}
-		q.RadiusM = v
+		q.RadiusM = canonRadiusM(v)
 	}
 	if raw := c.Query("when"); raw != "" {
 		t, err := time.Parse(time.RFC3339, raw)
@@ -57,6 +59,15 @@ func (h *RecommendationsHandler) List(c *gin.Context) {
 		}
 		q.Limit = v
 	}
+
+	f, err := spots.ParseFilter(c.Query("kinds"), c.Query("amenities"), c.Query("minScore"))
+	if err != nil {
+		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidQuery, "Invalid query", err.Error())
+		return
+	}
+	q.Filter = f
+
+	q.When = q.When.UTC().Truncate(time.Hour)
 
 	items, err := h.svc.Recommend(c.Request.Context(), q)
 	if err != nil {

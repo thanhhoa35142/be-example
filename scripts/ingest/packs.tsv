@@ -1,0 +1,60 @@
+# City packs for cloud ingest (.github/workflows/ingest-cloud.yml).
+# One row per pack; tab-separated. Lines starting with # are ignored.
+#
+# group    selection key for the workflow input (one or more per run, or "all")
+# extract  Geofabrik path without ".osm.pbf". Prefer the SMALLEST region
+#          that fully contains the bbox (state/province instead of country)
+#          — download + osmium time scale with extract size. The worker
+#          resolves <basename(extract)>.osm.pbf, so basenames must be unique
+#          (e.g. never mix north-america/us/georgia and europe/georgia).
+#          Packs sharing one extract are ingested back-to-back from it.
+# bbox     west south east north (EPSG:4326), city core + inner suburbs.
+#
+# group	slug	name	country	tz	west	south	east	north	extract
+# --- Benelux ---
+lu	luxembourg	Luxembourg	LU	Europe/Luxembourg	5.70	49.40	6.55	50.20	europe/luxembourg-latest
+be	brussels	Brussels	BE	Europe/Brussels	4.25	50.75	4.50	50.95	europe/belgium-latest
+nl	amsterdam	Amsterdam	NL	Europe/Amsterdam	4.70	52.25	5.10	52.45	europe/netherlands-latest
+nl	rotterdam	Rotterdam	NL	Europe/Amsterdam	4.35	51.85	4.60	52.00	europe/netherlands-latest
+nl	utrecht	Utrecht	NL	Europe/Amsterdam	4.95	52.05	5.20	52.15	europe/netherlands-latest
+nl	denhaag	The Hague	NL	Europe/Amsterdam	4.20	52.00	4.45	52.12	europe/netherlands-latest
+# --- Alps ---
+at	vienna	Vienna	AT	Europe/Vienna	16.05	48.05	16.65	48.35	europe/austria-latest
+ch	zurich	Zurich	CH	Europe/Zurich	8.35	47.30	8.65	47.48	europe/switzerland-latest
+# --- Germany (state extracts: 80-700 MB instead of 4.3 GB for germany) ---
+de	berlin	Berlin	DE	Europe/Berlin	13.08	52.34	13.76	52.68	europe/germany/berlin-latest
+de	hamburg	Hamburg	DE	Europe/Berlin	9.75	53.35	10.35	53.60	europe/germany/hamburg-latest
+de	munich	Munich	DE	Europe/Berlin	11.35	48.06	11.72	48.25	europe/germany/bayern/oberbayern-latest
+# --- France / Spain / Italy / Portugal ---
+fr	paris	Paris	FR	Europe/Paris	2.20	48.75	2.50	49.00	europe/france/ile-de-france-latest
+es	madrid	Madrid	ES	Europe/Madrid	-3.85	40.35	-3.55	40.55	europe/spain/madrid-latest
+es	barcelona	Barcelona	ES	Europe/Madrid	2.05	41.35	2.25	41.45	europe/spain/cataluna-latest
+es	seville	Seville	ES	Europe/Madrid	-6.05	37.35	-5.95	37.45	europe/spain/andalucia-latest
+it	rome	Rome	IT	Europe/Rome	12.35	41.80	12.62	41.99	europe/italy/centro-latest
+it	milan	Milan	IT	Europe/Rome	9.07	45.39	9.28	45.54	europe/italy/nord-ovest-latest
+pt	lisbon	Lisbon	PT	Europe/Lisbon	-9.23	38.69	-9.09	38.80	europe/portugal-latest
+# --- Nordics / Ireland / Central Europe ---
+dk	copenhagen	Copenhagen	DK	Europe/Copenhagen	12.45	55.61	12.65	55.73	europe/denmark-latest
+se	stockholm	Stockholm	SE	Europe/Stockholm	17.90	59.25	18.20	59.40	europe/sweden-latest
+ie	dublin	Dublin	IE	Europe/Dublin	-6.40	53.28	-6.10	53.42	europe/ireland-and-northern-ireland-latest
+cz	prague	Prague	CZ	Europe/Prague	14.25	49.95	14.70	50.18	europe/czech-republic-latest
+pl	warsaw	Warsaw	PL	Europe/Warsaw	20.85	52.10	21.27	52.37	europe/poland/mazowieckie-latest
+# --- United Kingdom (GBP market) ---
+gb	london	London	GB	Europe/London	-0.35	51.38	0.15	51.62	europe/united-kingdom/england/greater-london-latest
+gb	edinburgh	Edinburgh	GB	Europe/London	-3.33	55.89	-3.08	56.00	europe/united-kingdom/scotland-latest
+# --- United States (state extracts) ---
+us	new-york	New York	US	America/New_York	-74.26	40.49	-73.70	40.92	north-america/us/new-york-latest
+us	boston	Boston	US	America/New_York	-71.19	42.23	-70.99	42.40	north-america/us/massachusetts-latest
+us	washington-dc	Washington DC	US	America/New_York	-77.12	38.79	-76.91	39.00	north-america/us/district-of-columbia-latest
+us	chicago	Chicago	US	America/Chicago	-87.94	41.64	-87.52	42.02	north-america/us/illinois-latest
+us	austin	Austin	US	America/Chicago	-97.94	30.10	-97.56	30.52	north-america/us/texas-latest
+us	denver	Denver	US	America/Denver	-105.11	39.61	-104.60	39.91	north-america/us/colorado-latest
+us	san-francisco	San Francisco	US	America/Los_Angeles	-122.52	37.70	-122.35	37.83	north-america/us/california-latest
+us	los-angeles	Los Angeles	US	America/Los_Angeles	-118.67	33.70	-118.15	34.34	north-america/us/california-latest
+us	seattle	Seattle	US	America/Los_Angeles	-122.44	47.49	-122.24	47.74	north-america/us/washington-latest
+us	portland	Portland	US	America/Los_Angeles	-122.84	45.43	-122.47	45.65	north-america/us/oregon-latest
+# --- Australia (state extracts; southern hemisphere = year-round users) ---
+au	sydney	Sydney	AU	Australia/Sydney	150.95	-34.05	151.35	-33.70	australia-oceania/australia/new-south-wales-latest
+au	melbourne	Melbourne	AU	Australia/Melbourne	144.80	-37.95	145.15	-37.70	australia-oceania/australia/victoria-latest
+au	brisbane	Brisbane	AU	Australia/Brisbane	152.90	-27.60	153.20	-27.35	australia-oceania/australia/queensland-latest
+au	perth	Perth	AU	Australia/Perth	115.70	-32.10	116.00	-31.85	australia-oceania/australia/western-australia-latest

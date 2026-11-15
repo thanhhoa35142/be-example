@@ -6,10 +6,25 @@ import (
 	"github.com/uber/h3-go/v4"
 )
 
-// H3Resolution is the grid resolution used for weather cells and spot.cell_id.
 const H3Resolution = 7
 
-// CellIDFromLatLng returns the H3 cell index at H3Resolution for a point.
+var WeatherResolution = 6
+
+func WeatherCellID(cellID int64) int64 {
+	if WeatherResolution >= H3Resolution {
+		return cellID
+	}
+	cell := h3.Cell(uint64(cellID))
+	if !cell.IsValid() {
+		return cellID
+	}
+	parent, err := cell.Parent(WeatherResolution)
+	if err != nil {
+		return cellID
+	}
+	return int64(parent)
+}
+
 func CellIDFromLatLng(lat, lng float64) (int64, error) {
 	cell, err := h3.LatLngToCell(h3.LatLng{Lat: lat, Lng: lng}, H3Resolution)
 	if err != nil {
@@ -18,7 +33,6 @@ func CellIDFromLatLng(lat, lng float64) (int64, error) {
 	return int64(cell), nil
 }
 
-// CellCenter returns the lat/lng center of an H3 cell index.
 func CellCenter(cellID int64) (lat, lng float64, err error) {
 	cell := h3.Cell(uint64(cellID))
 	if !cell.IsValid() {

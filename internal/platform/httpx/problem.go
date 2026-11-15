@@ -1,14 +1,15 @@
-// Package httpx provides shared HTTP helpers: RFC 7807 problem details.
 package httpx
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// Stable machine-readable error codes. Clients switch on Code, never Title.
 const (
 	CodeBadRequest    = "bad_request"
 	CodeInvalidID     = "invalid_id"
@@ -24,10 +25,28 @@ const (
 	CodeRateLimited   = "rate_limited"
 	CodePlanLimit     = "plan_limit"
 	CodeInternal      = "internal_error"
+
+	CodePayloadTooLarge = "payload_too_large"
+
+	CodeUnauthorized = "unauthorized"
+
+	CodeDeviceLimit = "device_limit"
+
+	CodeAccountMismatch = "account_mismatch"
+
+	CodeForbidden = "forbidden"
+
+	CodeWrongPassword = "wrong_password"
+
+	CodeWeakPassword = "weak_password"
+
+	CodePasswordUnchanged = "password_unchanged"
+
+	CodeUnavailable = "service_unavailable"
+
+	CodeTimeout = "timeout"
 )
 
-// Problem is an RFC 7807 problem-details body extended with a stable
-// machine-readable Code and the RequestID for support correlation.
 type Problem struct {
 	Type      string `json:"type"`
 	Code      string `json:"code"`
@@ -38,7 +57,6 @@ type Problem struct {
 	RequestID string `json:"requestId,omitempty"`
 }
 
-// WriteProblem responds with a problem+json body.
 func WriteProblem(c *gin.Context, status int, code, title, detail string) {
 	c.Header("Content-Type", "application/problem+json")
 	c.JSON(status, Problem{
@@ -52,8 +70,17 @@ func WriteProblem(c *gin.Context, status int, code, title, detail string) {
 	})
 }
 
-// WriteError logs the underlying error server-side (with request id for
-// correlation) and returns a generic 500 — internals are never leaked.
+func isDBTimeout(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "57014" || pgErr.Code == "55P03"
+	}
+	return false
+}
+
 func WriteError(c *gin.Context, err error) {
 	slog.ErrorContext(c.Request.Context(), "request failed",
 		"request_id", c.GetString("requestID"),
@@ -64,5 +91,10 @@ func WriteError(c *gin.Context, err error) {
 		"path", c.Request.URL.Path,
 		"error", err,
 	)
+	if isDBTimeout(err) {
+		c.Header("Retry-After", "1")
+		WriteProblem(c, http.StatusServiceUnavailable, CodeTimeout, "Service Unavailable", "")
+		return
+	}
 	WriteProblem(c, http.StatusInternalServerError, CodeInternal, "Internal Server Error", "")
 }

@@ -11,14 +11,81 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-type AlertDelivery struct {
-	RuleID      uuid.UUID          `json:"rule_id"`
-	WindowStart time.Time          `json:"window_start"`
-	SentAt      pgtype.Timestamptz `json:"sent_at"`
-	ApnsStatus  pgtype.Int4        `json:"apns_status"`
+type TAdminAuditEvent struct {
+	ID          int64       `json:"id"`
+	AdminUserID pgtype.UUID `json:"admin_user_id"`
+	AuthMethod  string      `json:"auth_method"`
+	Method      string      `json:"method"`
+	Path        string      `json:"path"`
+	Status      int32       `json:"status"`
+	ClientIp    string      `json:"client_ip"`
+	RequestID   pgtype.Text `json:"request_id"`
+	CreatedAt   time.Time   `json:"created_at"`
 }
 
-type AlertRule struct {
+type TAdminGoogleToken struct {
+	AdminUserID   uuid.UUID `json:"admin_user_id"`
+	GoogleSub     string    `json:"google_sub"`
+	GoogleEmail   string    `json:"google_email"`
+	RefreshToken  []byte    `json:"refresh_token"`
+	Scopes        string    `json:"scopes"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+	GscSiteUrl    string    `json:"gsc_site_url"`
+	Ga4PropertyID string    `json:"ga4_property_id"`
+}
+
+type TAdminRecoveryCode struct {
+	ID          uuid.UUID          `json:"id"`
+	AdminUserID uuid.UUID          `json:"admin_user_id"`
+	CodeHash    []byte             `json:"code_hash"`
+	CreatedAt   time.Time          `json:"created_at"`
+	UsedAt      pgtype.Timestamptz `json:"used_at"`
+}
+
+type TAdminSession struct {
+	ID          uuid.UUID `json:"id"`
+	TokenHash   []byte    `json:"token_hash"`
+	AdminUserID uuid.UUID `json:"admin_user_id"`
+	UserAgent   string    `json:"user_agent"`
+	Ip          string    `json:"ip"`
+	CreatedAt   time.Time `json:"created_at"`
+	ExpiresAt   time.Time `json:"expires_at"`
+	LastSeenAt  time.Time `json:"last_seen_at"`
+}
+
+type TAdminTotpUsed struct {
+	AdminUserID uuid.UUID `json:"admin_user_id"`
+	Step        int64     `json:"step"`
+	UsedAt      time.Time `json:"used_at"`
+}
+
+type TAdminUser struct {
+	ID              uuid.UUID          `json:"id"`
+	Email           string             `json:"email"`
+	PasswordHash    string             `json:"password_hash"`
+	TotpSecret      []byte             `json:"totp_secret"`
+	TotpConfirmedAt pgtype.Timestamptz `json:"totp_confirmed_at"`
+	DisabledAt      pgtype.Timestamptz `json:"disabled_at"`
+	LastLoginAt     pgtype.Timestamptz `json:"last_login_at"`
+	FailedAttempts  int32              `json:"failed_attempts"`
+	LockedUntil     pgtype.Timestamptz `json:"locked_until"`
+	CreatedAt       time.Time          `json:"created_at"`
+	UpdatedAt       time.Time          `json:"updated_at"`
+}
+
+type TAlertDelivery struct {
+	RuleID      uuid.UUID          `json:"rule_id"`
+	WindowStart time.Time          `json:"window_start"`
+	Status      string             `json:"status"`
+	Attempts    int16              `json:"attempts"`
+	ClaimedAt   time.Time          `json:"claimed_at"`
+	SentAt      pgtype.Timestamptz `json:"sent_at"`
+	ApnsStatus  pgtype.Int4        `json:"apns_status"`
+	LastError   pgtype.Text        `json:"last_error"`
+}
+
+type TAlertRule struct {
 	ID         uuid.UUID   `json:"id"`
 	DeviceID   uuid.UUID   `json:"device_id"`
 	SpotID     pgtype.UUID `json:"spot_id"`
@@ -32,7 +99,7 @@ type AlertRule struct {
 	Enabled    bool        `json:"enabled"`
 }
 
-type ApiKey struct {
+type TApiKey struct {
 	ID           uuid.UUID          `json:"id"`
 	Name         string             `json:"name"`
 	Description  string             `json:"description"`
@@ -45,7 +112,7 @@ type ApiKey struct {
 	CreatedAt    time.Time          `json:"created_at"`
 }
 
-type ApiKeyGrant struct {
+type TApiKeyGrant struct {
 	ID        uuid.UUID `json:"id"`
 	ApiKeyID  uuid.UUID `json:"api_key_id"`
 	Effect    string    `json:"effect"`
@@ -54,7 +121,7 @@ type ApiKeyGrant struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-type AppleNotification struct {
+type TAppleNotification struct {
 	NotificationUuid      uuid.UUID          `json:"notification_uuid"`
 	Type                  string             `json:"type"`
 	Subtype               pgtype.Text        `json:"subtype"`
@@ -62,23 +129,27 @@ type AppleNotification struct {
 	SignedDate            time.Time          `json:"signed_date"`
 	Environment           string             `json:"environment"`
 	Payload               []byte             `json:"payload"`
+	Status                string             `json:"status"`
+	Attempts              int16              `json:"attempts"`
+	LastError             pgtype.Text        `json:"last_error"`
 	ReceivedAt            time.Time          `json:"received_at"`
 	ProcessedAt           pgtype.Timestamptz `json:"processed_at"`
 }
 
-type CityPack struct {
-	ID           uuid.UUID          `json:"id"`
-	Slug         string             `json:"slug"`
-	Name         string             `json:"name"`
-	Country      string             `json:"country"`
-	Tz           string             `json:"tz"`
-	Boundary     interface{}        `json:"boundary"`
-	Status       string             `json:"status"`
-	OsmExtract   pgtype.Text        `json:"osm_extract"`
-	LastImportAt pgtype.Timestamptz `json:"last_import_at"`
+type TCityPack struct {
+	ID               uuid.UUID          `json:"id"`
+	Slug             string             `json:"slug"`
+	Name             string             `json:"name"`
+	Country          string             `json:"country"`
+	Tz               string             `json:"tz"`
+	Boundary         interface{}        `json:"boundary"`
+	Status           string             `json:"status"`
+	OsmExtract       pgtype.Text        `json:"osm_extract"`
+	LastImportAt     pgtype.Timestamptz `json:"last_import_at"`
+	ExtractFetchedAt pgtype.Timestamptz `json:"extract_fetched_at"`
 }
 
-type CrowdCurve struct {
+type TCrowdCurf struct {
 	Kind          string  `json:"kind"`
 	Dow           int16   `json:"dow"`
 	Hour          int16   `json:"hour"`
@@ -86,7 +157,7 @@ type CrowdCurve struct {
 	ConfigVersion int16   `json:"config_version"`
 }
 
-type CrowdEstimate struct {
+type TCrowdEstimate struct {
 	SpotID    uuid.UUID `json:"spot_id"`
 	Dow       int16     `json:"dow"`
 	Hour      int16     `json:"hour"`
@@ -96,37 +167,41 @@ type CrowdEstimate struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-type CrowdReport struct {
-	ID        uuid.UUID `json:"id"`
-	SpotID    uuid.UUID `json:"spot_id"`
-	DeviceID  uuid.UUID `json:"device_id"`
-	Level     int16     `json:"level"`
-	LocalDow  int16     `json:"local_dow"`
-	LocalHour int16     `json:"local_hour"`
-	CreatedAt time.Time `json:"created_at"`
+type TCrowdReport struct {
+	ID         uuid.UUID   `json:"id"`
+	SpotID     uuid.UUID   `json:"spot_id"`
+	DeviceID   uuid.UUID   `json:"device_id"`
+	Level      int16       `json:"level"`
+	LocalDow   int16       `json:"local_dow"`
+	LocalHour  int16       `json:"local_hour"`
+	CreatedDay pgtype.Date `json:"created_day"`
+	CreatedAt  time.Time   `json:"created_at"`
 }
 
-type Device struct {
-	ID          uuid.UUID          `json:"id"`
-	ApnsToken   pgtype.Text        `json:"apns_token"`
-	ApnsEnv     pgtype.Text        `json:"apns_env"`
-	Locale      pgtype.Text        `json:"locale"`
-	Tz          pgtype.Text        `json:"tz"`
-	AppVersion  pgtype.Text        `json:"app_version"`
-	Prefs       []byte             `json:"prefs"`
-	AttestKeyID pgtype.Text        `json:"attest_key_id"`
-	CreatedAt   time.Time          `json:"created_at"`
-	LastSeenAt  pgtype.Timestamptz `json:"last_seen_at"`
-	DeletedAt   pgtype.Timestamptz `json:"deleted_at"`
+type TDevice struct {
+	ID                  uuid.UUID          `json:"id"`
+	ApnsToken           pgtype.Text        `json:"apns_token"`
+	ApnsEnv             pgtype.Text        `json:"apns_env"`
+	PushStatus          string             `json:"push_status"`
+	PushStatusChangedAt pgtype.Timestamptz `json:"push_status_changed_at"`
+	Locale              pgtype.Text        `json:"locale"`
+	Tz                  pgtype.Text        `json:"tz"`
+	AppVersion          pgtype.Text        `json:"app_version"`
+	Prefs               []byte             `json:"prefs"`
+	AttestKeyID         pgtype.Text        `json:"attest_key_id"`
+	CreatedAt           time.Time          `json:"created_at"`
+	LastSeenAt          pgtype.Timestamptz `json:"last_seen_at"`
+	DeletedAt           pgtype.Timestamptz `json:"deleted_at"`
+	SecretHash          pgtype.Text        `json:"secret_hash"`
 }
 
-type DeviceSubscription struct {
+type TDeviceSubscription struct {
 	DeviceID              uuid.UUID `json:"device_id"`
 	OriginalTransactionID string    `json:"original_transaction_id"`
 	LinkedAt              time.Time `json:"linked_at"`
 }
 
-type Event struct {
+type TEvent struct {
 	ID        uuid.UUID `json:"id"`
 	DeviceID  uuid.UUID `json:"device_id"`
 	Name      string    `json:"name"`
@@ -134,15 +209,7 @@ type Event struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-type EventDefault struct {
-	ID        uuid.UUID `json:"id"`
-	DeviceID  uuid.UUID `json:"device_id"`
-	Name      string    `json:"name"`
-	Props     []byte    `json:"props"`
-	CreatedAt time.Time `json:"created_at"`
-}
-
-type Holiday struct {
+type THoliday struct {
 	Country string      `json:"country"`
 	Region  string      `json:"region"`
 	Date    pgtype.Date `json:"date"`
@@ -150,7 +217,40 @@ type Holiday struct {
 	Name    pgtype.Text `json:"name"`
 }
 
-type JobRun struct {
+type TIngestFeature struct {
+	PackID        uuid.UUID   `json:"pack_id"`
+	Source        string      `json:"source"`
+	SourceID      string      `json:"source_id"`
+	Role          string      `json:"role"`
+	Kind          pgtype.Text `json:"kind"`
+	Amenity       pgtype.Text `json:"amenity"`
+	Quality       pgtype.Int2 `json:"quality"`
+	ExcludeReason pgtype.Text `json:"exclude_reason"`
+	Version       pgtype.Int4 `json:"version"`
+	Tags          []byte      `json:"tags"`
+	Geom          interface{} `json:"geom"`
+	ContentHash   string      `json:"content_hash"`
+	RunID         pgtype.Int8 `json:"run_id"`
+	SeenAt        time.Time   `json:"seen_at"`
+}
+
+type TIngestStaging struct {
+	PackID        uuid.UUID   `json:"pack_id"`
+	Source        string      `json:"source"`
+	SourceID      string      `json:"source_id"`
+	Role          string      `json:"role"`
+	Kind          pgtype.Text `json:"kind"`
+	Amenity       pgtype.Text `json:"amenity"`
+	Quality       pgtype.Int2 `json:"quality"`
+	ExcludeReason pgtype.Text `json:"exclude_reason"`
+	Version       pgtype.Int4 `json:"version"`
+	Tags          string      `json:"tags"`
+	Geojson       string      `json:"geojson"`
+	ContentHash   string      `json:"content_hash"`
+	RunID         pgtype.Int8 `json:"run_id"`
+}
+
+type TJobRun struct {
 	ID           int64              `json:"id"`
 	Job          string             `json:"job"`
 	CityPackID   pgtype.UUID        `json:"city_pack_id"`
@@ -159,15 +259,23 @@ type JobRun struct {
 	Status       string             `json:"status"`
 	RowsAffected pgtype.Int4        `json:"rows_affected"`
 	Error        pgtype.Text        `json:"error"`
+	Stats        []byte             `json:"stats"`
 }
 
-type PlanLimit struct {
+type TPlanLimit struct {
 	Plan       string      `json:"plan"`
 	Feature    string      `json:"feature"`
 	LimitValue pgtype.Int4 `json:"limit_value"`
 }
 
-type ScoreFeedback struct {
+type TProviderQuota struct {
+	Provider  string      `json:"provider"`
+	Day       pgtype.Date `json:"day"`
+	Used      int32       `json:"used"`
+	UpdatedAt time.Time   `json:"updated_at"`
+}
+
+type TScoreFeedback struct {
 	ID        uuid.UUID `json:"id"`
 	SpotID    uuid.UUID `json:"spot_id"`
 	TsHour    time.Time `json:"ts_hour"`
@@ -176,51 +284,58 @@ type ScoreFeedback struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-type ScoringConfig struct {
+type TScoringConfig struct {
 	Version    int16     `json:"version"`
 	Weights    []byte    `json:"weights"`
 	Thresholds []byte    `json:"thresholds"`
 	ActiveFrom time.Time `json:"active_from"`
 }
 
-type Spot struct {
-	ID             uuid.UUID          `json:"id"`
-	CityPackID     uuid.UUID          `json:"city_pack_id"`
-	Kind           string             `json:"kind"`
-	Name           pgtype.Text        `json:"name"`
-	Names          []byte             `json:"names"`
-	Geom           interface{}        `json:"geom"`
-	Area           interface{}        `json:"area"`
-	Country        string             `json:"country"`
-	City           pgtype.Text        `json:"city"`
-	Tz             string             `json:"tz"`
-	CellID         int64              `json:"cell_id"`
-	Status         string             `json:"status"`
-	MergedInto     pgtype.UUID        `json:"merged_into"`
-	LastVerifiedAt pgtype.Timestamptz `json:"last_verified_at"`
-	CreatedAt      time.Time          `json:"created_at"`
-	UpdatedAt      time.Time          `json:"updated_at"`
+type TSpot struct {
+	ID              uuid.UUID          `json:"id"`
+	CityPackID      uuid.UUID          `json:"city_pack_id"`
+	Kind            string             `json:"kind"`
+	Name            pgtype.Text        `json:"name"`
+	Names           []byte             `json:"names"`
+	Geom            interface{}        `json:"geom"`
+	Area            interface{}        `json:"area"`
+	Country         string             `json:"country"`
+	City            pgtype.Text        `json:"city"`
+	Tz              string             `json:"tz"`
+	CellID          int64              `json:"cell_id"`
+	Status          string             `json:"status"`
+	MergedInto      pgtype.UUID        `json:"merged_into"`
+	LastVerifiedAt  pgtype.Timestamptz `json:"last_verified_at"`
+	CreatedAt       time.Time          `json:"created_at"`
+	UpdatedAt       time.Time          `json:"updated_at"`
+	Quality         pgtype.Int2        `json:"quality"`
+	Attrs           []byte             `json:"attrs"`
+	Curated         bool               `json:"curated"`
+	StatusReason    pgtype.Text        `json:"status_reason"`
+	StatusChangedAt pgtype.Timestamptz `json:"status_changed_at"`
 }
 
-type SpotAmenity struct {
+type TSpotAmenity struct {
 	SpotID    uuid.UUID `json:"spot_id"`
 	Type      string    `json:"type"`
 	DistanceM int16     `json:"distance_m"`
 	Source    string    `json:"source"`
+	Count     int16     `json:"count"`
 }
 
-type SpotReport struct {
-	ID         uuid.UUID   `json:"id"`
-	SpotID     uuid.UUID   `json:"spot_id"`
-	DeviceID   uuid.UUID   `json:"device_id"`
-	Type       string      `json:"type"`
-	IssueCode  pgtype.Text `json:"issue_code"`
-	Status     string      `json:"status"`
-	CreatedDay pgtype.Date `json:"created_day"`
-	CreatedAt  time.Time   `json:"created_at"`
+type TSpotReport struct {
+	ID         uuid.UUID          `json:"id"`
+	SpotID     uuid.UUID          `json:"spot_id"`
+	DeviceID   uuid.UUID          `json:"device_id"`
+	Type       string             `json:"type"`
+	IssueCode  pgtype.Text        `json:"issue_code"`
+	Status     string             `json:"status"`
+	ReviewedAt pgtype.Timestamptz `json:"reviewed_at"`
+	CreatedDay pgtype.Date        `json:"created_day"`
+	CreatedAt  time.Time          `json:"created_at"`
 }
 
-type SpotScore struct {
+type TSpotScore struct {
 	SpotID        uuid.UUID   `json:"spot_id"`
 	TsHour        time.Time   `json:"ts_hour"`
 	ConfigVersion int16       `json:"config_version"`
@@ -236,31 +351,28 @@ type SpotScore struct {
 	ComputedAt    time.Time   `json:"computed_at"`
 }
 
-type SpotScoreDefault struct {
-	SpotID        uuid.UUID   `json:"spot_id"`
-	TsHour        time.Time   `json:"ts_hour"`
-	ConfigVersion int16       `json:"config_version"`
-	Score         int16       `json:"score"`
-	SWeather      pgtype.Int2 `json:"s_weather"`
-	SCrowd        pgtype.Int2 `json:"s_crowd"`
-	SAmenity      pgtype.Int2 `json:"s_amenity"`
-	SShade        pgtype.Int2 `json:"s_shade"`
-	SFresh        pgtype.Int2 `json:"s_fresh"`
-	CapReason     pgtype.Text `json:"cap_reason"`
-	Reasons       []byte      `json:"reasons"`
-	Confidence    int16       `json:"confidence"`
-	ComputedAt    time.Time   `json:"computed_at"`
+type TSpotSource struct {
+	SpotID      uuid.UUID          `json:"spot_id"`
+	Source      string             `json:"source"`
+	SourceID    string             `json:"source_id"`
+	Version     pgtype.Int4        `json:"version"`
+	ImportedAt  time.Time          `json:"imported_at"`
+	LastSeenAt  pgtype.Timestamptz `json:"last_seen_at"`
+	MissingRuns int16              `json:"missing_runs"`
+	Via         string             `json:"via"`
+	ContentHash pgtype.Text        `json:"content_hash"`
 }
 
-type SpotSource struct {
-	SpotID     uuid.UUID   `json:"spot_id"`
-	Source     string      `json:"source"`
-	SourceID   string      `json:"source_id"`
-	Version    pgtype.Int4 `json:"version"`
-	ImportedAt time.Time   `json:"imported_at"`
+type TStateTransition struct {
+	ID         int64       `json:"id"`
+	Entity     string      `json:"entity"`
+	EntityID   string      `json:"entity_id"`
+	FromStatus pgtype.Text `json:"from_status"`
+	ToStatus   string      `json:"to_status"`
+	ChangedAt  time.Time   `json:"changed_at"`
 }
 
-type Subscription struct {
+type TSubscription struct {
 	OriginalTransactionID string             `json:"original_transaction_id"`
 	ProductID             string             `json:"product_id"`
 	Status                string             `json:"status"`
@@ -275,7 +387,42 @@ type Subscription struct {
 	UpdatedAt             time.Time          `json:"updated_at"`
 }
 
-type WeatherHourly struct {
+type TTrafficGa4Daily struct {
+	Date                  pgtype.Date   `json:"date"`
+	PropertyID            string        `json:"property_id"`
+	Sessions              int64         `json:"sessions"`
+	TotalUsers            int64         `json:"total_users"`
+	NewUsers              int64         `json:"new_users"`
+	PageViews             int64         `json:"page_views"`
+	EngagementRate        pgtype.Float8 `json:"engagement_rate"`
+	AvgSessionDurationSec pgtype.Float8 `json:"avg_session_duration_sec"`
+	SyncedAt              time.Time     `json:"synced_at"`
+}
+
+type TTrafficGscDaily struct {
+	Date        pgtype.Date `json:"date"`
+	SiteUrl     string      `json:"site_url"`
+	Clicks      int64       `json:"clicks"`
+	Impressions int64       `json:"impressions"`
+	Ctr         float64     `json:"ctr"`
+	Position    float64     `json:"position"`
+	SyncedAt    time.Time   `json:"synced_at"`
+}
+
+type TTrafficGscDim struct {
+	SiteUrl     string      `json:"site_url"`
+	Dimension   string      `json:"dimension"`
+	Key         string      `json:"key"`
+	Clicks      int64       `json:"clicks"`
+	Impressions int64       `json:"impressions"`
+	Ctr         float64     `json:"ctr"`
+	Position    float64     `json:"position"`
+	PeriodStart pgtype.Date `json:"period_start"`
+	PeriodEnd   pgtype.Date `json:"period_end"`
+	SyncedAt    time.Time   `json:"synced_at"`
+}
+
+type TWeatherHourlyForecast struct {
 	CellID     int64         `json:"cell_id"`
 	Ts         time.Time     `json:"ts"`
 	Temp       pgtype.Float4 `json:"temp"`
@@ -288,21 +435,34 @@ type WeatherHourly struct {
 	FetchedAt  time.Time     `json:"fetched_at"`
 }
 
-type WeatherHourlyDefault struct {
-	CellID     int64         `json:"cell_id"`
-	Ts         time.Time     `json:"ts"`
-	Temp       pgtype.Float4 `json:"temp"`
-	FeelsLike  pgtype.Float4 `json:"feels_like"`
-	PrecipProb pgtype.Int2   `json:"precip_prob"`
-	Wind       pgtype.Float4 `json:"wind"`
-	Uv         pgtype.Float4 `json:"uv"`
-	Cloud      pgtype.Int2   `json:"cloud"`
-	Provider   string        `json:"provider"`
-	FetchedAt  time.Time     `json:"fetched_at"`
+type TWeeklyDigest struct {
+	DeviceID   uuid.UUID   `json:"device_id"`
+	SpotIds    []uuid.UUID `json:"spot_ids"`
+	Enabled    bool        `json:"enabled"`
+	SendDow    int16       `json:"send_dow"`
+	SendHour   int16       `json:"send_hour"`
+	LastSentOn pgtype.Date `json:"last_sent_on"`
+	CreatedAt  time.Time   `json:"created_at"`
+	UpdatedAt  time.Time   `json:"updated_at"`
 }
 
-type WorkerJobSchedule struct {
-	Job             string    `json:"job"`
-	IntervalSeconds int32     `json:"interval_seconds"`
-	UpdatedAt       time.Time `json:"updated_at"`
+type TWorkerJobSchedule struct {
+	Job             string             `json:"job"`
+	IntervalSeconds int32              `json:"interval_seconds"`
+	Enabled         bool               `json:"enabled"`
+	OffsetSeconds   int32              `json:"offset_seconds"`
+	UpdatedAt       time.Time          `json:"updated_at"`
+	RunRequestedAt  pgtype.Timestamptz `json:"run_requested_at"`
+}
+
+type TmpAreaID struct {
+	Source string      `json:"source"`
+	AID    string      `json:"a_id"`
+	ASpot  uuid.UUID   `json:"a_spot"`
+	NormID interface{} `json:"norm_id"`
+}
+
+type TmpDupSpot struct {
+	Twin uuid.UUID `json:"twin"`
+	Keep uuid.UUID `json:"keep"`
 }

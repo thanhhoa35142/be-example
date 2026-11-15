@@ -17,8 +17,8 @@ const activeSubscriptionForDevice = `-- name: ActiveSubscriptionForDevice :one
 SELECT s.original_transaction_id, s.product_id, s.status, s.environment,
        s.ownership, s.is_trial, s.auto_renew, s.expires_at,
        s.grace_expires_at, s.revoked_at, s.last_signed_date
-FROM subscription s
-JOIN device_subscription ds
+FROM t_subscriptions s
+JOIN t_device_subscriptions ds
   ON ds.original_transaction_id = s.original_transaction_id
 WHERE ds.device_id = $1
   AND s.status IN ('active', 'grace', 'billing_retry')
@@ -61,8 +61,22 @@ func (q *Queries) ActiveSubscriptionForDevice(ctx context.Context, deviceID uuid
 	return i, err
 }
 
+const countActiveDevicesForSubscription = `-- name: CountActiveDevicesForSubscription :one
+SELECT count(*) FROM t_device_subscriptions ds
+JOIN t_devices d ON d.id = ds.device_id AND d.deleted_at IS NULL
+WHERE ds.original_transaction_id = $1
+`
+
+// Linked devices that are not soft-deleted (deleted devices free their slot).
+func (q *Queries) CountActiveDevicesForSubscription(ctx context.Context, originalTransactionID string) (int64, error) {
+	row := q.db.QueryRow(ctx, countActiveDevicesForSubscription, originalTransactionID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const insertAppleNotification = `-- name: InsertAppleNotification :exec
-INSERT INTO apple_notification (notification_uuid, type, subtype,
+INSERT INTO t_apple_notifications (notification_uuid, type, subtype,
                                 original_transaction_id, signed_date,
                                 environment, payload)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -92,8 +106,25 @@ func (q *Queries) InsertAppleNotification(ctx context.Context, arg InsertAppleNo
 	return err
 }
 
+const isDeviceLinkedToSubscription = `-- name: IsDeviceLinkedToSubscription :one
+SELECT EXISTS(SELECT 1 FROM t_device_subscriptions
+              WHERE device_id = $1 AND original_transaction_id = $2)
+`
+
+type IsDeviceLinkedToSubscriptionParams struct {
+	DeviceID              uuid.UUID `json:"device_id"`
+	OriginalTransactionID string    `json:"original_transaction_id"`
+}
+
+func (q *Queries) IsDeviceLinkedToSubscription(ctx context.Context, arg IsDeviceLinkedToSubscriptionParams) (bool, error) {
+	row := q.db.QueryRow(ctx, isDeviceLinkedToSubscription, arg.DeviceID, arg.OriginalTransactionID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const linkDeviceSubscription = `-- name: LinkDeviceSubscription :exec
-INSERT INTO device_subscription (device_id, original_transaction_id)
+INSERT INTO t_device_subscriptions (device_id, original_transaction_id)
 VALUES ($1, $2)
 ON CONFLICT DO NOTHING
 `
@@ -108,9 +139,52 @@ func (q *Queries) LinkDeviceSubscription(ctx context.Context, arg LinkDeviceSubs
 	return err
 }
 
+const lockSubscription = `-- name: LockSubscription :one
+SELECT original_transaction_id FROM t_subscriptions
+WHERE original_transaction_id = $1
+FOR UPDATE
+`
+
+// Serialises concurrent link attempts for one original_transaction_id.
+func (q *Queries) LockSubscription(ctx context.Context, originalTransactionID string) (string, error) {
+	row := q.db.QueryRow(ctx, lockSubscription, originalTransactionID)
+	var original_transaction_id string
+	err := row.Scan(&original_transaction_id)
+	return original_transaction_id, err
+}
+
+const markNotificationFailed = `-- name: MarkNotificationFailed :exec
+UPDATE t_apple_notifications
+SET status = 'failed', attempts = attempts + 1, last_error = $2
+WHERE notification_uuid = $1 AND status IN ('received','failed')
+`
+
+type MarkNotificationFailedParams struct {
+	NotificationUuid uuid.UUID   `json:"notification_uuid"`
+	LastError        pgtype.Text `json:"last_error"`
+}
+
+func (q *Queries) MarkNotificationFailed(ctx context.Context, arg MarkNotificationFailedParams) error {
+	_, err := q.db.Exec(ctx, markNotificationFailed, arg.NotificationUuid, arg.LastError)
+	return err
+}
+
+const markNotificationIgnored = `-- name: MarkNotificationIgnored :exec
+UPDATE t_apple_notifications
+SET status = 'ignored', processed_at = now()
+WHERE notification_uuid = $1 AND status IN ('received','failed')
+`
+
+// Stale notification (signed_date not newer than the stored subscription).
+func (q *Queries) MarkNotificationIgnored(ctx context.Context, notificationUuid uuid.UUID) error {
+	_, err := q.db.Exec(ctx, markNotificationIgnored, notificationUuid)
+	return err
+}
+
 const markNotificationProcessed = `-- name: MarkNotificationProcessed :exec
-UPDATE apple_notification SET processed_at = now()
-WHERE notification_uuid = $1
+UPDATE t_apple_notifications
+SET status = 'processed', processed_at = now()
+WHERE notification_uuid = $1 AND status IN ('received','failed')
 `
 
 func (q *Queries) MarkNotificationProcessed(ctx context.Context, notificationUuid uuid.UUID) error {
@@ -118,8 +192,20 @@ func (q *Queries) MarkNotificationProcessed(ctx context.Context, notificationUui
 	return err
 }
 
-const upsertSubscription = `-- name: UpsertSubscription :exec
-INSERT INTO subscription (original_transaction_id, product_id, status,
+const subscriptionLastSignedDate = `-- name: SubscriptionLastSignedDate :one
+SELECT last_signed_date FROM t_subscriptions
+WHERE original_transaction_id = $1
+`
+
+func (q *Queries) SubscriptionLastSignedDate(ctx context.Context, originalTransactionID string) (time.Time, error) {
+	row := q.db.QueryRow(ctx, subscriptionLastSignedDate, originalTransactionID)
+	var last_signed_date time.Time
+	err := row.Scan(&last_signed_date)
+	return last_signed_date, err
+}
+
+const upsertSubscription = `-- name: UpsertSubscription :execrows
+INSERT INTO t_subscriptions (original_transaction_id, product_id, status,
                           environment, ownership, is_trial, auto_renew,
                           expires_at, grace_expires_at, revoked_at,
                           last_signed_date)
@@ -136,6 +222,9 @@ ON CONFLICT (original_transaction_id) DO UPDATE SET
     revoked_at       = EXCLUDED.revoked_at,
     last_signed_date = EXCLUDED.last_signed_date,
     updated_at       = now()
+WHERE t_subscriptions.last_signed_date < EXCLUDED.last_signed_date
+  AND NOT (t_subscriptions.status IN ('revoked','refunded')
+           AND EXCLUDED.status NOT IN ('revoked','refunded'))
 `
 
 type UpsertSubscriptionParams struct {
@@ -152,8 +241,13 @@ type UpsertSubscriptionParams struct {
 	LastSignedDate        time.Time          `json:"last_signed_date"`
 }
 
-func (q *Queries) UpsertSubscription(ctx context.Context, arg UpsertSubscriptionParams) error {
-	_, err := q.db.Exec(ctx, upsertSubscription,
+// Out-of-order App Store notifications are dropped by only applying updates
+// whose signed_date (Apple's clock, from the signed payload) is newer than the
+// stored one. Revocation/refund is terminal: a later-signed transaction that
+// is not itself revoked can never flip a revoked subscription back to active.
+// Returns the number of rows written (0 = stale/ignored).
+func (q *Queries) UpsertSubscription(ctx context.Context, arg UpsertSubscriptionParams) (int64, error) {
+	result, err := q.db.Exec(ctx, upsertSubscription,
 		arg.OriginalTransactionID,
 		arg.ProductID,
 		arg.Status,
@@ -166,5 +260,8 @@ func (q *Queries) UpsertSubscription(ctx context.Context, arg UpsertSubscription
 		arg.RevokedAt,
 		arg.LastSignedDate,
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

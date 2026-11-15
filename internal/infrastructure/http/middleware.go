@@ -4,18 +4,22 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
+	"regexp"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/thanhhoa35142/be-example/internal/platform/httpx"
 )
+
+var requestIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 func RequestID() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.GetHeader("X-Request-ID")
-		if id == "" {
+		if !requestIDRe.MatchString(id) {
 			id = uuid.NewString()
 		}
 		c.Set("requestID", id)
@@ -24,30 +28,11 @@ func RequestID() gin.HandlerFunc {
 	}
 }
 
-// ClientInfo captures client-identification headers (X-Client,
-// X-Client-Version, User-Agent) into the gin context for logging.
 func ClientInfo() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Set("client", c.GetHeader("X-Client"))
 		c.Set("clientVersion", c.GetHeader("X-Client-Version"))
 		c.Set("userAgent", c.GetHeader("User-Agent"))
-		c.Next()
-	}
-}
-
-// AdminAuth guards staff endpoints with a bearer token from ADMIN_TOKEN.
-// When ADMIN_TOKEN is unset the admin surface is disabled entirely (404).
-func AdminAuth() gin.HandlerFunc {
-	token := os.Getenv("ADMIN_TOKEN")
-	return func(c *gin.Context) {
-		if token == "" {
-			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "not found"})
-			return
-		}
-		if c.GetHeader("Authorization") != "Bearer "+token {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-			return
-		}
 		c.Next()
 	}
 }
@@ -59,12 +44,10 @@ func Logger() gin.HandlerFunc {
 			" | " + param.StatusCodeColor() + fmt.Sprint(param.StatusCode) + param.ResetColor() +
 			" | " + param.Latency.String() +
 			" | " + param.ClientIP +
-			" | " + param.Path + " | " + param.ErrorMessage + "\n"
+			" | " + pathWithoutQuery(param.Path) + " | " + param.ErrorMessage + "\n"
 	})
 }
 
-// Recovery replaces gin.Recovery with one that logs the panic + stack via
-// slog so crashes are debuggable instead of silent 500s.
 func Recovery() gin.HandlerFunc {
 	return gin.CustomRecovery(func(c *gin.Context, recovered any) {
 		slog.ErrorContext(c.Request.Context(), "panic recovered",
@@ -74,6 +57,14 @@ func Recovery() gin.HandlerFunc {
 			"panic", fmt.Sprint(recovered),
 			"stack", string(debug.Stack()),
 		)
-		c.AbortWithStatusJSON(500, gin.H{"title": "Internal Server Error", "status": 500})
+		httpx.WriteProblem(c, http.StatusInternalServerError, httpx.CodeInternal, "Internal Server Error", "")
+		c.Abort()
 	})
+}
+
+func pathWithoutQuery(p string) string {
+	if i := strings.IndexByte(p, '?'); i >= 0 {
+		return p[:i]
+	}
+	return p
 }

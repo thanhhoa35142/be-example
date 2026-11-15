@@ -5,7 +5,6 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/thanhhoa35142/be-example/internal/modules/events"
 	"github.com/thanhhoa35142/be-example/internal/platform/httpx"
 )
@@ -19,20 +18,17 @@ func NewEventsHandler(svc *events.Service) *EventsHandler {
 }
 
 type trackEventsRequest struct {
-	DeviceID string         `json:"deviceId"`
-	Events   []events.Input `json:"events"`
+	Events []events.Input `json:"events"`
 }
 
-// POST /v1/events — batch product analytics events.
 func (h *EventsHandler) Track(c *gin.Context) {
 	var req trackEventsRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Invalid body", "expected {deviceId, events[]}")
+		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Invalid body", "expected {events[]}")
 		return
 	}
-	deviceID, err := uuid.Parse(req.DeviceID)
-	if err != nil {
-		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidID, "Invalid deviceId", "expected a UUID")
+	deviceID, ok := requestDeviceID(c)
+	if !ok {
 		return
 	}
 	if err := h.svc.TrackBatch(c.Request.Context(), deviceID, req.Events); err != nil {

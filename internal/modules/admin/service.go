@@ -4,13 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/thanhhoa35142/be-example/internal/modules/scoring"
 )
 
-// weightKeys are the components the scorer expects.
 var weightKeys = map[string]bool{
 	"weather": true, "crowd": true, "amenity": true, "shade": true, "fresh": true,
 }
@@ -22,16 +23,25 @@ var thresholdKeys = map[string]bool{
 }
 
 type jobScheduleLimit struct {
-	min int64
-	max int64
+	min  int64
+	max  int64
+	desc string
 }
 
 var jobScheduleLimits = map[string]jobScheduleLimit{
-	"weather.refresh":   {min: 15 * 60, max: 60 * 60},
-	"crowd.refresh":     {min: 60 * 60, max: 30 * 24 * 60 * 60},
-	"crowd.aggregate":   {min: 60, max: 24 * 60 * 60},
-	"scoring.recompute": {min: 5 * 60, max: 6 * 60 * 60},
-	"alerts.evaluate":   {min: 60, max: 60 * 60},
+	// weather.refresh: provider quota (9000 calls/day) over ~1070 cells only
+	// affords ~8 runs/day — 3h is the sane floor, 6h the ceiling.
+	"weather.refresh":        {min: 15 * 60, max: 6 * 60 * 60, desc: "Fetch weather forecasts for the coming days"},
+	"crowd.refresh":          {min: 60 * 60, max: 30 * 24 * 60 * 60, desc: "Refresh provider crowd estimates"},
+	"crowd.aggregate":        {min: 60, max: 24 * 60 * 60, desc: "Aggregate community crowd reports"},
+	"scoring.recompute":      {min: 5 * 60, max: 6 * 60 * 60, desc: "Recompute spot scores for the forecast window"},
+	"alerts.evaluate":        {min: 60, max: 60 * 60, desc: "Evaluate alert rules and queue notifications"},
+	"digest.weekly":          {min: 15 * 60, max: 60 * 60, desc: "Send scheduled digest notifications"},
+	"holidays.refresh":       {min: 24 * 60 * 60, max: 30 * 24 * 60 * 60, desc: "Refresh the public-holiday calendar"},
+	"retention.purge":        {min: 60 * 60, max: 30 * 24 * 60 * 60, desc: "Delete expired job runs, events and reports"},
+	"ingest.osm":             {min: 60 * 60, max: 7 * 24 * 60 * 60, desc: "Import OSM city packs"},
+	"ingest.extract.refresh": {min: 24 * 60 * 60, max: 30 * 24 * 60 * 60, desc: "Download fresh OSM extracts"},
+	"google.sync":            {min: 60 * 60, max: 7 * 24 * 60 * 60, desc: "Sync Search Console + GA4 traffic data"},
 }
 
 type Service struct {
@@ -42,19 +52,22 @@ func NewService(repo Repository) *Service {
 	return &Service{repo: repo}
 }
 
-// RecordJobStart/Finish are called by the worker around each job run.
 func (s *Service) RecordJobStart(ctx context.Context, job string) (int64, error) {
 	return s.repo.StartJobRun(ctx, job)
 }
 
-func (s *Service) RecordJobFinish(ctx context.Context, id int64, status string, rowsAffected *int, jobErr error) {
+func (s *Service) AbandonJobRuns(ctx context.Context, job string) error {
+	return s.repo.AbandonJobRuns(ctx, job)
+}
+
+func (s *Service) RecordJobFinish(ctx context.Context, id int64, status string, rowsAffected *int, jobErr error, stats []byte) {
 	var errText *string
 	if jobErr != nil {
 		msg := jobErr.Error()
 		errText = &msg
 	}
-	// best-effort: instrumentation must never fail the job itself
-	_ = s.repo.FinishJobRun(context.Background(), id, status, rowsAffected, errText)
+
+	_ = s.repo.FinishJobRun(context.Background(), id, status, rowsAffected, errText, stats)
 }
 
 func (s *Service) Overview(ctx context.Context) (Overview, error) {
@@ -65,7 +78,6 @@ func (s *Service) Freshness(ctx context.Context) (Freshness, error) {
 	return s.repo.Freshness(ctx)
 }
 
-// normalizeFilter applies defaults and validates the window.
 func normalizeFilter(f MetricsFilter, defaultDays int) (MetricsFilter, error) {
 	if f.To.IsZero() {
 		f.To = time.Now().UTC()
@@ -99,6 +111,28 @@ func (s *Service) EventSummary(ctx context.Context, f MetricsFilter) (EventSumma
 	return s.repo.EventSummary(ctx, f)
 }
 
+var (
+	eventNameRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+	propKeyRe   = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]{0,31}$`)
+)
+
+func (s *Service) EventBreakdown(ctx context.Context, in EventBreakdownInput, now time.Time) (EventBreakdown, error) {
+	if !eventNameRe.MatchString(in.Name) {
+		return EventBreakdown{}, fmt.Errorf("%w: name must match [a-z][a-z0-9_]{0,63}", ErrInvalidFilter)
+	}
+	if !propKeyRe.MatchString(in.Prop) {
+		return EventBreakdown{}, fmt.Errorf("%w: prop must match [a-zA-Z][a-zA-Z0-9_]{0,31}", ErrInvalidFilter)
+	}
+	if in.By != "" && !propKeyRe.MatchString(in.By) {
+		return EventBreakdown{}, fmt.Errorf("%w: by must match [a-zA-Z][a-zA-Z0-9_]{0,31}", ErrInvalidFilter)
+	}
+	if in.Since.IsZero() {
+		in.Since = now.Add(-30 * 24 * time.Hour)
+	}
+	in.Since = in.Since.UTC()
+	return s.repo.EventBreakdown(ctx, in)
+}
+
 func clampLimit(limit int) int {
 	if limit <= 0 || limit > 200 {
 		return 50
@@ -106,9 +140,9 @@ func clampLimit(limit int) int {
 	return limit
 }
 
-func (s *Service) Jobs(ctx context.Context, limit int, beforeID *int64) (Page[JobRun], error) {
+func (s *Service) Jobs(ctx context.Context, limit int, beforeID *int64, status string) (Page[JobRun], error) {
 	limit = clampLimit(limit)
-	rows, err := s.repo.ListJobRuns(ctx, limit+1, beforeID)
+	rows, err := s.repo.ListJobRuns(ctx, limit+1, beforeID, status)
 	if err != nil {
 		return Page[JobRun]{}, err
 	}
@@ -117,6 +151,27 @@ func (s *Service) Jobs(ctx context.Context, limit int, beforeID *int64) (Page[Jo
 		return Page[JobRun]{Items: rows[:limit], NextCursor: &cur}, nil
 	}
 	return Page[JobRun]{Items: rows}, nil
+}
+
+func (s *Service) JobRun(ctx context.Context, id int64) (JobRun, error) {
+	return s.repo.GetJobRun(ctx, id)
+}
+
+func (s *Service) RecordAudit(ctx context.Context, e AuditEvent) error {
+	return s.repo.InsertAuditEvent(ctx, e)
+}
+
+func (s *Service) AuditEvents(ctx context.Context, limit int, beforeID *int64) (Page[AuditEvent], error) {
+	limit = clampLimit(limit)
+	rows, err := s.repo.ListAuditEvents(ctx, limit+1, beforeID)
+	if err != nil {
+		return Page[AuditEvent]{}, err
+	}
+	if len(rows) > limit {
+		cur := strconv.FormatInt(rows[limit-1].ID, 10)
+		return Page[AuditEvent]{Items: rows[:limit], NextCursor: &cur}, nil
+	}
+	return Page[AuditEvent]{Items: rows}, nil
 }
 
 func (s *Service) JobSchedules(ctx context.Context) ([]JobSchedule, error) {
@@ -138,6 +193,7 @@ func (s *Service) JobSchedules(ctx context.Context) ([]JobSchedule, error) {
 		}
 		schedules[i].MinIntervalSeconds = limits.min
 		schedules[i].MaxIntervalSeconds = limits.max
+		schedules[i].Description = limits.desc
 	}
 	return schedules, nil
 }
@@ -156,6 +212,7 @@ func (s *Service) JobSchedule(ctx context.Context, job string) (JobSchedule, err
 	}
 	schedule.MinIntervalSeconds = limits.min
 	schedule.MaxIntervalSeconds = limits.max
+	schedule.Description = limits.desc
 	return schedule, nil
 }
 
@@ -173,6 +230,7 @@ func (s *Service) UpdateJobSchedule(ctx context.Context, job string, intervalSec
 	}
 	schedule.MinIntervalSeconds = limits.min
 	schedule.MaxIntervalSeconds = limits.max
+	schedule.Description = limits.desc
 	return schedule, nil
 }
 
@@ -197,17 +255,19 @@ func (s *Service) PendingReports(ctx context.Context, limit int, after *ReportCu
 	return Page[PendingReport]{Items: rows}, nil
 }
 
-// ModerateReport sets a spot_report status (accepted/rejected).
 func (s *Service) ModerateReport(ctx context.Context, id uuid.UUID, status string) error {
 	if status != "accepted" && status != "rejected" {
 		return ErrInvalidStatus
 	}
-	ok, err := s.repo.UpdateReportStatus(ctx, id, status)
+	outcome, err := s.repo.ModerateReport(ctx, id, status)
 	if err != nil {
 		return err
 	}
-	if !ok {
+	switch outcome {
+	case ModReportNotFound:
 		return ErrReportNotFound
+	case ModReportConflict:
+		return ErrReportConflict
 	}
 	return nil
 }
@@ -216,11 +276,19 @@ func (s *Service) ListScoringConfigs(ctx context.Context) ([]ScoringConfigVersio
 	return s.repo.ListScoringConfigs(ctx)
 }
 
-// CreateScoringConfig validates and inserts a new version. activate=true makes
-// it effective immediately; otherwise it is stored as a far-future draft.
 func (s *Service) CreateScoringConfig(ctx context.Context, in ScoringConfigInput) (*ScoringConfigVersion, error) {
 	if err := validateConfigJSON(in.Weights, weightKeys, "weights"); err != nil {
 		return nil, err
+	}
+	// A non-positive weight sum would make Score() divide by ~zero and the
+	// batch upsert violate the 0-100 CHECK — reject at write time.
+	var w scoring.Weights
+	if err := json.Unmarshal(in.Weights, &w); err != nil {
+		return nil, fmt.Errorf("%w: weights must be numeric", ErrInvalidConfig)
+	}
+	wsum := w.Weather + w.Crowd + w.Amenity + w.Shade + w.Fresh
+	if wsum <= 0 {
+		return nil, fmt.Errorf("%w: weights must sum to a positive value", ErrInvalidConfig)
 	}
 	if err := validateConfigJSON(in.Thresholds, thresholdKeys, "thresholds"); err != nil {
 		return nil, err
@@ -248,7 +316,6 @@ func (s *Service) CreateScoringConfig(ctx context.Context, in ScoringConfigInput
 	return nil, fmt.Errorf("config version %d not found after insert", version)
 }
 
-// ActivateScoringConfig makes a stored version effective now.
 func (s *Service) ActivateScoringConfig(ctx context.Context, version int16) error {
 	ok, err := s.repo.ActivateScoringConfig(ctx, version)
 	if err != nil {

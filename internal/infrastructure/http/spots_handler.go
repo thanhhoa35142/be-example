@@ -2,7 +2,9 @@ package http
 
 import (
 	"errors"
+	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -21,38 +23,36 @@ func NewSpotsHandler(svc *spots.Service) *SpotsHandler {
 	return &SpotsHandler{svc: svc}
 }
 
-// GET /v1/spots?bbox=west,south,east,north&when=RFC3339
 func (h *SpotsHandler) List(c *gin.Context) {
-	bbox, err := parseBBox(c.Query("bbox"))
-	if err != nil {
-		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBBox, "Invalid bbox", "expected bbox=west,south,east,north in WGS84 degrees")
+	q, perr := parseListQuery(c.Request.URL.Query())
+	if perr != nil {
+		httpx.WriteProblem(c, http.StatusBadRequest, perr.code, perr.title, perr.detail)
 		return
 	}
 
-	var when *time.Time
-	if raw := c.Query("when"); raw != "" {
-		t, err := time.Parse(time.RFC3339, raw)
-		if err != nil {
-			httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidWhen, "Invalid when", "expected RFC3339 timestamp")
-			return
-		}
-		when = &t
-	}
-
-	items, err := h.svc.ListInBBox(c.Request.Context(), bbox, when)
+	res, err := h.svc.ListPage(c.Request.Context(), q)
 	if err != nil {
 		h.writeServiceError(c, err)
 		return
 	}
-
-	ts := time.Now().UTC()
-	if when != nil {
-		ts = when.UTC()
+	fc := toFeatureCollection(res.Items, scoreHour(q, time.Now()), q.IncludeArea, q.Hours > 0)
+	if res.Truncated {
+		fc.Truncated = true
+		fc.Total = res.Total
 	}
-	c.JSON(http.StatusOK, toFeatureCollection(items, ts.Truncate(time.Hour)))
+	c.JSON(http.StatusOK, fc)
 }
 
-// GET /v1/spots/{id}
+func (h *SpotsHandler) Packs(c *gin.Context) {
+	packs, err := h.svc.ListPacks(c.Request.Context())
+	if err != nil {
+		httpx.WriteError(c, err)
+		return
+	}
+	c.Header("Cache-Control", "public, max-age=3600")
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"items": toPackItems(packs)}})
+}
+
 func (h *SpotsHandler) Get(c *gin.Context) {
 	id, ok := parseSpotID(c)
 	if !ok {
@@ -66,7 +66,6 @@ func (h *SpotsHandler) Get(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": toDetailResponse(detail)})
 }
 
-// GET /v1/spots/{id}/forecast
 func (h *SpotsHandler) Forecast(c *gin.Context) {
 	id, ok := parseSpotID(c)
 	if !ok {
@@ -89,6 +88,89 @@ func parseSpotID(c *gin.Context) (uuid.UUID, bool) {
 	return id, true
 }
 
+type queryProblem struct{ code, title, detail string }
+
+func parseListQuery(v url.Values) (spots.ListQuery, *queryProblem) {
+	var q spots.ListQuery
+	invalid := func(detail string) (spots.ListQuery, *queryProblem) {
+		return spots.ListQuery{}, &queryProblem{httpx.CodeInvalidQuery, "Invalid query", detail}
+	}
+
+	if v.Has("bbox") == v.Has("ids") {
+		return invalid("provide exactly one of bbox or ids")
+	}
+	if v.Has("bbox") {
+		bbox, err := parseBBox(v.Get("bbox"))
+		if err != nil {
+			return spots.ListQuery{}, &queryProblem{httpx.CodeInvalidBBox, "Invalid bbox", "expected bbox=west,south,east,north in WGS84 degrees"}
+		}
+
+		bbox = spots.CanonicalBBox(bbox)
+		q.BBox = &bbox
+	} else {
+		parts := strings.Split(v.Get("ids"), ",")
+		if len(parts) > spots.MaxBatchIDs {
+			return invalid("ids accepts at most 50 ids")
+		}
+		for _, p := range parts {
+			id, err := uuid.Parse(strings.TrimSpace(p))
+			if err != nil {
+				return invalid("ids must be comma-separated UUIDs")
+			}
+			q.IDs = append(q.IDs, id)
+		}
+	}
+
+	for _, key := range []string{"when", "from"} {
+		if raw := v.Get(key); raw != "" {
+			t, err := time.Parse(time.RFC3339, raw)
+			if err != nil {
+				return spots.ListQuery{}, &queryProblem{httpx.CodeInvalidWhen, "Invalid " + key, "expected RFC3339 timestamp"}
+			}
+			if key == "when" {
+				q.When = &t
+			} else {
+				q.From = &t
+			}
+		}
+	}
+
+	if v.Has("hours") {
+		n, err := strconv.Atoi(v.Get("hours"))
+		if err != nil || n < 1 || n > spots.MaxScoreHours {
+			return invalid("hours must be an integer 1..24")
+		}
+		q.Hours = n
+	}
+
+	for _, inc := range strings.Split(v.Get("include"), ",") {
+		switch strings.TrimSpace(inc) {
+		case "":
+		case "area":
+			q.IncludeArea = true
+		default:
+			return invalid("unknown include value; supported: area")
+		}
+	}
+	f, err := spots.ParseFilter(v.Get("kinds"), v.Get("amenities"), v.Get("minScore"))
+	if err != nil {
+		return invalid(err.Error())
+	}
+	q.Filter = f
+	return q, nil
+}
+
+func scoreHour(q spots.ListQuery, now time.Time) time.Time {
+	ts := now
+	switch {
+	case q.When != nil:
+		ts = *q.When
+	case q.From != nil:
+		ts = *q.From
+	}
+	return ts.UTC().Truncate(time.Hour)
+}
+
 func parseBBox(raw string) (spots.BBox, error) {
 	parts := strings.Split(raw, ",")
 	if len(parts) != 4 {
@@ -97,8 +179,8 @@ func parseBBox(raw string) (spots.BBox, error) {
 	vals := make([]float64, 4)
 	for i, p := range parts {
 		v, err := strconv.ParseFloat(strings.TrimSpace(p), 64)
-		if err != nil {
-			return spots.BBox{}, err
+		if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
+			return spots.BBox{}, errors.New("bad format")
 		}
 		vals[i] = v
 	}
@@ -115,6 +197,8 @@ func (h *SpotsHandler) writeServiceError(c *gin.Context, err error) {
 		httpx.WriteProblem(c, http.StatusNotFound, httpx.CodeNotFound, "Spot not found", "")
 	case errors.Is(err, spots.ErrInvalidBBox):
 		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBBox, "Invalid bbox", "west<east, south<north, within WGS84 bounds")
+	case errors.Is(err, spots.ErrInvalidQuery):
+		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidQuery, "Invalid query", "")
 	case errors.Is(err, spots.ErrBboxTooLarge):
 		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeBboxTooLarge, "Bbox too large", "zoom in or reduce the viewport")
 	default:

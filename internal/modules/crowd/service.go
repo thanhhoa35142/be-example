@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/thanhhoa35142/be-example/internal/modules/geo"
 )
 
 type Service struct {
@@ -18,15 +19,17 @@ func NewService(repo Repository) *Service {
 	return &Service{repo: repo, now: time.Now}
 }
 
+const writeBatchSize = 10000
+
 type Stats struct {
 	Spots   int
+	Slots   int
 	Written int
 	Skipped int
+
+	Deleted int
 }
 
-// Refresh recomputes the weekly crowd profile (dow × hour) for every active
-// spot and upserts crowd_estimate rows with source='model'. Runs daily; the
-// model is cheap and weather inputs change hourly.
 func (s *Service) Refresh(ctx context.Context) (Stats, error) {
 	spots, err := s.repo.Spots(ctx)
 	if err != nil {
@@ -40,15 +43,14 @@ func (s *Service) Refresh(ctx context.Context) (Stats, error) {
 		return Stats{}, nil
 	}
 
-	// Weather window: covers every "next occurrence" date (today..+6d local)
-	// regardless of spot timezone.
 	from := s.now().UTC().Add(-24 * time.Hour)
 	to := s.now().UTC().Add(8 * 24 * time.Hour)
 
 	cellSet := map[int64]struct{}{}
 	countrySet := map[string]struct{}{}
 	for _, sp := range spots {
-		cellSet[sp.CellID] = struct{}{}
+
+		cellSet[geo.WeatherCellID(sp.CellID)] = struct{}{}
 		countrySet[sp.Country] = struct{}{}
 	}
 	cellIDs := make([]int64, 0, len(cellSet))
@@ -72,7 +74,6 @@ func (s *Service) Refresh(ctx context.Context) (Stats, error) {
 	}
 	holIdx := indexHolidays(holRows)
 
-	// Pass 1: raw estimates per spot for normalization.
 	type estimate struct {
 		spot Spot
 		raw  [7][24]float64
@@ -87,7 +88,6 @@ func (s *Service) Refresh(ctx context.Context) (Stats, error) {
 		ests = append(ests, estimate{spot: sp, raw: raw})
 	}
 
-	// Pass 2: normalize per (kind, city_pack) peak → 0-100, then write.
 	peaks := map[peakKey]float64{}
 	for _, e := range ests {
 		for _, row := range e.raw {
@@ -102,17 +102,38 @@ func (s *Service) Refresh(ctx context.Context) (Stats, error) {
 
 	var st Stats
 	st.Spots = len(ests)
+	batch := make([]ModelEstimate, 0, writeBatchSize)
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		n, err := s.repo.UpsertModelBatch(ctx, batch)
+		if err != nil {
+			return fmt.Errorf("upsert crowd batch: %w", err)
+		}
+		st.Written += int(n)
+		batch = batch[:0]
+		return nil
+	}
 	for _, e := range ests {
 		peak := peaks[peakKey{kind: e.spot.Kind, city: e.spot.CityPackID}]
 		for dow := 0; dow < 7; dow++ {
 			for hour := 0; hour < 24; hour++ {
-				level := Normalize(e.raw[dow][hour], peak)
-				if err := s.repo.Upsert(ctx, e.spot.ID, dow, hour, level); err != nil {
-					return st, fmt.Errorf("upsert spot %s dow %d hour %d: %w", e.spot.ID, dow, hour, err)
+				batch = append(batch, ModelEstimate{
+					SpotID: e.spot.ID, Dow: dow, Hour: hour,
+					Level: Normalize(e.raw[dow][hour], peak),
+				})
+				st.Slots++
+				if len(batch) >= writeBatchSize {
+					if err := flush(); err != nil {
+						return st, err
+					}
 				}
-				st.Written++
 			}
 		}
+	}
+	if err := flush(); err != nil {
+		return st, err
 	}
 	st.Skipped = len(spots) - len(ests)
 	return st, nil
@@ -123,12 +144,11 @@ type peakKey struct {
 	city uuid.UUID
 }
 
-// estimateSpot computes the raw (unnormalized) weekly profile for one spot.
 func (s *Service) estimateSpot(
 	sp Spot,
 	curves map[CurveKey]float64,
 	weatherIdx map[int64]map[time.Time]WeatherPoint,
-	holIdx map[string]map[string]string, // country -> "YYYY-MM-DD" -> kind
+	holIdx map[string]map[string]string,
 ) ([7][24]float64, error) {
 	var raw [7][24]float64
 
@@ -141,10 +161,10 @@ func (s *Service) estimateSpot(
 	todayDow := int(now.Weekday())
 
 	baseline := Baseline(sp.Kind, sp.AreaM2)
-	cellWeather := weatherIdx[sp.CellID]
+	cellWeather := weatherIdx[geo.WeatherCellID(sp.CellID)]
 
 	for dow := 0; dow < 7; dow++ {
-		// Next calendar date (in spot-local time) with this weekday.
+
 		date := today.AddDate(0, 0, (dow-todayDow+7)%7)
 		dateKey := date.Format("2006-01-02")
 		holKind := holIdx[sp.Country][dateKey]
@@ -166,21 +186,17 @@ func (s *Service) estimateSpot(
 	return raw, nil
 }
 
-// MinCommunityReports is the minimum vote count before community data
-// overrides the model for a slot (spec: "đủ số báo cáo tối thiểu").
 const MinCommunityReports = 5
 
-// AggregateCommunity folds crowd_report rows into crowd_estimate slots with
-// source='community', then drops stale community rows so the model reclaims
-// them. Level mapping: reports are 1-3, mapped to 10/50/90 on the 0-100 scale.
 func (s *Service) AggregateCommunity(ctx context.Context) (Stats, error) {
+	runStart := time.Now().UTC()
 	slots, err := s.repo.CommunityStats(ctx, MinCommunityReports)
 	if err != nil {
 		return Stats{}, err
 	}
 	var st Stats
 	for _, slot := range slots {
-		// avg level 1..3 → 10..90 linearly.
+
 		level := int((slot.AvgLevel-1)*40 + 10 + 0.5)
 		if level < 0 {
 			level = 0
@@ -193,9 +209,11 @@ func (s *Service) AggregateCommunity(ctx context.Context) (Stats, error) {
 		}
 		st.Written++
 	}
-	if err := s.repo.DeleteStaleCommunity(ctx); err != nil {
+	n, err := s.repo.DeleteStaleCommunity(ctx, runStart)
+	if err != nil {
 		return st, err
 	}
+	st.Deleted = int(n)
 	return st, nil
 }
 
@@ -221,7 +239,7 @@ func indexHolidays(rows []Holiday) map[string]map[string]string {
 			m[h.Country] = byDate
 		}
 		key := h.Date.UTC().Format("2006-01-02")
-		// Prefer 'public' over 'school' when both exist for a date.
+
 		if h.Kind == "public" || byDate[key] != "public" {
 			byDate[key] = h.Kind
 		}

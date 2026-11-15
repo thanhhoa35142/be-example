@@ -11,25 +11,34 @@ import (
 	"time"
 )
 
-// OpenMeteo is a free forecast provider needing no API key — used for dev.
-// Docs: https://open-meteo.com/en/docs
 const openMeteoDefaultURL = "https://api.open-meteo.com/v1/forecast"
 
 type OpenMeteo struct {
 	baseURL string
+	models  string
 	client  *http.Client
 }
 
-func NewOpenMeteo() *OpenMeteo {
+// NewOpenMeteo builds a provider. baseURL defaults to the public API;
+// models is appended as the `models=` query parameter when non-empty
+// (required for self-hosted instances — `best_match` needs the full
+// domain set, e.g. "gfs_global" needs only ncep_gfs013+ncep_gefs*).
+func NewOpenMeteo(client *http.Client, baseURL, models string) *OpenMeteo {
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
+	}
+	if baseURL == "" {
+		baseURL = openMeteoDefaultURL
+	}
 	return &OpenMeteo{
-		baseURL: openMeteoDefaultURL,
-		client:  &http.Client{Timeout: 30 * time.Second},
+		baseURL: baseURL,
+		models:  models,
+		client:  client,
 	}
 }
 
 func (o *OpenMeteo) Name() string { return "open-meteo" }
 
-// Open-Meteo returns variable-length arrays with nulls; decode manually.
 type openMeteoRaw struct {
 	Hourly struct {
 		Time                     []string          `json:"time"`
@@ -53,6 +62,9 @@ func (o *OpenMeteo) Forecast(ctx context.Context, lat, lng float64, from, to tim
 		"wind_speed_unit":    {"kmh"},
 		"precipitation_unit": {"mm"},
 	}
+	if o.models != "" {
+		q.Set("models", o.models)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, o.baseURL+"?"+q.Encode(), nil)
 	if err != nil {
 		return nil, err
@@ -61,7 +73,7 @@ func (o *OpenMeteo) Forecast(ctx context.Context, lat, lng float64, from, to tim
 	if err != nil {
 		return nil, fmt.Errorf("open-meteo: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return nil, fmt.Errorf("open-meteo: status %d: %s", resp.StatusCode, body)

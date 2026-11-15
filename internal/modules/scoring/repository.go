@@ -7,12 +7,12 @@ import (
 	"github.com/google/uuid"
 )
 
-// SpotForScoring is the minimal spot data the scorer needs.
 type SpotForScoring struct {
 	ID             uuid.UUID
 	Kind           string
 	CellID         int64
 	TZ             string
+	Lat, Lon       float64
 	LastVerifiedAt *time.Time
 }
 
@@ -35,7 +35,7 @@ type WeatherRow struct {
 
 type CrowdRow struct {
 	SpotID uuid.UUID
-	Dow    int // 0=Sunday, matching Go time.Weekday
+	Dow    int
 	Hour   int
 	Level  int
 	Source string
@@ -54,16 +54,14 @@ type ScoreWrite struct {
 	CapReason     *string
 	Reasons       []Reason
 	Confidence    int
-	ComputedAt    time.Time
 }
 
-// Repository is the port the scoring module depends on.
-// Implementations live in infrastructure/persistence.
 type Repository interface {
 	ActiveConfig(ctx context.Context) (Config, error)
 	ActiveSpots(ctx context.Context) ([]SpotForScoring, error)
 	AmenitiesForSpots(ctx context.Context, spotIDs []uuid.UUID) ([]AmenityRow, error)
 	WeatherForCells(ctx context.Context, cellIDs []int64, from, to time.Time) ([]WeatherRow, error)
 	CrowdForSpots(ctx context.Context, spotIDs []uuid.UUID) ([]CrowdRow, error)
-	UpsertScore(ctx context.Context, w ScoreWrite) (int64, error)
+
+	UpsertScores(ctx context.Context, configVersion int16, rows []ScoreWrite, computedAt time.Time) (int64, error)
 }

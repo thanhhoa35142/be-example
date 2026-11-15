@@ -5,12 +5,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/thanhhoa35142/be-example/internal/modules/geo"
 )
 
-// ForecastHorizon is how far ahead scores are precomputed (spec: 7 days).
 const ForecastHorizon = 7 * 24 * time.Hour
 
-// amenityPoints maps amenity types to base scores when within 200 m.
 var amenityPoints = map[string]int{
 	"toilet":     30,
 	"water":      20,
@@ -30,15 +29,16 @@ func NewService(repo Repository) *Service {
 	return &Service{repo: repo}
 }
 
+const writeBatchSize = 10000
+
 type Stats struct {
-	Spots   int
-	Hours   int
+	Spots int
+	Hours int
+
 	Written int
 	Skipped int
 }
 
-// Recompute recalculates spot_score for every active spot over the next
-// ForecastHorizon hours. The upsert only writes changed rows.
 func (s *Service) Recompute(ctx context.Context) (Stats, error) {
 	cfg, err := s.repo.ActiveConfig(ctx)
 	if err != nil {
@@ -57,7 +57,8 @@ func (s *Service) Recompute(ctx context.Context) (Stats, error) {
 	cellSet := make(map[int64]struct{})
 	for _, sp := range spots {
 		spotIDs = append(spotIDs, sp.ID)
-		cellSet[sp.CellID] = struct{}{}
+
+		cellSet[geo.WeatherCellID(sp.CellID)] = struct{}{}
 	}
 	cellIDs := make([]int64, 0, len(cellSet))
 	for c := range cellSet {
@@ -88,6 +89,20 @@ func (s *Service) Recompute(ctx context.Context) (Stats, error) {
 	stats := Stats{Spots: len(spots)}
 	computedAt := now
 
+	batch := make([]ScoreWrite, 0, writeBatchSize)
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		n, err := s.repo.UpsertScores(ctx, cfg.Version, batch, computedAt)
+		if err != nil {
+			return err
+		}
+		stats.Written += int(n)
+		batch = batch[:0]
+		return nil
+	}
+
 	for _, sp := range spots {
 		loc := time.UTC
 		if l, err := time.LoadLocation(sp.TZ); err == nil {
@@ -95,15 +110,17 @@ func (s *Service) Recompute(ctx context.Context) (Stats, error) {
 		}
 		amenScore := amenIdx[sp.ID]
 		daysSince := daysSince(sp.LastVerifiedAt, now)
+		weatherCell := geo.WeatherCellID(sp.CellID)
 
 		for h := 0; h < int(ForecastHorizon/time.Hour); h++ {
 			ts := from.Add(time.Duration(h) * time.Hour)
 			local := ts.In(loc)
 
 			in := Inputs{
-				Weather:          weatherAt(weatherIdx, sp.CellID, ts),
+				Weather:          weatherAt(weatherIdx, weatherCell, ts),
 				Crowd:            crowdAt(crowdIdx, sp.ID, int(local.Weekday()), local.Hour()),
 				AmenityScore:     amenScore,
+				SunElevationDeg:  sunElevationMidHour(sp.Lat, sp.Lon, ts),
 				DaysSinceUpdated: daysSince,
 			}
 			res := Score(in, cfg)
@@ -112,33 +129,33 @@ func (s *Service) Recompute(ctx context.Context) (Stats, error) {
 				continue
 			}
 
-			n, err := s.repo.UpsertScore(ctx, ScoreWrite{
-				SpotID:        sp.ID,
-				TSHour:        ts,
-				ConfigVersion: cfg.Version,
-				Score:         res.Score,
-				SWeather:      res.Components.Weather,
-				SCrowd:        res.Components.Crowd,
-				SAmenity:      res.Components.Amenity,
-				SShade:        res.Components.Shade,
-				SFresh:        res.Components.Fresh,
-				CapReason:     res.CapReason,
-				Reasons:       res.Reasons,
-				Confidence:    res.Confidence,
-				ComputedAt:    computedAt,
+			batch = append(batch, ScoreWrite{
+				SpotID:     sp.ID,
+				TSHour:     ts,
+				Score:      res.Score,
+				SWeather:   res.Components.Weather,
+				SCrowd:     res.Components.Crowd,
+				SAmenity:   res.Components.Amenity,
+				SShade:     res.Components.Shade,
+				SFresh:     res.Components.Fresh,
+				CapReason:  res.CapReason,
+				Reasons:    res.Reasons,
+				Confidence: res.Confidence,
 			})
-			if err != nil {
-				return stats, err
-			}
 			stats.Hours++
-			stats.Written += int(n)
+			if len(batch) >= writeBatchSize {
+				if err := flush(); err != nil {
+					return stats, err
+				}
+			}
 		}
+	}
+	if err := flush(); err != nil {
+		return stats, err
 	}
 	return stats, nil
 }
 
-// amenityScoreFor computes a 0-100 amenity score from nearby amenities.
-// Full points within 200 m, half points up to ~1 km.
 func amenityScoreFor(rows []AmenityRow) *int {
 	if len(rows) == 0 {
 		return nil
@@ -216,9 +233,6 @@ func indexCrowd(rows []CrowdRow) map[crowdKey]CrowdInput {
 	return m
 }
 
-// crowdAt picks the best available source for the slot: provider > community >
-// model. crowd_estimate stores one row per (spot,dow,hour) so the source is
-// already resolved upstream; this just looks it up.
 func crowdAt(idx map[crowdKey]CrowdInput, spotID uuid.UUID, dow, hour int) *CrowdInput {
 	if c, ok := idx[crowdKey{spotID, dow, hour}]; ok {
 		return &c
@@ -236,4 +250,9 @@ func indexAmenities(rows []AmenityRow) map[uuid.UUID]*int {
 		m[id] = amenityScoreFor(rs)
 	}
 	return m
+}
+
+func sunElevationMidHour(lat, lon float64, tsHour time.Time) *float64 {
+	e := geo.SunElevationDeg(lat, lon, tsHour.Add(30*time.Minute))
+	return &e
 }

@@ -16,7 +16,6 @@ const (
 	KindBeach Kind = "beach"
 )
 
-// BBox is a viewport in WGS84 degrees: west, south, east, north.
 type BBox struct {
 	West  float64
 	South float64
@@ -24,10 +23,8 @@ type BBox struct {
 	North float64
 }
 
-// Names maps language codes (OSM name:xx tags) to localized names.
 type Names map[string]string
 
-// Reason is a score explanation code with parameters; the app translates it.
 type Reason struct {
 	Code   string         `json:"code"`
 	Params map[string]any `json:"params,omitempty"`
@@ -47,7 +44,6 @@ type Spot struct {
 	LastVerifiedAt *time.Time
 }
 
-// ScoreSnapshot is the precomputed score for one spot at one hour.
 type ScoreSnapshot struct {
 	Score      *int
 	Confidence *int
@@ -59,6 +55,20 @@ type ScoreSnapshot struct {
 type SpotWithScore struct {
 	Spot
 	Score *ScoreSnapshot
+
+	Area json.RawMessage
+
+	HourlyScores json.RawMessage
+}
+
+type ListQuery struct {
+	BBox        *BBox
+	IDs         []uuid.UUID
+	When        *time.Time
+	From        *time.Time
+	Hours       int
+	IncludeArea bool
+	Filter      Filter
 }
 
 type Components struct {
@@ -76,6 +86,17 @@ type ForecastPoint struct {
 	CapReason  *string    `json:"capReason,omitempty"`
 	Reasons    []Reason   `json:"reasons"`
 	Confidence int        `json:"confidence"`
+
+	Weather *HourWeather `json:"weather,omitempty"`
+}
+
+type HourWeather struct {
+	TempC      *float64 `json:"tempC,omitempty"`
+	FeelsLikeC *float64 `json:"feelsLikeC,omitempty"`
+	PrecipProb *int     `json:"precipProb,omitempty"`
+	WindKmh    *float64 `json:"windKmh,omitempty"`
+	UV         *float64 `json:"uv,omitempty"`
+	Cloud      *int     `json:"cloud,omitempty"`
 }
 
 type Amenity struct {
@@ -93,9 +114,22 @@ type Source struct {
 
 type SpotDetail struct {
 	Spot
-	Status      string          `json:"-"`
-	MergedInto  *uuid.UUID      `json:"-"`
-	AreaGeoJSON json.RawMessage `json:"area,omitempty"`
-	Amenities   []Amenity       `json:"amenities"`
-	Sources     []Source        `json:"sources"`
+	Status string `json:"-"`
+	CellID int64  `json:"-"`
+
+	WeatherSource *string         `json:"-"`
+	MergedInto    *uuid.UUID      `json:"-"`
+	AreaGeoJSON   json.RawMessage `json:"area,omitempty"`
+	Amenities     []Amenity       `json:"amenities"`
+	Sources       []Source        `json:"sources"`
+}
+
+type Pack struct {
+	Slug        string
+	Name        string
+	Country     string
+	TZ          string
+	Center      [2]float64
+	BBox        [4]float64
+	ActiveSpots int
 }

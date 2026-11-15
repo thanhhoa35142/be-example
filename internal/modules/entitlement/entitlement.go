@@ -1,7 +1,3 @@
-// Package entitlement verifies StoreKit 2 transactions and App Store Server
-// Notifications, maps devices to subscriptions, and resolves the effective
-// plan (Free/Plus). Signature verification against Apple's certificate chain
-// is a production stub; the JWS payload is decoded for development.
 package entitlement
 
 import (
@@ -13,9 +9,27 @@ var (
 	ErrDeviceNotFound = errors.New("device not found")
 	ErrInvalidJWS     = errors.New("invalid signed transaction")
 	ErrInvalidNotice  = errors.New("invalid app store notification")
+
+	ErrNotConfigured = errors.New("app store verification not configured")
+
+	ErrDeviceLimit = errors.New("subscription linked to too many devices")
+
+	ErrAccountTokenMismatch = errors.New("transaction belongs to another device")
 )
 
-// Plan is the billing tier.
+const MaxDevicesPerSubscription = 5
+
+type Config struct {
+	BundleID string
+
+	AllowSandbox bool
+
+	// ProductIDs is the APPSTORE_PLUS_PRODUCT_IDS allowlist. Empty means
+	// "not configured" — every product in the bundle is accepted (the app is
+	// not launched yet; set it before go-live).
+	ProductIDs map[string]bool
+}
+
 type Plan string
 
 const (
@@ -23,7 +37,6 @@ const (
 	PlanPlus Plan = "plus"
 )
 
-// Subscription mirrors the subscription table.
 type Subscription struct {
 	OriginalTransactionID string
 	ProductID             string
@@ -38,8 +51,7 @@ type Subscription struct {
 	LastSignedDate        time.Time
 }
 
-// Entitlement is the resolved state for a device.
 type Entitlement struct {
 	Plan         Plan
-	Subscription *Subscription // nil when on Free
+	Subscription *Subscription
 }

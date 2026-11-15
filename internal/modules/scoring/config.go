@@ -5,7 +5,6 @@ import (
 	"fmt"
 )
 
-// Weights are the spec §8 component weights; they must sum to 1.
 type Weights struct {
 	Weather float64 `json:"weather"`
 	Crowd   float64 `json:"crowd"`
@@ -14,7 +13,6 @@ type Weights struct {
 	Fresh   float64 `json:"fresh"`
 }
 
-// Thresholds drive the hard caps (spec §8: rain/extreme temps cap the score).
 type Thresholds struct {
 	RainProbThreshold int     `json:"rain_prob_threshold"`
 	RainScoreCap      int     `json:"rain_score_cap"`
@@ -22,9 +20,13 @@ type Thresholds struct {
 	HeatScoreCap      int     `json:"heat_score_cap"`
 	ColdCapC          float64 `json:"cold_cap_c"`
 	ColdScoreCap      int     `json:"cold_score_cap"`
+
+	DarkElevationDeg     float64 `json:"dark_elevation_deg"`
+	DarkScoreCap         int     `json:"dark_score_cap"`
+	TwilightElevationDeg float64 `json:"twilight_elevation_deg"`
+	TwilightScoreCap     int     `json:"twilight_score_cap"`
 }
 
-// Config is a versioned scoring configuration loaded from scoring_config.
 type Config struct {
 	Version    int16
 	Weights    Weights

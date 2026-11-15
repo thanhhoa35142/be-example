@@ -1,0 +1,467 @@
+package ingest_test
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"iter"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/thanhhoa35142/be-example/internal/infrastructure/persistence"
+	"github.com/thanhhoa35142/be-example/internal/modules/ingest"
+	"github.com/thanhhoa35142/be-example/internal/modules/ingest/osm"
+	"github.com/thanhhoa35142/be-example/internal/platform/testdb"
+)
+
+type fixtureSource struct {
+	features []osm.RawFeature
+}
+
+func (f *fixtureSource) Open(context.Context, osm.Pack) (osm.Snapshot, error) {
+	return fixtureSnapshot{features: f.features}, nil
+}
+
+type fixtureSnapshot struct {
+	features []osm.RawFeature
+}
+
+func (fixtureSnapshot) AsOf() time.Time { return time.Now() }
+func (fixtureSnapshot) Close() error    { return nil }
+
+func (s fixtureSnapshot) Features() iter.Seq2[osm.RawFeature, error] {
+	return func(yield func(osm.RawFeature, error) bool) {
+		for _, f := range s.features {
+			if !yield(f, nil) {
+				return
+			}
+		}
+	}
+}
+
+func goldenPoint(lon, lat float64) []byte {
+	return []byte(fmt.Sprintf(`{"type":"Point","coordinates":[%.6f,%.6f]}`, lon, lat))
+}
+
+func goldenPolygon(lon, lat, d float64) []byte {
+	return []byte(fmt.Sprintf(
+		`{"type":"Polygon","coordinates":[[[%.6f,%.6f],[%.6f,%.6f],[%.6f,%.6f],[%.6f,%.6f],[%.6f,%.6f]]]}`,
+		lon-d, lat-d, lon+d, lat-d, lon+d, lat+d, lon-d, lat+d, lon-d, lat-d))
+}
+
+func goldenFeature(sourceID string, version int, tags map[string]string, geom []byte) osm.RawFeature {
+	return osm.RawFeature{
+		Source:   "osm",
+		SourceID: sourceID,
+		Version:  version,
+		Tags:     tags,
+		GeoJSON:  geom,
+	}
+}
+
+func goldenPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	dsn := testdb.DSN(t)
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+func seedGoldenPack(t *testing.T, pool *pgxpool.Pool, slug string) osm.Pack {
+	t.Helper()
+	ctx := context.Background()
+	var id uuid.UUID
+	err := pool.QueryRow(ctx, `
+		INSERT INTO t_city_packs (slug, name, country, tz, boundary, status, last_import_at)
+		VALUES ($1, $2, 'NL', 'Europe/Amsterdam',
+		        ST_Multi(ST_MakeEnvelope(4.8, 52.0, 5.4, 52.5, 4326)),
+		        'draft', now())
+		RETURNING id`, slug, "Golden "+slug).Scan(&id)
+	if err != nil {
+		t.Fatalf("seed pack %s: %v", slug, err)
+	}
+	pack := osm.Pack{
+		ID:      id,
+		Slug:    slug,
+		Country: "NL",
+		TZ:      "Europe/Amsterdam",
+		Bounds:  osm.Bounds{West: 4.8, South: 52.0, East: 5.4, North: 52.5},
+	}
+	t.Cleanup(func() {
+		c := context.Background()
+
+		_, _ = pool.Exec(c, `DELETE FROM t_spot_sources WHERE spot_id IN
+			(SELECT id FROM t_spots WHERE city_pack_id = $1)`, id)
+		_, _ = pool.Exec(c, `DELETE FROM t_spots WHERE city_pack_id = $1`, id)
+		_, _ = pool.Exec(c, `DELETE FROM t_city_packs WHERE id = $1`, id)
+	})
+	return pack
+}
+
+func runGolden(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
+	src *fixtureSource, pack osm.Pack, pol osm.Policy) ingest.Stats {
+	t.Helper()
+	svc := &ingest.Service{
+		Src:   src,
+		Store: persistence.NewIngestRepo(pool),
+		Pol:   pol,
+	}
+	st, err := svc.RunPack(ctx, pack, 0, false)
+	if err != nil {
+		t.Fatalf("RunPack(%s): %v", pack.Slug, err)
+	}
+	t.Logf("RunPack(%s) stats: %+v", pack.Slug, st)
+	return st
+}
+
+func goldenCount(t *testing.T, pool *pgxpool.Pool, query string, args ...any) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(context.Background(), query, args...).Scan(&n); err != nil {
+		t.Fatalf("count query: %v", err)
+	}
+	return n
+}
+
+func goldenSpots(t *testing.T, pool *pgxpool.Pool, packID uuid.UUID) []struct {
+	Kind, Status, StatusReason string
+	Quality                    int
+} {
+	t.Helper()
+	rows, err := pool.Query(context.Background(), `
+		SELECT kind, status, COALESCE(status_reason,''), COALESCE(quality,0)
+		FROM t_spots WHERE city_pack_id = $1 ORDER BY kind`, packID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var out []struct {
+		Kind, Status, StatusReason string
+		Quality                    int
+	}
+	for rows.Next() {
+		var s struct {
+			Kind, Status, StatusReason string
+			Quality                    int
+		}
+		if err := rows.Scan(&s.Kind, &s.Status, &s.StatusReason, &s.Quality); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+func parkFixture(slug string, lon, lat float64) []osm.RawFeature {
+	return []osm.RawFeature{
+		goldenFeature("w-park-"+slug, 1,
+			map[string]string{"leisure": "park", "name": "Golden Park", "access": "yes"},
+			goldenPolygon(lon, lat, 0.002)),
+		goldenFeature("n-table-"+slug, 1,
+			map[string]string{"leisure": "picnic_table", "name": "Golden Table"},
+			goldenPoint(lon-0.001, lat)),
+		goldenFeature("n-site-"+slug, 1,
+			map[string]string{"tourism": "picnic_site"},
+			goldenPoint(lon+0.001, lat)),
+		goldenFeature("n-toilet-"+slug, 1,
+			map[string]string{"amenity": "toilets"},
+			goldenPoint(lon, lat+0.001)),
+	}
+}
+
+func TestGoldenIngest(t *testing.T) {
+	pool := goldenPool(t)
+	ctx := context.Background()
+
+	t.Run("park_absorbs_children", func(t *testing.T) {
+		slug := "golden-park-absorb"
+		pack := seedGoldenPack(t, pool, slug)
+		src := &fixtureSource{features: parkFixture(slug, 5.10, 52.10)}
+
+		st := runGolden(t, ctx, pool, src, pack, osm.Policy{})
+
+		if st.FeaturesRead != 4 || st.Candidates != 3 {
+			t.Fatalf("expected 4 features / 3 candidates, got %+v", st)
+		}
+
+		if st.Created != 1 || st.Activated != 1 || st.Absorbed != 2 {
+			t.Fatalf("expected created=1 activated=1 absorbed=2, got %+v", st)
+		}
+		if st.AmenitiesLinked != 1 {
+			t.Fatalf("expected amenities_linked=1, got %+v", st)
+		}
+		spots := goldenSpots(t, pool, pack.ID)
+		if len(spots) != 1 || spots[0].Kind != "park" || spots[0].Status != "active" {
+			t.Fatalf("expected single active park spot, got %+v", spots)
+		}
+
+		if spots[0].Quality != 95 {
+			t.Fatalf("expected park quality 95, got %d", spots[0].Quality)
+		}
+		if n := goldenCount(t, pool, `
+			SELECT count(*) FROM t_spot_sources ss
+			JOIN t_spots sp ON sp.id = ss.spot_id
+			WHERE sp.city_pack_id = $1`, pack.ID); n != 3 {
+			t.Fatalf("expected 3 spot_sources (park+2 children), got %d", n)
+		}
+		if n := goldenCount(t, pool, `
+			SELECT count(*) FROM t_spot_amenities a
+			JOIN t_spots sp ON sp.id = a.spot_id
+			WHERE sp.city_pack_id = $1 AND a.type = 'toilet'`, pack.ID); n != 1 {
+			t.Fatalf("expected 1 toilet amenity link, got %d", n)
+		}
+		if n := goldenCount(t, pool, `
+			SELECT count(*) FROM t_ingest_features WHERE pack_id = $1`, pack.ID); n != 4 {
+			t.Fatalf("expected 4 raw rows, got %d", n)
+		}
+	})
+
+	t.Run("orphan_table_cluster", func(t *testing.T) {
+		slug := "golden-orphan-tables"
+		pack := seedGoldenPack(t, pool, slug)
+
+		lon, lat := 5.20, 52.20
+		src := &fixtureSource{features: []osm.RawFeature{
+			goldenFeature("n-t1-"+slug, 1,
+				map[string]string{"leisure": "picnic_table"}, goldenPoint(lon, lat)),
+			goldenFeature("n-t2-"+slug, 1,
+				map[string]string{"leisure": "picnic_table"}, goldenPoint(lon+0.0002, lat)),
+			goldenFeature("n-t3-"+slug, 1,
+				map[string]string{"leisure": "picnic_table"}, goldenPoint(lon, lat+0.0002)),
+			goldenFeature("n-t4-"+slug, 1,
+				map[string]string{"leisure": "picnic_table"}, goldenPoint(lon+0.0001, lat+0.0001)),
+		}}
+
+		st := runGolden(t, ctx, pool, src, pack, osm.Policy{})
+
+		if st.Candidates != 4 || st.Created != 1 || st.OrphanSites != 1 {
+			t.Fatalf("expected candidates=4 created=1 orphan_sites=1, got %+v", st)
+		}
+
+		if st.Activated != 1 {
+			t.Fatalf("expected activated=1, got %+v", st)
+		}
+		spots := goldenSpots(t, pool, pack.ID)
+		if len(spots) != 1 || spots[0].Kind != "site" || spots[0].Status != "active" {
+			t.Fatalf("expected single active site spot, got %+v", spots)
+		}
+		if n := goldenCount(t, pool, `
+			SELECT count(*) FROM t_spot_sources ss
+			JOIN t_spots sp ON sp.id = ss.spot_id
+			WHERE sp.city_pack_id = $1`, pack.ID); n != 4 {
+			t.Fatalf("expected 4 spot_sources (one per table), got %d", n)
+		}
+	})
+
+	t.Run("idempotent_rerun", func(t *testing.T) {
+		slug := "golden-idempotent"
+		pack := seedGoldenPack(t, pool, slug)
+		src := &fixtureSource{features: parkFixture(slug, 5.15, 52.15)}
+
+		st1 := runGolden(t, ctx, pool, src, pack, osm.Policy{})
+		if st1.Created != 1 {
+			t.Fatalf("first run: expected created=1, got %+v", st1)
+		}
+		st2 := runGolden(t, ctx, pool, src, pack, osm.Policy{})
+
+		if st2.Created != 0 || st2.Closed != 0 {
+			t.Fatalf("second run: expected created=0 closed=0, got %+v", st2)
+		}
+		if st2.Updated != 0 || st2.Unchanged != 1 {
+			t.Fatalf("second run: expected updated=0 unchanged=1 (park only), got %+v", st2)
+		}
+		if st2.Absorbed != 2 {
+			t.Fatalf("second run: expected absorbed=2, got %+v", st2)
+		}
+		spots := goldenSpots(t, pool, pack.ID)
+		if len(spots) != 1 || spots[0].Status != "active" {
+			t.Fatalf("expected single active spot after rerun, got %+v", spots)
+		}
+	})
+
+	t.Run("below_floor_excluded", func(t *testing.T) {
+		slug := "golden-below-floor"
+		pack := seedGoldenPack(t, pool, slug)
+		lon, lat := 5.30, 52.30
+		src := &fixtureSource{features: []osm.RawFeature{
+
+			goldenFeature("n-lowpt-"+slug, 1,
+				map[string]string{"leisure": "park"}, goldenPoint(lon, lat)),
+
+			goldenFeature("w-lowpoly-"+slug, 1,
+				map[string]string{"leisure": "park"}, goldenPolygon(lon+0.01, lat, 0.002)),
+		}}
+
+		st := runGolden(t, ctx, pool, src, pack, osm.Policy{})
+
+		if st.FeaturesRead != 2 || st.Candidates != 2 || st.Created != 0 {
+			t.Fatalf("expected 2 candidates created=0, got %+v", st)
+		}
+
+		if st.BelowFloor != 2 {
+			t.Fatalf("expected below_floor=2, got %+v", st)
+		}
+		if n := goldenCount(t, pool,
+			`SELECT count(*) FROM t_spots WHERE city_pack_id = $1`, pack.ID); n != 0 {
+			t.Fatalf("expected 0 spots below floor, got %d", n)
+		}
+
+		if n := goldenCount(t, pool, `
+			SELECT count(*) FROM t_ingest_features
+			WHERE pack_id = $1 AND role = 'candidate'`, pack.ID); n != 2 {
+			t.Fatalf("expected 2 candidate raw rows, got %d", n)
+		}
+	})
+
+	t.Run("missing_close", func(t *testing.T) {
+		slug := "golden-missing-close"
+		pack := seedGoldenPack(t, pool, slug)
+		src := &fixtureSource{features: parkFixture(slug, 5.25, 52.25)}
+
+		pol := osm.DefaultPolicy
+		pol.MaxCloseFraction = 1.0
+
+		st1 := runGolden(t, ctx, pool, src, pack, pol)
+		if st1.Created != 1 || st1.Activated != 1 {
+			t.Fatalf("seed run: expected created=1 activated=1, got %+v", st1)
+		}
+
+		src.features = nil
+		stEmpty1 := runGolden(t, ctx, pool, src, pack, pol)
+		if stEmpty1.FeaturesRead != 0 || stEmpty1.Closed != 0 {
+			t.Fatalf("empty run 1: expected 0 features closed=0, got %+v", stEmpty1)
+		}
+		if n := goldenCount(t, pool, `
+			SELECT count(*) FROM t_spot_sources ss
+			JOIN t_spots sp ON sp.id = ss.spot_id
+			WHERE sp.city_pack_id = $1 AND ss.missing_runs = 1`, pack.ID); n != 3 {
+			t.Fatalf("after empty run 1: expected 3 sources missing_runs=1, got %d", n)
+		}
+		if spots := goldenSpots(t, pool, pack.ID); len(spots) != 1 || spots[0].Status != "active" {
+			t.Fatalf("after empty run 1: expected still-active spot, got %+v", spots)
+		}
+
+		stEmpty2 := runGolden(t, ctx, pool, src, pack, pol)
+		if stEmpty2.Closed != 1 {
+			t.Fatalf("empty run 2: expected closed=1, got %+v", stEmpty2)
+		}
+		spots := goldenSpots(t, pool, pack.ID)
+		if len(spots) != 1 || spots[0].Status != "closed" || spots[0].StatusReason != "source_missing" {
+			t.Fatalf("expected closed/source_missing spot, got %+v", spots)
+		}
+
+		src.features = parkFixture(slug, 5.25, 52.25)
+		stBack := runGolden(t, ctx, pool, src, pack, pol)
+		spots = goldenSpots(t, pool, pack.ID)
+		if len(spots) != 1 || spots[0].Status != "active" || spots[0].StatusReason != "source_returned" {
+			t.Fatalf("expected reopened active/source_returned spot, got %+v (stats %+v)", spots, stBack)
+		}
+	})
+
+	t.Run("line_area_twin_collapses", func(t *testing.T) {
+
+		slug := "golden-twin"
+		pack := seedGoldenPack(t, pool, slug)
+		lon, lat, d := 5.05, 52.05, 0.002
+		ring := []byte(fmt.Sprintf(
+			`{"type":"LineString","coordinates":[[%.6f,%.6f],[%.6f,%.6f],[%.6f,%.6f],[%.6f,%.6f],[%.6f,%.6f]]}`,
+			lon-d, lat-d, lon+d, lat-d, lon+d, lat+d, lon-d, lat+d, lon-d, lat-d))
+		tags := map[string]string{"leisure": "park", "name": "Twin Park", "access": "yes"}
+		src := &fixtureSource{features: []osm.RawFeature{
+			goldenFeature("w-twin-"+slug, 0, tags, ring),
+			goldenFeature("w-twin-"+slug, 0, tags, goldenPolygon(lon, lat, d)),
+		}}
+		st := runGolden(t, ctx, pool, src, pack, osm.Policy{})
+		if st.DuplicateGeoms != 1 || st.Candidates != 1 || st.Created != 1 {
+			t.Fatalf("expected duplicate_geoms=1 candidates=1 created=1, got %+v", st)
+		}
+		if n := goldenCount(t, pool, `SELECT count(*) FROM t_spots
+			WHERE city_pack_id = $1 AND area IS NOT NULL`, pack.ID); n != 1 {
+			t.Fatalf("expected the single spot to keep its polygon, got %d with area", n)
+		}
+
+		if n := goldenCount(t, pool, `SELECT count(*) FROM t_spots
+			WHERE city_pack_id = $1 AND ST_Intersects(area, geom::geometry)`, pack.ID); n != 1 {
+			t.Fatalf("expected anchor inside area")
+		}
+	})
+
+	t.Run("curated_lock", func(t *testing.T) {
+		slug := "golden-curated"
+		pack := seedGoldenPack(t, pool, slug)
+		src := &fixtureSource{features: parkFixture(slug, 5.12, 52.12)}
+		runGolden(t, ctx, pool, src, pack, osm.Policy{})
+		if _, err := pool.Exec(ctx, `UPDATE t_spots SET curated = true, name = 'Admin Name'
+			WHERE city_pack_id = $1`, pack.ID); err != nil {
+			t.Fatal(err)
+		}
+
+		src.features[0].Tags = map[string]string{"leisure": "park", "name": "Upstream Rename", "access": "yes"}
+		st := runGolden(t, ctx, pool, src, pack, osm.Policy{})
+		if st.SkippedCurated != 1 || st.Updated != 0 {
+			t.Fatalf("expected skipped_curated=1 updated=0, got %+v", st)
+		}
+		if n := goldenCount(t, pool, `SELECT count(*) FROM t_spots
+			WHERE city_pack_id = $1 AND name = 'Admin Name'`, pack.ID); n != 1 {
+			t.Fatalf("curated name was overwritten")
+		}
+	})
+
+	t.Run("guard_trips_on_first_absent_run", func(t *testing.T) {
+		slug := "golden-guard"
+		pack := seedGoldenPack(t, pool, slug)
+		src := &fixtureSource{features: parkFixture(slug, 5.22, 52.22)}
+		runGolden(t, ctx, pool, src, pack, osm.Policy{})
+
+		src.features = nil
+		svc := &ingest.Service{Src: src, Store: persistence.NewIngestRepo(pool)}
+		st, err := svc.RunPack(ctx, pack, 0, false)
+		if !errors.Is(err, ingest.ErrGuardTripped) || !st.GuardTripped {
+			t.Fatalf("expected guard trip, got err=%v stats=%+v", err, st)
+		}
+		if n := goldenCount(t, pool, `SELECT count(*) FROM t_ingest_features
+			WHERE pack_id = $1`, pack.ID); n != 4 {
+			t.Fatalf("raw layer must survive an aborted run, got %d rows", n)
+		}
+		if n := goldenCount(t, pool, `SELECT count(*) FROM t_spot_amenities a
+			JOIN t_spots sp ON sp.id = a.spot_id WHERE sp.city_pack_id = $1`, pack.ID); n != 1 {
+			t.Fatalf("amenities must survive an aborted run, got %d", n)
+		}
+
+		svc.ForceGuard = true
+		if st, err := svc.RunPack(ctx, pack, 0, false); err != nil || !st.GuardForced {
+			t.Fatalf("forced run: err=%v stats=%+v", err, st)
+		}
+	})
+
+	t.Run("amenity_on_point_only_site", func(t *testing.T) {
+
+		slug := "golden-point-amenity"
+		pack := seedGoldenPack(t, pool, slug)
+		lon, lat := 5.32, 52.32
+		var feats []osm.RawFeature
+		for i, o := range [][2]float64{{0, 0}, {0.0002, 0}, {0, 0.0002}, {0.0001, 0.0001}} {
+			feats = append(feats, goldenFeature(fmt.Sprintf("n-pt%d-%s", i, slug), 1,
+				map[string]string{"leisure": "picnic_table"}, goldenPoint(lon+o[0], lat+o[1])))
+		}
+		feats = append(feats,
+			goldenFeature("n-water-"+slug, 1, map[string]string{"amenity": "drinking_water"},
+				goldenPoint(lon+0.0005, lat)),
+			goldenFeature("n-far-"+slug, 1, map[string]string{"amenity": "toilets"},
+				goldenPoint(lon+0.01, lat)))
+		st := runGolden(t, ctx, pool, &fixtureSource{features: feats}, pack, osm.Policy{})
+		if st.OrphanSites != 1 || st.AmenitiesLinked != 1 {
+			t.Fatalf("expected orphan_sites=1 amenities_linked=1, got %+v", st)
+		}
+		if n := goldenCount(t, pool, `SELECT count(*) FROM t_spot_amenities a
+			JOIN t_spots sp ON sp.id = a.spot_id
+			WHERE sp.city_pack_id = $1 AND a.type = 'water' AND a.distance_m BETWEEN 20 AND 50`, pack.ID); n != 1 {
+			t.Fatalf("expected water amenity ~35 m from the site")
+		}
+	})
+}

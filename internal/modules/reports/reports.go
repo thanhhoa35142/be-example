@@ -15,7 +15,6 @@ var (
 	ErrInvalidReport   = errors.New("invalid report")
 )
 
-// Spot report types per spec: confirm / missing / closed / issue.
 const (
 	ReportConfirm = "confirm"
 	ReportMissing = "missing"
@@ -23,15 +22,26 @@ const (
 	ReportIssue   = "issue"
 )
 
-// Crowd levels: 1 = quiet, 2 = moderate, 3 = busy.
 const (
 	CrowdQuiet    = 1
 	CrowdModerate = 2
 	CrowdBusy     = 3
 )
 
-// CrowdRateLimit is the max crowd reports per device per rolling 24h.
-const CrowdRateLimit = 30
+const (
+	CrowdRateLimit = 30
+
+	SpotReportRateLimit = 30
+
+	FeedbackRateLimit = 100
+)
+
+const (
+	FeedbackMaxAge   = 72 * time.Hour
+	FeedbackMaxAhead = 7*24*time.Hour + time.Hour
+)
+
+const MaxIssueCodeLen = 64
 
 type SpotReportInput struct {
 	SpotID    uuid.UUID
@@ -50,5 +60,5 @@ type ScoreFeedbackInput struct {
 	SpotID   uuid.UUID
 	DeviceID uuid.UUID
 	TSHour   time.Time
-	Verdict  int // e.g. -1/0/+1 or 1-5; validated by handler range
+	Verdict  int
 }

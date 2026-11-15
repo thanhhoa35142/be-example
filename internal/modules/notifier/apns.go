@@ -18,13 +18,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/thanhhoa35142/be-example/internal/platform/httpx"
 )
 
-// Client sends alert pushes to APNs over HTTP/2 using a provider token
-// (ES256 JWT signed with the .p8 key from Apple Developer).
-//
-// Credentials come from the environment — see ClientFromEnv. When they are
-// absent the notifier runs in log-only dev mode and nothing is delivered.
 type Client struct {
 	key      *ecdsa.PrivateKey
 	keyID    string
@@ -37,13 +34,6 @@ type Client struct {
 	bearerExp time.Time
 }
 
-// ClientFromEnv builds a Client from APNS_* env vars. Returns (nil, nil)
-// when APNs is not configured so callers can run in dev/log mode.
-//
-//	APNS_KEY_ID     — Key ID of the .p8 (10 chars)
-//	APNS_TEAM_ID    — Apple Developer Team ID
-//	APNS_KEY        — contents of the .p8 file (PEM; literal \n accepted)
-//	APNS_BUNDLE_ID  — optional, defaults to the app bundle id
 func ClientFromEnv() (*Client, error) {
 	keyID := os.Getenv("APNS_KEY_ID")
 	teamID := os.Getenv("APNS_TEAM_ID")
@@ -58,15 +48,20 @@ func ClientFromEnv() (*Client, error) {
 	if bundleID == "" {
 		bundleID = "com.example.MyApp"
 	}
-	return newClient(Config{KeyID: keyID, TeamID: teamID, KeyPEM: keyPEM, BundleID: bundleID})
+	return newClient(Config{
+		KeyID: keyID, TeamID: teamID, KeyPEM: keyPEM, BundleID: bundleID,
+		HTTPClient: httpx.NewClient(httpx.Policy{
+			Name: "apns", RatePerSec: 50, Burst: 50, Timeout: 10 * time.Second,
+		}),
+	})
 }
 
-// Config carries APNs credentials explicitly (mainly for tests).
 type Config struct {
-	KeyID    string
-	TeamID   string
-	KeyPEM   string
-	BundleID string
+	KeyID      string
+	TeamID     string
+	KeyPEM     string
+	BundleID   string
+	HTTPClient *http.Client
 }
 
 func newClient(cfg Config) (*Client, error) {
@@ -82,28 +77,19 @@ func newClient(cfg Config) (*Client, error) {
 	if !ok || ecKey.Curve != elliptic.P256() {
 		return nil, fmt.Errorf("APNS_KEY must be an EC P-256 private key (.p8)")
 	}
+	httpClient := cfg.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 10 * time.Second}
+	}
 	return &Client{
 		key:      ecKey,
 		keyID:    cfg.KeyID,
 		teamID:   cfg.TeamID,
 		bundleID: cfg.BundleID,
-		http: &http.Client{
-			Timeout: 10 * time.Second,
-			// APNs requires HTTP/2 — Go's transport negotiates it via ALPN
-			// on TLS automatically.
-		},
+		http:     httpClient,
 	}, nil
 }
 
-// Send posts payload to APNs for one device token.
-//
-//   - env: "sandbox" or "production" (from device.apns_env; unknown → production)
-//   - collapseID: APNs collapse identifier — we use the rule ID so repeated
-//     alerts for the same rule coalesce into one banner.
-//
-// Returns the APNs HTTP status on success (200) or the non-2xx status plus an
-// error describing the APNs reason. A 410 means the token is dead — callers
-// should clear device.apns_token.
 func (c *Client) Send(ctx context.Context, deviceToken, env, collapseID string, payload []byte) (int, error) {
 	host := "https://api.push.apple.com"
 	if env == "sandbox" {
@@ -140,8 +126,6 @@ func (c *Client) Send(ctx context.Context, deviceToken, env, collapseID string, 
 	return resp.StatusCode, nil
 }
 
-// providerToken returns a cached ES256 JWT; APNs tokens are valid for 60
-// minutes, we refresh after 50.
 func (c *Client) providerToken() (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -158,7 +142,7 @@ func (c *Client) providerToken() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("apns jwt sign: %w", err)
 	}
-	// JWS ES256 wants raw R||S (32 bytes each), not ASN.1 DER.
+
 	sig := make([]byte, 64)
 	r.FillBytes(sig[:32])
 	s.FillBytes(sig[32:])

@@ -15,8 +15,8 @@ import (
 
 const listCrowdCurves = `-- name: ListCrowdCurves :many
 SELECT kind, dow, hour, factor
-FROM crowd_curve
-WHERE config_version = (SELECT max(config_version) FROM crowd_curve)
+FROM t_crowd_curves
+WHERE config_version = (SELECT max(config_version) FROM t_crowd_curves)
 `
 
 type ListCrowdCurvesRow struct {
@@ -53,7 +53,7 @@ func (q *Queries) ListCrowdCurves(ctx context.Context) ([]ListCrowdCurvesRow, er
 
 const listCrowdHolidays = `-- name: ListCrowdHolidays :many
 SELECT country, date, kind
-FROM holiday
+FROM t_holidays
 WHERE country::text = ANY($1::text[])
   AND date >= $2
   AND date <= $3
@@ -94,7 +94,7 @@ func (q *Queries) ListCrowdHolidays(ctx context.Context, arg ListCrowdHolidaysPa
 const listCrowdSpots = `-- name: ListCrowdSpots :many
 SELECT s.id, s.kind, s.city_pack_id, s.country, s.cell_id, s.tz,
        COALESCE(ST_Area(s.area::geography), 0)::float8 AS area_m2
-FROM spot s
+FROM t_spots s
 WHERE s.status = 'active'
 `
 
@@ -138,7 +138,7 @@ func (q *Queries) ListCrowdSpots(ctx context.Context) ([]ListCrowdSpotsRow, erro
 
 const listCrowdWeather = `-- name: ListCrowdWeather :many
 SELECT cell_id, ts, temp, feels_like, precip_prob
-FROM weather_hourly
+FROM t_weather_hourly_forecasts
 WHERE cell_id = ANY($1::bigint[])
   AND ts >= $2
   AND ts < $3
@@ -184,30 +184,85 @@ func (q *Queries) ListCrowdWeather(ctx context.Context, arg ListCrowdWeatherPara
 	return items, nil
 }
 
-const upsertCrowdEstimate = `-- name: UpsertCrowdEstimate :exec
-INSERT INTO crowd_estimate (spot_id, dow, hour, level, source, n_reports, updated_at)
-VALUES ($1, $2, $3, $4, 'model', 0, now())
+const listHolidayCountries = `-- name: ListHolidayCountries :many
+SELECT DISTINCT country::text AS country
+FROM t_city_packs
+WHERE status <> 'retired'
+ORDER BY 1
+`
+
+func (q *Queries) ListHolidayCountries(ctx context.Context) ([]string, error) {
+	rows, err := q.db.Query(ctx, listHolidayCountries)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var country string
+		if err := rows.Scan(&country); err != nil {
+			return nil, err
+		}
+		items = append(items, country)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const upsertCrowdEstimatesBatch = `-- name: UpsertCrowdEstimatesBatch :execrows
+INSERT INTO t_crowd_estimates (spot_id, dow, hour, level, source, n_reports, updated_at)
+SELECT ($1::uuid[])[i], ($2::smallint[])[i],
+       ($3::smallint[])[i], ($4::smallint[])[i],
+       'model', 0, now()
+FROM generate_series(1, cardinality($1::uuid[])) AS i
 ON CONFLICT (spot_id, dow, hour) DO UPDATE SET
     level      = EXCLUDED.level,
     source     = EXCLUDED.source,
     n_reports  = 0,
     updated_at = EXCLUDED.updated_at
-WHERE crowd_estimate.source = 'model'
+WHERE t_crowd_estimates.source = 'model'
+  AND t_crowd_estimates.level IS DISTINCT FROM EXCLUDED.level
 `
 
-type UpsertCrowdEstimateParams struct {
-	SpotID uuid.UUID `json:"spot_id"`
-	Dow    int16     `json:"dow"`
-	Hour   int16     `json:"hour"`
-	Level  int16     `json:"level"`
+type UpsertCrowdEstimatesBatchParams struct {
+	SpotIds []uuid.UUID `json:"spot_ids"`
+	Dows    []int16     `json:"dows"`
+	Hours   []int16     `json:"hours"`
+	Levels  []int16     `json:"levels"`
 }
 
-func (q *Queries) UpsertCrowdEstimate(ctx context.Context, arg UpsertCrowdEstimateParams) error {
-	_, err := q.db.Exec(ctx, upsertCrowdEstimate,
-		arg.SpotID,
-		arg.Dow,
-		arg.Hour,
-		arg.Level,
+// Batched model upsert (~10k rows per statement). Never overwrites community
+// or provider rows, and skips model rows whose level is unchanged, so
+// updated_at means "last time the model level changed" (the freshness
+// endpoint also considers the last successful crowd.refresh run).
+func (q *Queries) UpsertCrowdEstimatesBatch(ctx context.Context, arg UpsertCrowdEstimatesBatchParams) (int64, error) {
+	result, err := q.db.Exec(ctx, upsertCrowdEstimatesBatch,
+		arg.SpotIds,
+		arg.Dows,
+		arg.Hours,
+		arg.Levels,
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const upsertHolidays = `-- name: UpsertHolidays :execrows
+INSERT INTO t_holidays (country, region, date, kind, name)
+SELECT e->>'country', '', (e->>'date')::date, 'public', e->>'name'
+FROM jsonb_array_elements($1::jsonb) AS e
+ON CONFLICT (country, region, date, kind) DO UPDATE SET name = EXCLUDED.name
+`
+
+// rows: JSON array of {country, date (YYYY-MM-DD), name}; national public
+// holidays only (region ”).
+func (q *Queries) UpsertHolidays(ctx context.Context, rows []byte) (int64, error) {
+	result, err := q.db.Exec(ctx, upsertHolidays, rows)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

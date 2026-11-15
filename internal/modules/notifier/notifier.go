@@ -4,20 +4,20 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"net/http"
 
 	"github.com/google/uuid"
 	"github.com/thanhhoa35142/be-example/internal/modules/alerts"
 )
 
-// TokenProvider resolves a device's APNs token, environment and locale.
-// alerts.Repository satisfies this interface.
 type TokenProvider interface {
 	DeviceAPNsToken(ctx context.Context, deviceID uuid.UUID) (token, env, locale string, ok bool, err error)
 }
 
-// Sender delivers fired alerts via APNs. When client is nil (no APNS_*
-// credentials configured) it logs the exact payload it would have sent —
-// dev mode.
+type Unregisterer interface {
+	MarkDeviceUnregistered(ctx context.Context, deviceID uuid.UUID) error
+}
+
 type Sender struct {
 	logger *slog.Logger
 	tokens TokenProvider
@@ -52,6 +52,18 @@ func (s *Sender) Send(ctx context.Context, d alerts.Delivery) error {
 	}
 
 	status, err := s.client.Send(ctx, token, env, d.RuleID.String(), body)
+	if status == http.StatusGone {
+
+		if u, ok := s.tokens.(Unregisterer); ok {
+			if uerr := u.MarkDeviceUnregistered(ctx, d.DeviceID); uerr != nil {
+				s.logger.ErrorContext(ctx, "device unregister failed",
+					"device", d.DeviceID, "error", uerr)
+			}
+		}
+		s.logger.InfoContext(ctx, "apns token unregistered (410)",
+			"rule", d.RuleID, "device", d.DeviceID)
+		return alerts.ErrPushTokenDead
+	}
 	if err != nil {
 		s.logger.ErrorContext(ctx, "apns send failed",
 			"rule", d.RuleID, "device", d.DeviceID,

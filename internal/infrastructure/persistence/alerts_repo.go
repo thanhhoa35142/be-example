@@ -7,19 +7,22 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/thanhhoa35142/be-example/internal/modules/alerts"
 )
 
 type AlertsRepo struct {
-	q *Queries
+	q    *Queries
+	pool *pgxpool.Pool
 }
 
-func NewAlertsRepo(q *Queries) *AlertsRepo {
-	return &AlertsRepo{q: q}
+func NewAlertsRepo(q *Queries, pool *pgxpool.Pool) *AlertsRepo {
+	return &AlertsRepo{q: q, pool: pool}
 }
 
-func ruleFromRow(r AlertRule) alerts.Rule {
+func ruleFromRow(r TAlertRule) alerts.Rule {
 	var start, end time.Duration
 	if r.StartLocal.Valid {
 		start = time.Duration(r.StartLocal.Microseconds) * time.Microsecond
@@ -85,13 +88,55 @@ func (r *AlertsRepo) GetRule(ctx context.Context, id uuid.UUID) (*alerts.Rule, e
 	return &rule, nil
 }
 
-func (r *AlertsRepo) CountRules(ctx context.Context, deviceID uuid.UUID) (int, error) {
-	n, err := r.q.CountAlertRules(ctx, deviceID)
-	return int(n), err
+func (r *AlertsRepo) InsertRuleLimited(ctx context.Context, deviceID uuid.UUID, in alerts.RuleInput, start, end time.Duration, maxRules int) (uuid.UUID, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	q := r.q.WithTx(tx)
+	if _, err := q.LockDeviceForAlerts(ctx, deviceID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return uuid.Nil, alerts.ErrDeviceInvalid
+		}
+		return uuid.Nil, err
+	}
+	if maxRules >= 0 {
+		n, err := q.CountAlertRules(ctx, deviceID)
+		if err != nil {
+			return uuid.Nil, err
+		}
+		if int(n) >= maxRules {
+			return uuid.Nil, alerts.ErrPlanLimit
+		}
+	}
+	id, err := q.InsertAlertRule(ctx, ruleParams(deviceID, in, start, end))
+	if err != nil {
+		return uuid.Nil, mapRuleFKError(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return uuid.Nil, err
+	}
+	return id, nil
 }
 
-func (r *AlertsRepo) InsertRule(ctx context.Context, deviceID uuid.UUID, in alerts.RuleInput, start, end time.Duration) (uuid.UUID, error) {
-	return r.q.InsertAlertRule(ctx, ruleParams(deviceID, in, start, end))
+func mapRuleFKError(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+		return alerts.ErrSpotNotFound
+	}
+	return err
+}
+
+func (r *AlertsRepo) SpotActive(ctx context.Context, spotID uuid.UUID) (bool, error) {
+	row, err := r.q.GetSpotByID(ctx, spotID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return row.Status == "active", nil
 }
 
 func (r *AlertsRepo) UpdateRule(ctx context.Context, id, deviceID uuid.UUID, in alerts.RuleInput, start, end time.Duration) (bool, error) {
@@ -116,7 +161,10 @@ func (r *AlertsRepo) UpdateRule(ctx context.Context, id, deviceID uuid.UUID, in 
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
-	return err == nil, err
+	if err != nil {
+		return false, mapRuleFKError(err)
+	}
+	return true, nil
 }
 
 func (r *AlertsRepo) DeleteRule(ctx context.Context, id, deviceID uuid.UUID) (bool, error) {
@@ -164,10 +212,10 @@ func (r *AlertsRepo) SpotScoreAt(ctx context.Context, spotID uuid.UUID, tsHour t
 
 func (r *AlertsRepo) BestScoredSpotNear(ctx context.Context, lat, lon float64, radiusM int, tsHour time.Time) (*alerts.Delivery, error) {
 	row, err := r.q.BestScoredSpotNear(ctx, BestScoredSpotNearParams{
-		StMakepoint:   lat,
-		StMakepoint_2: lon,
-		TsHour:        tsHour,
-		StDwithin:     radiusM,
+		Lat:     lat,
+		Lon:     lon,
+		TsHour:  tsHour,
+		RadiusM: float64(radiusM),
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -182,28 +230,73 @@ func (r *AlertsRepo) BestScoredSpotNear(ctx context.Context, lat, lon float64, r
 	}, nil
 }
 
-func (r *AlertsRepo) RecordDelivery(ctx context.Context, d alerts.Delivery, windowStart time.Time, apnsStatus int) (bool, error) {
-	n, err := r.q.InsertAlertDelivery(ctx, InsertAlertDeliveryParams{
-		RuleID:      d.RuleID,
-		WindowStart: windowStart,
-		ApnsStatus:  pgtype.Int4{Int32: int32(apnsStatus), Valid: true},
-	})
-	return n > 0, err
+func (r *AlertsRepo) SweepDeliveries(ctx context.Context) error {
+	if err := r.q.SweepStaleDeliveries(ctx); err != nil {
+		return err
+	}
+	err := r.q.DeadLetterFailedDeliveries(ctx, int16(alerts.MaxDeliveryAttempts))
+	return err
 }
 
-func (r *AlertsRepo) SetDeliveryStatus(ctx context.Context, ruleID uuid.UUID, windowStart time.Time, apnsStatus int) error {
-	return r.q.SetDeliveryStatus(ctx, SetDeliveryStatusParams{
+func (r *AlertsRepo) ClaimDelivery(ctx context.Context, d alerts.Delivery, windowStart time.Time, maxAttempts int) (bool, error) {
+	_, err := r.q.ClaimAlertDelivery(ctx, ClaimAlertDeliveryParams{
+		RuleID:      d.RuleID,
+		WindowStart: windowStart,
+	})
+	if err == nil {
+		return true, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return false, err
+	}
+
+	_, err = r.q.ReclaimFailedDelivery(ctx, ReclaimFailedDeliveryParams{
+		RuleID:      d.RuleID,
+		WindowStart: windowStart,
+		Attempts:    int16(maxAttempts),
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, mapRuleFKError(err)
+	}
+	return true, nil
+}
+
+func (r *AlertsRepo) MarkDeliverySent(ctx context.Context, ruleID uuid.UUID, windowStart time.Time, apnsStatus int) error {
+	return r.q.MarkDeliverySent(ctx, MarkDeliverySentParams{
 		RuleID:      ruleID,
 		WindowStart: windowStart,
 		ApnsStatus:  pgtype.Int4{Int32: int32(apnsStatus), Valid: true},
 	})
 }
 
+func (r *AlertsRepo) MarkDeliveryFailed(ctx context.Context, ruleID uuid.UUID, windowStart time.Time, apnsStatus int, lastError string) error {
+	return r.q.MarkDeliveryFailed(ctx, MarkDeliveryFailedParams{
+		RuleID:      ruleID,
+		WindowStart: windowStart,
+		ApnsStatus:  pgtype.Int4{Int32: int32(apnsStatus), Valid: true},
+		LastError:   pgtype.Text{String: lastError, Valid: lastError != ""},
+	})
+}
+
+func (r *AlertsRepo) MarkDeliveryDead(ctx context.Context, ruleID uuid.UUID, windowStart time.Time, lastError string) error {
+	return r.q.MarkDeliveryDead(ctx, MarkDeliveryDeadParams{
+		RuleID:      ruleID,
+		WindowStart: windowStart,
+		LastError:   pgtype.Text{String: lastError, Valid: lastError != ""},
+	})
+}
+
+func (r *AlertsRepo) MarkDeviceUnregistered(ctx context.Context, deviceID uuid.UUID) error {
+	return r.q.MarkDevicePushUnregistered(ctx, deviceID)
+}
+
 func (r *AlertsRepo) DeviceExists(ctx context.Context, deviceID uuid.UUID) (bool, error) {
 	return r.q.DeviceExistsForAlert(ctx, deviceID)
 }
 
-// small param helpers local to this file
 func uuidParam(u *uuid.UUID) pgtype.UUID {
 	if u == nil {
 		return pgtype.UUID{}

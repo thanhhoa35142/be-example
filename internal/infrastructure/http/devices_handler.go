@@ -28,7 +28,6 @@ type registerDeviceRequest struct {
 	Prefs      map[string]any `json:"prefs"`
 }
 
-// POST /v1/devices — register or refresh a device (id is client-generated).
 func (h *DevicesHandler) Register(c *gin.Context) {
 	var req registerDeviceRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -40,28 +39,39 @@ func (h *DevicesHandler) Register(c *gin.Context) {
 		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidID, "Invalid id", "expected a UUID")
 		return
 	}
-	if req.APNsEnv != nil && *req.APNsEnv != "sandbox" && *req.APNsEnv != "production" {
-		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Invalid apnsEnv", "expected sandbox or production")
-		return
-	}
-
-	outID, err := h.svc.Register(c.Request.Context(), devices.RegisterInput{
+	in := devices.RegisterInput{
 		ID: id, APNsToken: req.APNsToken, APNsEnv: req.APNsEnv,
 		Locale: req.Locale, TZ: req.TZ, AppVersion: req.AppVersion, Prefs: req.Prefs,
-	})
+	}
+	if tok := c.GetHeader(DeviceTokenHeader); tok != "" {
+		in.TokenHash = devices.HashSecret(tok)
+	}
+	out, err := h.svc.Register(c.Request.Context(), in)
 	if err != nil {
+		if errors.Is(err, devices.ErrInvalidInput) {
+			httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Invalid device", err.Error())
+			return
+		}
+		if errors.Is(err, devices.ErrUnauthorized) {
+			httpx.WriteProblem(c, http.StatusUnauthorized, httpx.CodeUnauthorized,
+				"Device authentication required", "this device already has a credential; send it in "+DeviceTokenHeader)
+			return
+		}
 		if errors.Is(err, devices.ErrConflict) {
-			httpx.WriteProblem(c, http.StatusConflict, httpx.CodeConflict, "Conflict", "apnsToken already bound to another device")
+			httpx.WriteProblem(c, http.StatusConflict, httpx.CodeConflict, "Conflict", "apnsToken is being registered concurrently, retry")
 			return
 		}
 		httpx.WriteError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": gin.H{"id": outID.String()}})
+	data := gin.H{"id": out.ID.String()}
+	if out.Secret != nil {
+		// Shown exactly once — the app must store it in the Keychain.
+		data["deviceSecret"] = *out.Secret
+	}
+	c.JSON(http.StatusOK, gin.H{"data": data})
 }
 
-// DELETE /v1/devices/:id — soft-delete (GDPR/CCPA unlink). Device ID acts as
-// the capability token until a real auth scheme exists.
 func (h *DevicesHandler) Delete(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {

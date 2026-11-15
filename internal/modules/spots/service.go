@@ -2,19 +2,35 @@ package spots
 
 import (
 	"context"
+	"math"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/thanhhoa35142/be-example/internal/modules/geo"
 )
 
 const (
-	// MaxBBoxDeltaDeg caps the viewport so zoomed-out requests stay cheap.
-	// 0.5° is roughly 55 km at the equator — city-pack scale.
 	MaxBBoxDeltaDeg = 0.5
 
-	// ForecastDays is the spec'd 7-day hourly forecast window.
 	ForecastDays = 7
+
+	MaxBatchIDs = 50
+
+	MaxScoreHours = 24
 )
+
+func WeatherSourceCode(provider string) *string {
+	var code string
+	switch provider {
+	case "weatherkit":
+		code = "weatherkit"
+	case "open-meteo", "openmeteo":
+		code = "openmeteo"
+	default:
+		return nil
+	}
+	return &code
+}
 
 type Service struct {
 	repo Repository
@@ -24,18 +40,102 @@ func NewService(repo Repository) *Service {
 	return &Service{repo: repo}
 }
 
-// ListInBBox returns active spots in the viewport with the score at the
-// requested hour (quantized to the hour for edge-cache friendliness).
 func (s *Service) ListInBBox(ctx context.Context, bbox BBox, when *time.Time) ([]SpotWithScore, error) {
-	if err := validateBBox(bbox); err != nil {
-		return nil, err
+	return s.List(ctx, ListQuery{BBox: &bbox, When: when})
+}
+
+type ListResult struct {
+	Items     []SpotWithScore
+	Total     int
+	Truncated bool
+}
+
+func (s *Service) List(ctx context.Context, q ListQuery) ([]SpotWithScore, error) {
+	res, err := s.list(ctx, q, false)
+	return res.Items, err
+}
+
+func (s *Service) ListPage(ctx context.Context, q ListQuery) (ListResult, error) {
+	return s.list(ctx, q, true)
+}
+
+func (s *Service) list(ctx context.Context, q ListQuery, capWide bool) (ListResult, error) {
+	if (q.BBox == nil) == (len(q.IDs) == 0) {
+		return ListResult{}, ErrInvalidQuery
 	}
-	ts := time.Now().UTC()
-	if when != nil {
-		ts = when.UTC()
+	if q.BBox != nil {
+		if err := validateBBox(*q.BBox); err != nil {
+			return ListResult{}, err
+		}
+	}
+	if len(q.IDs) > MaxBatchIDs || q.Hours < 0 || q.Hours > MaxScoreHours {
+		return ListResult{}, ErrInvalidQuery
+	}
+	now := time.Now().UTC()
+	// Bound the forecast window — scores only exist ~7 days out; anything
+	// further is an invalid query, not an empty result worth caching.
+	for _, t := range []*time.Time{q.When, q.From} {
+		if t != nil {
+			tt := t.UTC()
+			if tt.Before(now.Add(-24*time.Hour)) || tt.After(now.Add(8*24*time.Hour)) {
+				return ListResult{}, ErrInvalidQuery
+			}
+		}
+	}
+	ts := now
+	switch {
+	case q.When != nil:
+		ts = q.When.UTC()
+	case q.From != nil:
+		ts = q.From.UTC()
 	}
 	ts = ts.Truncate(time.Hour)
-	return s.repo.ListInBBox(ctx, bbox, ts)
+
+	var from, to time.Time
+	if q.Hours > 0 {
+		from = now
+		if q.From != nil {
+			from = q.From.UTC()
+		}
+		from = from.Truncate(time.Hour)
+		to = from.Add(time.Duration(q.Hours) * time.Hour)
+	}
+	limit := 0
+	if capWide && q.BBox != nil {
+		limit = SpotCap(*q.BBox, q.Hours, q.IncludeArea)
+	}
+	items, total, err := s.repo.List(ctx, q, ts, from, to, limit)
+	if err != nil {
+		return ListResult{}, err
+	}
+	return ListResult{Items: items, Total: total, Truncated: limit > 0 && total > len(items)}, nil
+}
+
+const (
+	WideBBoxDeg = 0.12
+
+	ResponseBudgetBytes = 640 << 10
+
+	featureBaseBytes = 520
+	featureHourBytes = 64
+	featureAreaBytes = 370
+
+	minSpotCap = 100
+)
+
+func SpotCap(b BBox, hours int, includeArea bool) int {
+	if max(b.East-b.West, b.North-b.South) <= WideBBoxDeg+1e-9 {
+		return 0
+	}
+	per := featureBaseBytes + featureHourBytes*hours
+	if includeArea {
+		per += featureAreaBytes
+	}
+	return max(ResponseBudgetBytes/per, minSpotCap)
+}
+
+func (s *Service) ListPacks(ctx context.Context) ([]Pack, error) {
+	return s.repo.ListPacks(ctx)
 }
 
 func (s *Service) Get(ctx context.Context, id uuid.UUID) (SpotDetail, error) {
@@ -62,18 +162,23 @@ func (s *Service) Get(ctx context.Context, id uuid.UUID) (SpotDetail, error) {
 	if err != nil {
 		return SpotDetail{}, err
 	}
+
+	provider, err := s.repo.WeatherProvider(ctx, geo.WeatherCellID(detail.CellID))
+	if err != nil {
+		return SpotDetail{}, err
+	}
+	detail.WeatherSource = WeatherSourceCode(provider)
 	return detail, nil
 }
 
-// Forecast returns hourly scores for the next ForecastDays days starting at
-// the current hour.
 func (s *Service) Forecast(ctx context.Context, id uuid.UUID) ([]ForecastPoint, error) {
-	if _, err := s.Get(ctx, id); err != nil {
+	detail, err := s.Get(ctx, id)
+	if err != nil {
 		return nil, err
 	}
 	from := time.Now().UTC().Truncate(time.Hour)
 	to := from.Add(ForecastDays * 24 * time.Hour)
-	points, err := s.repo.ListForecast(ctx, id, from, to)
+	points, err := s.repo.ListForecast(ctx, id, geo.WeatherCellID(detail.CellID), from, to)
 	if err != nil {
 		return nil, err
 	}
@@ -82,6 +187,31 @@ func (s *Service) Forecast(ctx context.Context, id uuid.UUID) ([]ForecastPoint, 
 	}
 	return points, nil
 }
+
+const BBoxGridDeg = 0.02
+
+func CanonicalBBox(b BBox) BBox {
+	if validateBBox(b) != nil {
+		return b
+	}
+	out := BBox{
+		West:  gridFloor(b.West),
+		South: gridFloor(b.South),
+		East:  gridCeil(b.East),
+		North: gridCeil(b.North),
+	}
+	out.West = max(out.West, -180)
+	out.East = min(out.East, 180)
+	out.South = max(out.South, -90)
+	out.North = min(out.North, 90)
+	if validateBBox(out) != nil {
+		return b
+	}
+	return out
+}
+
+func gridFloor(v float64) float64 { return math.Floor(v/BBoxGridDeg+1e-9) * BBoxGridDeg }
+func gridCeil(v float64) float64  { return math.Ceil(v/BBoxGridDeg-1e-9) * BBoxGridDeg }
 
 func validateBBox(b BBox) error {
 	if b.West >= b.East || b.South >= b.North {

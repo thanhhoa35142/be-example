@@ -20,12 +20,10 @@ func NewReportsHandler(svc *reports.Service) *ReportsHandler {
 }
 
 type spotReportRequest struct {
-	DeviceID  string  `json:"deviceId"`
 	Type      string  `json:"type"`
 	IssueCode *string `json:"issueCode"`
 }
 
-// POST /v1/spots/:id/reports — confirm / missing / closed / issue.
 func (h *ReportsHandler) SpotReport(c *gin.Context) {
 	spotID, ok := parseSpotID(c)
 	if !ok {
@@ -36,24 +34,21 @@ func (h *ReportsHandler) SpotReport(c *gin.Context) {
 		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Invalid body", "expected JSON report")
 		return
 	}
-	deviceID, err := uuid.Parse(req.DeviceID)
-	if err != nil {
-		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidID, "Invalid deviceId", "expected a UUID")
+	deviceID, ok := requestDeviceID(c)
+	if !ok {
 		return
 	}
 
-	err = h.svc.SubmitSpotReport(c.Request.Context(), reports.SpotReportInput{
+	err := h.svc.SubmitSpotReport(c.Request.Context(), reports.SpotReportInput{
 		SpotID: spotID, DeviceID: deviceID, Type: req.Type, IssueCode: req.IssueCode,
 	})
 	h.writeError(c, err)
 }
 
 type crowdReportRequest struct {
-	DeviceID string `json:"deviceId"`
-	Level    int    `json:"level"`
+	Level int `json:"level"`
 }
 
-// POST /v1/spots/:id/crowd-reports — busy / moderate / quiet for the current slot.
 func (h *ReportsHandler) CrowdReport(c *gin.Context) {
 	spotID, ok := parseSpotID(c)
 	if !ok {
@@ -64,33 +59,29 @@ func (h *ReportsHandler) CrowdReport(c *gin.Context) {
 		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Invalid body", "expected JSON crowd report")
 		return
 	}
-	deviceID, err := uuid.Parse(req.DeviceID)
-	if err != nil {
-		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidID, "Invalid deviceId", "expected a UUID")
+	deviceID, ok := requestDeviceID(c)
+	if !ok {
 		return
 	}
 
-	err = h.svc.SubmitCrowdReport(c.Request.Context(), spotID, deviceID, req.Level)
+	err := h.svc.SubmitCrowdReport(c.Request.Context(), spotID, deviceID, req.Level)
 	h.writeError(c, err)
 }
 
 type scoreFeedbackRequest struct {
-	DeviceID string    `json:"deviceId"`
-	SpotID   string    `json:"spotId"`
-	TSHour   time.Time `json:"tsHour"`
-	Verdict  int       `json:"verdict"`
+	SpotID  string    `json:"spotId"`
+	TSHour  time.Time `json:"tsHour"`
+	Verdict int       `json:"verdict"`
 }
 
-// POST /v1/scores/feedback — "is this score right?"
 func (h *ReportsHandler) ScoreFeedback(c *gin.Context) {
 	var req scoreFeedbackRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Invalid body", "expected JSON feedback")
 		return
 	}
-	deviceID, err := uuid.Parse(req.DeviceID)
-	if err != nil {
-		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidID, "Invalid deviceId", "expected a UUID")
+	deviceID, ok := requestDeviceID(c)
+	if !ok {
 		return
 	}
 	spotID, err := uuid.Parse(req.SpotID)

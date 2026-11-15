@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"time"
 
 	"github.com/google/uuid"
@@ -20,26 +21,105 @@ func NewSpotsRepository(q *Queries) *SpotsRepository {
 	return &SpotsRepository{queries: q}
 }
 
-func (r *SpotsRepository) ListInBBox(ctx context.Context, bbox spots.BBox, tsHour time.Time) ([]spots.SpotWithScore, error) {
-	rows, err := r.queries.ListSpotsInBBox(ctx, ListSpotsInBBoxParams{
-		TsHour: tsHour,
-		West:   bbox.West,
-		South:  bbox.South,
-		East:   bbox.East,
-		North:  bbox.North,
+func (r *SpotsRepository) List(ctx context.Context, q spots.ListQuery, tsHour, seriesFrom, seriesTo time.Time, limit int) ([]spots.SpotWithScore, int, error) {
+	f := q.Filter.Normalized()
+	if q.BBox != nil {
+		rows, err := r.queries.ListSpotsInBBox(ctx, ListSpotsInBBoxParams{
+			IncludeArea: q.IncludeArea,
+			ScoresFrom:  seriesFrom,
+			ScoresTo:    seriesTo,
+			TsHour:      tsHour,
+			West:        q.BBox.West,
+			South:       q.BBox.South,
+			East:        q.BBox.East,
+			North:       q.BBox.North,
+			Kinds:       f.Kinds,
+			Amenities:   f.Amenities,
+			MinScore:    minScoreParam(f.MinScore),
+			MaxRows:     pgtype.Int4{Int32: int32(limit), Valid: limit > 0},
+		})
+		if err != nil {
+			return nil, 0, err
+		}
+		total := 0
+		out := make([]spots.SpotWithScore, 0, len(rows))
+		for _, row := range rows {
+			total = int(row.TotalMatched)
+			out = append(out, spotWithScore(row.ID, row.CityPackID, row.Kind, row.Name, row.Names, row.Lon, row.Lat,
+				row.Country, row.City, row.Tz, row.LastVerifiedAt, row.AreaGeojson, row.HourlyScores,
+				row.Score, row.Confidence, row.CapReason, row.Reasons, row.ComputedAt))
+		}
+		return out, total, nil
+	}
+
+	rows, err := r.queries.ListSpotsByIDs(ctx, ListSpotsByIDsParams{
+		Ids:         q.IDs,
+		IncludeArea: q.IncludeArea,
+		ScoresFrom:  seriesFrom,
+		ScoresTo:    seriesTo,
+		TsHour:      tsHour,
+		Kinds:       f.Kinds,
+		Amenities:   f.Amenities,
+		MinScore:    minScoreParam(f.MinScore),
 	})
+	if err != nil {
+		return nil, 0, err
+	}
+	out := make([]spots.SpotWithScore, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, spotWithScore(row.ID, row.CityPackID, row.Kind, row.Name, row.Names, row.Lon, row.Lat,
+			row.Country, row.City, row.Tz, row.LastVerifiedAt, row.AreaGeojson, row.HourlyScores,
+			row.Score, row.Confidence, row.CapReason, row.Reasons, row.ComputedAt))
+	}
+	return out, len(out), nil
+}
+
+func minScoreParam(v *int) pgtype.Int4 {
+	if v == nil {
+		return pgtype.Int4{}
+	}
+	return pgtype.Int4{Int32: int32(*v), Valid: true}
+}
+
+func (r *SpotsRepository) WeatherProvider(ctx context.Context, weatherCellID int64) (string, error) {
+	p, err := r.queries.GetSpotWeatherProvider(ctx, weatherCellID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	return p, err
+}
+
+func (r *SpotsRepository) ListPacks(ctx context.Context) ([]spots.Pack, error) {
+	rows, err := r.queries.ListPackSummaries(ctx)
 	if err != nil {
 		return nil, err
 	}
-
-	out := make([]spots.SpotWithScore, 0, len(rows))
+	out := make([]spots.Pack, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, spots.SpotWithScore{
-			Spot:  spotFromListRow(row),
-			Score: scoreSnapshotFromRow(row.Score, row.Confidence, row.CapReason, row.Reasons, row.ComputedAt),
+		out = append(out, spots.Pack{
+			Slug: row.Slug, Name: row.Name, Country: row.Country, TZ: row.Tz,
+			Center:      [2]float64{row.CenterLon, row.CenterLat},
+			BBox:        [4]float64{row.West, row.South, row.East, row.North},
+			ActiveSpots: int(row.ActiveSpots),
 		})
 	}
 	return out, nil
+}
+
+func spotWithScore(id, packID uuid.UUID, kind string, name pgtype.Text, names []byte, lon, lat float64,
+	country string, city pgtype.Text, tz string, verified pgtype.Timestamptz, area, hourly []byte,
+	score, confidence pgtype.Int2, capReason pgtype.Text, reasons []byte, computedAt pgtype.Timestamptz,
+) spots.SpotWithScore {
+	return spots.SpotWithScore{
+		Spot: spots.Spot{
+			ID: id, CityPackID: packID, Kind: spots.Kind(kind), Name: textPtr(name),
+			Names: namesFromJSON(names), Lon: lon, Lat: lat, Country: country,
+			City: textPtr(city), TZ: tz, LastVerifiedAt: timePtr(verified),
+		},
+		Score:        scoreSnapshotFromRow(score, confidence, capReason, reasons, computedAt),
+		Area:         area,
+		HourlyScores: hourly,
+	}
 }
 
 func (r *SpotsRepository) GetByID(ctx context.Context, id uuid.UUID) (spots.SpotDetail, error) {
@@ -65,6 +145,7 @@ func (r *SpotsRepository) GetByID(ctx context.Context, id uuid.UUID) (spots.Spot
 			LastVerifiedAt: timePtr(row.LastVerifiedAt),
 		},
 		Status:      row.Status,
+		CellID:      row.CellID,
 		MergedInto:  uuidPtr(row.MergedInto),
 		AreaGeoJSON: row.AreaGeojson,
 	}, nil
@@ -103,11 +184,12 @@ func (r *SpotsRepository) ListSources(ctx context.Context, spotID uuid.UUID) ([]
 	return out, nil
 }
 
-func (r *SpotsRepository) ListForecast(ctx context.Context, spotID uuid.UUID, from, to time.Time) ([]spots.ForecastPoint, error) {
+func (r *SpotsRepository) ListForecast(ctx context.Context, spotID uuid.UUID, weatherCellID int64, from, to time.Time) ([]spots.ForecastPoint, error) {
 	rows, err := r.queries.ListSpotForecast(ctx, ListSpotForecastParams{
-		SpotID:   spotID,
-		TsHour:   from,
-		TsHour_2: to,
+		WeatherCellID: weatherCellID,
+		SpotID:        spotID,
+		FromTs:        from,
+		ToTs:          to,
 	})
 	if err != nil {
 		return nil, err
@@ -127,24 +209,23 @@ func (r *SpotsRepository) ListForecast(ctx context.Context, spotID uuid.UUID, fr
 			CapReason:  textPtr(row.CapReason),
 			Reasons:    reasonsFromJSON(row.Reasons),
 			Confidence: int(row.Confidence),
+			Weather:    hourWeather(row.Temp, row.FeelsLike, row.PrecipProb, row.Wind, row.Uv, row.Cloud),
 		})
 	}
 	return out, nil
 }
 
-func spotFromListRow(row ListSpotsInBBoxRow) spots.Spot {
-	return spots.Spot{
-		ID:             row.ID,
-		CityPackID:     row.CityPackID,
-		Kind:           spots.Kind(row.Kind),
-		Name:           textPtr(row.Name),
-		Names:          namesFromJSON(row.Names),
-		Lon:            row.Lon,
-		Lat:            row.Lat,
-		Country:        row.Country,
-		City:           textPtr(row.City),
-		TZ:             row.Tz,
-		LastVerifiedAt: timePtr(row.LastVerifiedAt),
+func hourWeather(temp, feels pgtype.Float4, precip pgtype.Int2, wind, uv pgtype.Float4, cloud pgtype.Int2) *spots.HourWeather {
+	if !temp.Valid && !feels.Valid && !precip.Valid && !wind.Valid && !uv.Valid && !cloud.Valid {
+		return nil
+	}
+	return &spots.HourWeather{
+		TempC:      round1Ptr(temp),
+		FeelsLikeC: round1Ptr(feels),
+		PrecipProb: int16Ptr(precip),
+		WindKmh:    round1Ptr(wind),
+		UV:         round1Ptr(uv),
+		Cloud:      int16Ptr(cloud),
 	}
 }
 
@@ -181,6 +262,14 @@ func reasonsFromJSON(raw []byte) []spots.Reason {
 		return []spots.Reason{}
 	}
 	return r
+}
+
+func round1Ptr(v pgtype.Float4) *float64 {
+	if !v.Valid {
+		return nil
+	}
+	f := math.Round(float64(v.Float32)*10) / 10
+	return &f
 }
 
 func textPtr(t pgtype.Text) *string {
