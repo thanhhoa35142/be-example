@@ -8,8 +8,17 @@ name: weather-selfhost-probe
 #
 # Nothing is written to any database; this only exercises the container.
 # Usage: Actions → weather-selfhost-probe → Run workflow.
-# Try a different model by editing the `models` input, e.g.
-#   ecmwf_ifs025 | ncep_gfs013 | cmc_gem_gdps | ukmo_global_deterministic_10km
+#
+# Model findings so far (2026-11-15):
+#   - /v1/forecast default `best_match` requires MANY synced domains
+#     (gfs global group + gfs013 uv + ifs025 + ifsHres) -> patchy/nulls.
+#   - Always pass `models=` explicitly.
+#   - uv_index globally: only ncep_gfs013 (+ ukmo_uk for UK).
+#   - precipitation_probability: only ensembles (ncep_gefs025/gefs05,
+#     ecmwf_ifs025_ensemble, icon_eps) - ncep_gefs025 ships ONLY that var.
+#   - Candidate minimal set: ncep_gfs013 + ncep_gefs025 -> models=gfs_global
+#     (gfs_global = gfs013 primary + ensembles secondary; missing
+#     supplemental gfs025/hrrr/nbm should degrade, probe verifies).
 
 on:
   workflow_dispatch:
@@ -17,7 +26,11 @@ on:
       models:
         description: "Sync model domains (comma-separated)"
         type: string
-        default: "ecmwf_ifs025"
+        default: "ncep_gfs013,ncep_gefs025"
+      api_models:
+        description: "Comma-separated `models=` values to probe"
+        type: string
+        default: "gfs_global,gfs013"
       past_days:
         description: "Sync --past-days (keep recent files only)"
         type: string
@@ -34,13 +47,14 @@ jobs:
 
     env:
       MODELS: ${{ inputs.models }}
+      API_MODELS: ${{ inputs.api_models }}
       PAST_DAYS: ${{ inputs.past_days }}
-      # Raw storage variables that back our 6 API outputs:
+      # Raw storage variables backing our 6 API outputs:
       #   temperature_2m            -> temperature_2m
       #   apparent_temperature      <- temperature_2m + relative_humidity_2m + wind_u/v_10m (+ dew_point_2m)
-      #   precipitation_probability <- precipitation_probability (or derived)
+      #   precipitation_probability <- ensembles only (ncep_gefs025 ships just this)
       #   wind_speed_10m            <- wind_u_component_10m + wind_v_component_10m
-      #   uv_index                  <- uv_index (+ shortwave_radiation for derivation)
+      #   uv_index                  <- uv_index (gfs013 / ukmo_uk only)
       #   cloud_cover               <- cloud_cover
       VARS: "temperature_2m,relative_humidity_2m,dew_point_2m,wind_u_component_10m,wind_v_component_10m,precipitation,precipitation_probability,cloud_cover,uv_index,shortwave_radiation"
       IMAGE: ghcr.io/open-meteo/open-meteo:latest
@@ -67,25 +81,25 @@ jobs:
         run: |
           df -h / /mnt 2>/dev/null || df -h /
           docker run --rm -v open-meteo-data:/app/data alpine \
-            sh -c 'du -sh /app/data; ls /app/data | head -30' || true
+            sh -c 'du -sh /app/data; find /app/data -maxdepth 2 -type d | sort' || true
 
       - name: Start API server
         run: |
           docker run -d --name open-meteo -v open-meteo-data:/app/data \
             -p 8080:8080 $IMAGE serve --env production --hostname 0.0.0.0 --port 8080
           for i in $(seq 1 60); do
-            curl -sf "http://localhost:8080/v1/forecast?latitude=52.37&longitude=4.90&hourly=temperature_2m&forecast_days=1" >/dev/null && break
+            curl -sf "http://localhost:8080/v1/forecast?latitude=52.37&longitude=4.90&hourly=temperature_2m&forecast_days=1&models=gfs013" >/dev/null && break
             sleep 2
           done
-          curl -s "http://localhost:8080/v1/forecast?latitude=52.37&longitude=4.90&hourly=temperature_2m&forecast_days=1" | head -c 400
 
       - name: Probe cells vs api.open-meteo.com
         run: |
           python3 - <<'EOF'
-          import json, urllib.request, datetime, math, os
+          import json, urllib.request, datetime, os, time
 
           HOURLY = "temperature_2m,apparent_temperature,precipitation_probability,wind_speed_10m,uv_index,cloud_cover"
-          # ~12 cells spread over our coverage (lat -38..59, lng -123..153)
+          VARS = HOURLY.split(",")
+          # ~14 cells spread over our coverage (lat -38..59, lng -123..153)
           CELLS = [
             ("Amsterdam", 52.37, 4.90), ("Paris", 48.85, 2.35),
             ("London", 51.51, -0.13), ("Berlin", 52.52, 13.40),
@@ -98,86 +112,81 @@ jobs:
           today = datetime.date.today()
           start = today.isoformat()
           end = (today + datetime.timedelta(days=15)).isoformat()
+          API_MODELS = [m for m in os.environ.get("API_MODELS", "gfs_global").split(",") if m]
 
-          def fetch(base, lat, lng):
+          def fetch(base, lat, lng, models=None):
             q = (f"latitude={lat}&longitude={lng}&hourly={HOURLY}"
                  f"&timezone=UTC&start_date={start}&end_date={end}"
                  f"&wind_speed_unit=kmh&precipitation_unit=mm")
+            if models:
+                q += f"&models={models}"
             req = urllib.request.Request(base + "/v1/forecast?" + q,
                                          headers={"User-Agent": "pickhour-probe/0.1"})
-            with urllib.request.urlopen(req, timeout=60) as r:
+            with urllib.request.urlopen(req, timeout=90) as r:
                 return json.load(r)
 
           LOCAL = "http://localhost:8080"
           REMOTE = "https://api.open-meteo.com"
-          summary = {"cells": {}, "remote_errors": 0}
-          diffs = {v: [] for v in ["temperature_2m", "apparent_temperature", "wind_speed_10m", "uv_index", "cloud_cover", "precipitation_probability"]}
+          out = ["## Self-host probe results", ""]
+          out.append(f"Synced domains: `{os.environ.get('MODELS')}`")
+          out.append(f"API models probed: `{', '.join(API_MODELS)}`")
+          out.append(f"Window: {start} .. {end} UTC")
+          out.append("")
 
+          remote_errors = 0
+          # Per models= selection: per-cell non-null counts
+          for sel in API_MODELS:
+            out.append(f"### models={sel}")
+            out.append("| cell | hours | first | last | " + " | ".join(VARS) + " |")
+            out.append("|---|---|---|---|" + "---|" * len(VARS))
+            for name, lat, lng in CELLS:
+                try:
+                    loc = fetch(LOCAL, lat, lng, sel)
+                except Exception as e:
+                    out.append(f"| {name} | ERROR {str(e)[:80]} |")
+                    continue
+                h = loc.get("hourly", {})
+                times = h.get("time", [])
+                nn = " | ".join(str(sum(1 for x in (h.get(v) or []) if x is not None)) for v in VARS)
+                out.append(f"| {name} | {len(times)} | {times[0] if times else '-'} | {times[-1] if times else '-'} | {nn} |")
+            out.append("")
+            time.sleep(1)
+
+          # Drift vs hosted api.open-meteo.com for the first api_models entry
+          sel = API_MODELS[0]
+          out.append(f"### Drift vs api.open-meteo.com (models={sel}, +24h/+72h/+120h)")
+          out.append("| cell | variable | mean abs diff | samples |")
+          out.append("|---|---|---|---|")
+          diffs = {}
           for name, lat, lng in CELLS:
             try:
-                loc = fetch(LOCAL, lat, lng)
-            except Exception as e:
-                summary["cells"][name] = {"error": str(e)[:200]}
+                loc = fetch(LOCAL, lat, lng, sel)
+            except Exception:
                 continue
             h = loc.get("hourly", {})
             times = h.get("time", [])
-            stats = {"n_hours": len(times),
-                     "first": times[0] if times else None,
-                     "last": times[-1] if times else None,
-                     "non_null": {}}
-            for v in HOURLY.split(","):
-                vals = h.get(v) or []
-                stats["non_null"][v] = sum(1 for x in vals if x is not None)
-            summary["cells"][name] = stats
-
-            # drift vs hosted API at a few lead times
             try:
-                rem = fetch(REMOTE, lat, lng)
+                rem = fetch(REMOTE, lat, lng, sel)
             except Exception:
-                summary["remote_errors"] += 1
+                remote_errors += 1
+                time.sleep(2)
                 continue
             rh = rem.get("hourly", {})
             rt = rh.get("time", [])
-            for v in diffs:
+            for v in VARS:
                 a, b = h.get(v) or [], rh.get(v) or []
-                # compare at local indices 24, 72, 120 if remote has same timestamp
+                ds = diffs.setdefault(v, [])
                 for idx in (24, 72, 120):
                     if idx < len(a) and idx < len(b) and a[idx] is not None and b[idx] is not None \
-                       and rt[idx] == times[idx]:
-                        diffs[v].append(abs(a[idx] - b[idx]))
-
-          out = ["## Self-host probe results", ""]
-          out.append(f"Models synced: {os.environ.get('MODELS')}")
-          out.append(f"Window: {start} .. {end} UTC")
-          out.append("")
-          out.append("| cell | hours | first | last | " + " | ".join(HOURLY.split(",")) + " |")
-          out.append("|---|---|---|---|" + "---|" * len(HOURLY.split(",")))
-          for name, s in summary["cells"].items():
-              if "error" in s:
-                  out.append(f"| {name} | ERROR {s['error'][:80]} |")
-              else:
-                  nn = " | ".join(str(s["non_null"].get(v, 0)) for v in HOURLY.split(","))
-                  out.append(f"| {name} | {s['n_hours']} | {s['first']} | {s['last']} | {nn} |")
-          out.append("")
-          out.append("non_null counts = number of hourly values present out of n_hours (360 expected for 15 days).")
-          out.append("")
-          out.append("### Mean |local - api.open-meteo.com| at +24h/+72h/+120h")
-          out.append("| variable | mean abs diff | samples |")
-          out.append("|---|---|---|")
-          for v, ds in diffs.items():
-              if ds:
-                  out.append(f"| {v} | {sum(ds)/len(ds):.3f} | {len(ds)} |")
-              else:
-                  out.append(f"| {v} | n/a | 0 |")
-          out.append(f"\nremote_errors: {summary['remote_errors']}")
+                       and idx < len(rt) and rt[idx] == times[idx]:
+                        ds.append(abs(a[idx] - b[idx]))
+            time.sleep(2)
+          for v in VARS:
+              ds = diffs.get(v, [])
+              out.append(f"| all | {v} | {sum(ds)/len(ds):.3f} | {len(ds)} |" if ds else f"| all | {v} | n/a | 0 |")
+          out.append(f"\nremote_errors: {remote_errors}")
           text = "\n".join(out)
           print(text)
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
               f.write(text + "\n")
           EOF
-
-      - name: Dump synced layout
-        if: always()
-        run: |
-          docker run --rm -v open-meteo-data:/app/data alpine \
-            sh -c 'du -sh /app/data; find /app/data -maxdepth 2 -type d | sort | head -60' || true
