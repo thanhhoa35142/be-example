@@ -48,7 +48,7 @@ jobs:
 
     services:
       postgres:
-        image: postgis/postgis:16-3.4
+        image: postgis/postgis:18-3.6
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: test
@@ -87,12 +87,12 @@ jobs:
 
       - name: Restore dump
         run: |
-          docker run --rm --network host -v /tmp:/w postgis/postgis:16-3.4 \
+          docker run --rm --network host -v /tmp:/w postgis/postgis:18-3.6 \
             pg_restore -h localhost -U postgres -d picnic_test --no-owner --no-privileges /w/picnic_test.dump
 
       - name: Sanity check cells
         run: |
-          docker run --rm --network host -e PGPASSWORD=test postgis/postgis:16-3.4 \
+          docker run --rm --network host -e PGPASSWORD=test postgis/postgis:18-3.6 \
             psql "$DATABASE_URL" -t -c \
             "SELECT count(*) AS cells FROM (SELECT DISTINCT cell_id FROM t_spots) s" \
             -c "SELECT count(*) AS forecast_rows FROM t_weather_hourly_forecasts"
@@ -132,9 +132,9 @@ jobs:
       - name: Job outcome
         if: always()
         run: |
-          docker run --rm --network host -e PGPASSWORD=test postgis/postgis:16-3.4 \
+          docker run --rm --network host -e PGPASSWORD=test postgis/postgis:18-3.6 \
             psql "$DATABASE_URL" -c \
             "SELECT job, status, started_at, finished_at, rows_affected, left(coalesce(error,''),200) AS error FROM t_job_runs WHERE job='weather.refresh' ORDER BY id DESC LIMIT 3" || true
-          docker run --rm --network host -e PGPASSWORD=test postgis/postgis:16-3.4 \
+          docker run --rm --network host -e PGPASSWORD=test postgis/postgis:18-3.6 \
             psql "$DATABASE_URL" -t -c \
             "SELECT count(*) AS forecast_rows, count(DISTINCT cell_id) AS cells FROM t_weather_hourly_forecasts" || true
