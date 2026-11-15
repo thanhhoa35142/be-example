@@ -22,9 +22,6 @@ func NewSpotsHandler(svc *spots.Service) *SpotsHandler {
 	return &SpotsHandler{svc: svc}
 }
 
-// GET /v1/spots?bbox=west,south,east,north | ids=<uuid>,...
-//
-//	[&when=RFC3339][&from=RFC3339&hours=1..24][&include=area]
 func (h *SpotsHandler) List(c *gin.Context) {
 	q, perr := parseListQuery(c.Request.URL.Query())
 	if perr != nil {
@@ -45,7 +42,6 @@ func (h *SpotsHandler) List(c *gin.Context) {
 	c.JSON(http.StatusOK, fc)
 }
 
-// GET /v1/packs
 func (h *SpotsHandler) Packs(c *gin.Context) {
 	packs, err := h.svc.ListPacks(c.Request.Context())
 	if err != nil {
@@ -56,7 +52,6 @@ func (h *SpotsHandler) Packs(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"items": toPackItems(packs)}})
 }
 
-// GET /v1/spots/{id}
 func (h *SpotsHandler) Get(c *gin.Context) {
 	id, ok := parseSpotID(c)
 	if !ok {
@@ -70,7 +65,6 @@ func (h *SpotsHandler) Get(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": toDetailResponse(detail)})
 }
 
-// GET /v1/spots/{id}/forecast
 func (h *SpotsHandler) Forecast(c *gin.Context) {
 	id, ok := parseSpotID(c)
 	if !ok {
@@ -95,9 +89,6 @@ func parseSpotID(c *gin.Context) (uuid.UUID, bool) {
 
 type queryProblem struct{ code, title, detail string }
 
-// parseListQuery validates the GET /v1/spots query string. A malformed bbox
-// used alone keeps its historical invalid_bbox code; every other selector /
-// ids / hours / include problem is invalid_query.
 func parseListQuery(v url.Values) (spots.ListQuery, *queryProblem) {
 	var q spots.ListQuery
 	invalid := func(detail string) (spots.ListQuery, *queryProblem) {
@@ -112,8 +103,7 @@ func parseListQuery(v url.Values) (spots.ListQuery, *queryProblem) {
 		if err != nil {
 			return spots.ListQuery{}, &queryProblem{httpx.CodeInvalidBBox, "Invalid bbox", "expected bbox=west,south,east,north in WGS84 degrees"}
 		}
-		// Snap the viewport outward to the cache grid so map drags share
-		// cache entries; the query and the cache key see the same box.
+
 		bbox = spots.CanonicalBBox(bbox)
 		q.BBox = &bbox
 	} else {
@@ -169,8 +159,6 @@ func parseListQuery(v url.Values) (spots.ListQuery, *queryProblem) {
 	return q, nil
 }
 
-// scoreHour is the hour behind properties.score / properties.when; it mirrors
-// spots.Service.List (when, else from, else now — truncated to the hour).
 func scoreHour(q spots.ListQuery, now time.Time) time.Time {
 	ts := now
 	switch {

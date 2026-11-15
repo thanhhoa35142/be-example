@@ -6,16 +6,13 @@ import (
 	"strings"
 )
 
-// Filter is the optional server-side spot filter shared by GET /v1/spots and
-// GET /v1/recommendations. The zero value filters nothing.
 type Filter struct {
-	Kinds     []string // keep spots whose kind is in the list (OR)
-	Amenities []string // keep spots linked to every listed amenity (AND)
-	MinScore  *int     // keep spots scored >= MinScore at the requested hour
+	Kinds     []string
+	Amenities []string
+	MinScore  *int
 }
 
 var (
-	// ErrInvalidFilter is returned by ParseFilter; handlers map it to invalid_query.
 	ErrInvalidFilter = errors.New("invalid filter")
 
 	validKinds     = map[string]bool{"park": true, "beach": true, "site": true, "table": true}
@@ -25,8 +22,6 @@ var (
 	}
 )
 
-// ParseFilter parses the raw kinds / amenities / minScore query values.
-// Empty strings mean "no filter"; unknown values or a bad minScore error out.
 func ParseFilter(kinds, amenities, minScore string) (Filter, error) {
 	var f Filter
 	var err error
@@ -46,8 +41,6 @@ func ParseFilter(kinds, amenities, minScore string) (Filter, error) {
 	return f, nil
 }
 
-// parseEnumList splits a comma list, dedupes it and checks every element.
-// An empty string yields an empty (non-nil) slice.
 func parseEnumList(raw string, allowed map[string]bool) ([]string, error) {
 	out := []string{}
 	if strings.TrimSpace(raw) == "" {
@@ -67,7 +60,6 @@ func parseEnumList(raw string, allowed map[string]bool) ([]string, error) {
 	return out, nil
 }
 
-// Normalized returns f with non-nil slices (SQL sees empty arrays, not NULL).
 func (f Filter) Normalized() Filter {
 	if f.Kinds == nil {
 		f.Kinds = []string{}

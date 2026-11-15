@@ -7,18 +7,15 @@ import (
 	"time"
 )
 
-// Row is one holiday to upsert (national, kind 'public').
 type Row struct {
 	Country string
 	Date    time.Time
 	Name    string
 }
 
-// Repository is the port; implemented in infrastructure/persistence.
 type Repository interface {
-	// Countries returns the distinct countries of the (non-retired) city packs.
 	Countries(ctx context.Context) ([]string, error)
-	// Upsert writes national public holidays idempotently and returns rows affected.
+
 	Upsert(ctx context.Context, rows []Row) (int64, error)
 }
 
@@ -28,7 +25,6 @@ type Service struct {
 
 func NewService(repo Repository) *Service { return &Service{repo: repo} }
 
-// Stats is persisted into t_job_runs.stats.
 type Stats struct {
 	Countries  int            `json:"countries"`
 	Years      []int          `json:"years"`
@@ -37,7 +33,6 @@ type Stats struct {
 	PerCountry map[string]int `json:"per_country"`
 }
 
-// Refresh upserts the current and next year for every pack country.
 func (s *Service) Refresh(ctx context.Context, now time.Time) (Stats, error) {
 	countries, err := s.repo.Countries(ctx)
 	if err != nil {

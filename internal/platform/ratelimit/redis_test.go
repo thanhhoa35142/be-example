@@ -9,8 +9,6 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// Integration tests need a live Redis; set REDIS_TEST_URL to run them
-// (locally: redis://127.0.0.1:6379 — the compose service).
 func redisTestClient(t *testing.T) *redis.Client {
 	t.Helper()
 	url := os.Getenv("REDIS_TEST_URL")
@@ -32,10 +30,9 @@ func redisTestClient(t *testing.T) *redis.Client {
 func TestRedisSharedBucketsAcrossInstances(t *testing.T) {
 	rdb := redisTestClient(t)
 	key := fmt.Sprintf("test:%d", time.Now().UnixNano())
-	a := NewRedis(rdb, PerMinute(60, 2), "t") // 1/s, burst 2
+	a := NewRedis(rdb, PerMinute(60, 2), "t")
 	b := NewRedis(rdb, PerMinute(60, 2), "t")
 
-	// Two independent limiters must share one bucket.
 	if ok, _ := a.Allow(key); !ok {
 		t.Fatal("first allow denied")
 	}
@@ -50,27 +47,25 @@ func TestRedisSharedBucketsAcrossInstances(t *testing.T) {
 func TestRedisDenyDoesNotConsume(t *testing.T) {
 	rdb := redisTestClient(t)
 	key := fmt.Sprintf("test:%d", time.Now().UnixNano())
-	l := NewRedis(rdb, PerMinute(60, 1), "t") // 1/s, burst 1
+	l := NewRedis(rdb, PerMinute(60, 1), "t")
 
-	l.Hit(key) // drain the single token
+	l.Hit(key)
 	if denied, _ := l.Deny(key); !denied {
 		t.Fatal("expected deny after bucket drained")
 	}
 	if ok, _ := l.Allow(key); ok {
 		t.Fatal("Deny must not consume a token")
 	}
-	// Still denied — nothing was consumed by the Deny calls.
+
 	if denied, _ := l.Deny(key); !denied {
 		t.Fatal("bucket should still be empty")
 	}
 }
 
-// With Redis unreachable the limiter must degrade to its in-memory bucket,
-// not fail open. Port 1 refuses connections instantly.
 func TestRedisLimiterFallsBackToMemory(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
 	defer rdb.Close()
-	l := NewRedis(rdb, PerMinute(60, 2), "t") // 1/s, burst 2
+	l := NewRedis(rdb, PerMinute(60, 2), "t")
 
 	key := fmt.Sprintf("test:%d", time.Now().UnixNano())
 	for i := 0; i < 2; i++ {

@@ -8,8 +8,6 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/modules/crowd"
 )
 
-// Batched model upsert: inserts, skips unchanged rows, updates changed ones,
-// and never overwrites community rows.
 func TestUpsertModelBatch(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
@@ -25,7 +23,7 @@ func TestUpsertModelBatch(t *testing.T) {
 	rows := []crowd.ModelEstimate{
 		{SpotID: spot, Dow: 1, Hour: 9, Level: 40},
 		{SpotID: spot, Dow: 1, Hour: 10, Level: 50},
-		{SpotID: spot, Dow: 2, Hour: 10, Level: 10}, // community: must be kept
+		{SpotID: spot, Dow: 2, Hour: 10, Level: 10},
 	}
 	if n, err := repo.UpsertModelBatch(ctx, rows); err != nil || n != 2 {
 		t.Fatalf("insert: n=%d err=%v", n, err)

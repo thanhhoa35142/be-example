@@ -18,15 +18,12 @@ func NewService(repo Repository) *Service {
 	return &Service{repo: repo, now: time.Now}
 }
 
-// SubmitSpotReport records a confirm/missing/closed/issue report.
-// Duplicate submissions within the same day are accepted idempotently and
-// reported back as duplicates.
 func (s *Service) SubmitSpotReport(ctx context.Context, in SpotReportInput) error {
 	if !validSpotReportType(in.Type) {
 		return ErrInvalidReport
 	}
 	if in.Type == ReportIssue {
-		// ck_t_spot_reports_issue_pair: an issue report needs a code.
+
 		if in.IssueCode == nil || !validIssueCode(*in.IssueCode) {
 			return ErrInvalidReport
 		}
@@ -62,9 +59,6 @@ func (s *Service) SubmitSpotReport(ctx context.Context, in SpotReportInput) erro
 	return err
 }
 
-// SubmitCrowdReport records a busy/moderate/quiet vote for the current slot.
-// Proximity is verified on-device (spec: server never receives coordinates);
-// the local dow/hour is derived from the device's timezone.
 func (s *Service) SubmitCrowdReport(ctx context.Context, spotID, deviceID uuid.UUID, level int) error {
 	if level < CrowdQuiet || level > CrowdBusy {
 		return ErrInvalidReport
@@ -84,7 +78,6 @@ func (s *Service) SubmitCrowdReport(ctx context.Context, spotID, deviceID uuid.U
 		return ErrSpotNotFound
 	}
 
-	// Rate limit: max CrowdRateLimit reports per device per rolling 24h.
 	n, err := s.repo.CrowdReportsSince(ctx, deviceID, s.now().Add(-24*time.Hour))
 	if err != nil {
 		return err
@@ -106,13 +99,11 @@ func (s *Service) SubmitCrowdReport(ctx context.Context, spotID, deviceID uuid.U
 		int(local.Weekday()), local.Hour())
 }
 
-// SubmitScoreFeedback records a verdict on a spot score.
 func (s *Service) SubmitScoreFeedback(ctx context.Context, in ScoreFeedbackInput) error {
 	if in.Verdict < -1 || in.Verdict > 1 {
 		return ErrInvalidReport
 	}
-	// The hour must be a real forecast slot: aligned to the hour and inside
-	// [now-FeedbackMaxAge, now+FeedbackMaxAhead].
+
 	now := s.now()
 	if !in.TSHour.Equal(in.TSHour.Truncate(time.Hour)) ||
 		in.TSHour.Before(now.Add(-FeedbackMaxAge)) || in.TSHour.After(now.Add(FeedbackMaxAhead)) {
@@ -142,7 +133,6 @@ func (s *Service) SubmitScoreFeedback(ctx context.Context, in ScoreFeedbackInput
 	return s.repo.InsertScoreFeedback(ctx, in)
 }
 
-// validIssueCode accepts short machine codes (e.g. "no_toilet"), not prose.
 func validIssueCode(c string) bool {
 	if c == "" || len(c) > MaxIssueCodeLen {
 		return false

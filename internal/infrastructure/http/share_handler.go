@@ -14,19 +14,9 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/platform/httpx"
 )
 
-// ShareOptions configures the public share surface (not part of /v1):
-//
-//	GET /s/{spotId}                               share page for a spot
-//	GET /.well-known/apple-app-site-association   universal-link association
-//
-// The app shares https://<share host>/s/<spotId>. With the app installed iOS
-// opens it directly (universal link); everyone else gets this page.
 type ShareOptions struct {
-	// AppleAppIDs are "<TeamID>.<bundle id>" entries allowed to open /s/*
-	// as universal links. Empty: the association file answers 404.
 	AppleAppIDs []string
-	// AppStoreAppID is the numeric App Store id; enables the "Get the app"
-	// link and the Safari smart banner. Empty: both are left out.
+
 	AppStoreAppID string
 }
 
@@ -46,13 +36,12 @@ type sharePage struct {
 	HasScore    bool
 	Score       int
 	Tier        string
-	AppURL      template.URL // pickhour://spot/<id>
+	AppURL      template.URL
 	MapsURL     string
 	StoreURL    string
 	AppStoreID  string
 }
 
-// GET /s/:id
 func (h *ShareHandler) Spot(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -83,7 +72,7 @@ func (h *ShareHandler) Spot(c *gin.Context) {
 	if h.opts.AppStoreAppID != "" {
 		page.StoreURL = "https://apps.apple.com/app/id" + h.opts.AppStoreAppID
 	}
-	// Current-hour score; the page still renders without one.
+
 	if items, err := h.svc.List(c.Request.Context(), spots.ListQuery{IDs: []uuid.UUID{id}}); err == nil &&
 		len(items) == 1 && items[0].Score != nil && items[0].Score.Score != nil {
 		page.HasScore = true
@@ -108,8 +97,6 @@ func (h *ShareHandler) notFound(c *gin.Context) {
 	c.String(http.StatusNotFound, "<!doctype html><meta charset=utf-8><title>Pickhour</title><p>This spot is no longer available.</p>")
 }
 
-// GET /.well-known/apple-app-site-association — must be JSON over HTTPS with
-// no redirect. Only /s/* is claimed.
 func (h *ShareHandler) AppleAppSiteAssociation(c *gin.Context) {
 	if len(h.opts.AppleAppIDs) == 0 {
 		c.Status(http.StatusNotFound)
@@ -162,7 +149,6 @@ func kindLabel(k spots.Kind) string {
 	}
 }
 
-// scoreTier mirrors the app's tiers (80 / 60 / 40).
 func scoreTier(score int) string {
 	switch {
 	case score >= 80:
@@ -183,7 +169,6 @@ func mapsURL(name string, lat, lon float64) string {
 	return "https://maps.apple.com/?" + q.Encode()
 }
 
-// Flat page: system font, neutral background, one brand color, no images.
 var shareTemplate = template.Must(template.New("share").Parse(`<!doctype html>
 <html lang="en">
 <head>

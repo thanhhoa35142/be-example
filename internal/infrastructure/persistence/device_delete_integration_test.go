@@ -8,11 +8,6 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/infrastructure/persistence"
 )
 
-// "Delete my data": deleting a device removes its alert rules (+ deliveries),
-// weekly digest, analytics events, subscription links and push identifiers /
-// locale / tz / app version; the soft-deleted row remains. Spot reports, crowd
-// reports and score feedback intentionally stay (they only feed anonymous
-// aggregates and the scrubbed device row holds no personal data).
 func TestDeleteDeviceRemovesPersonalData(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
@@ -98,7 +93,7 @@ func TestDeleteDeviceRemovesPersonalData(t *testing.T) {
 		AND push_status='none' AND prefs='{}'::jsonb`, dev); n != 1 {
 		t.Errorf("device row not soft-deleted/scrubbed")
 	}
-	// Aggregate-feeding rows stay keyed by device_id on purpose.
+
 	if n := count(`SELECT count(*) FROM t_spot_reports WHERE device_id=$1`, dev); n != 1 {
 		t.Errorf("spot report should be kept: %d", n)
 	}
@@ -108,7 +103,7 @@ func TestDeleteDeviceRemovesPersonalData(t *testing.T) {
 	if n := count(`SELECT count(*) FROM t_score_feedbacks WHERE device_id=$1`, dev); n != 1 {
 		t.Errorf("score feedback should be kept: %d", n)
 	}
-	// Second delete is a no-op (404 upstream).
+
 	if ok, _ := persistence.NewDevicesRepo(persistence.New(pool), pool).Delete(ctx, dev); ok {
 		t.Error("second delete should report not found")
 	}

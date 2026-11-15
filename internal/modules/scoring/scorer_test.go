@@ -82,7 +82,7 @@ func TestScoreModelCrowdCapsConfidence(t *testing.T) {
 }
 
 func TestScoreFreshAloneDoesNotScore(t *testing.T) {
-	// Freshness boosts real scores but cannot score a spot-hour by itself.
+
 	res := Score(Inputs{DaysSinceUpdated: 2}, testConfig())
 	if res.HasData {
 		t.Fatal("fresh-only input must not produce a score")
@@ -90,7 +90,7 @@ func TestScoreFreshAloneDoesNotScore(t *testing.T) {
 }
 
 func TestScoreMissingDataRenormalizes(t *testing.T) {
-	// Only crowd present: its weight renormalizes to 1.0.
+
 	res := Score(Inputs{
 		Crowd:            &CrowdInput{Level: 0, Source: "community"},
 		DaysSinceUpdated: 2,
@@ -98,7 +98,7 @@ func TestScoreMissingDataRenormalizes(t *testing.T) {
 	if !res.HasData {
 		t.Fatal("expected HasData via crowd component")
 	}
-	// crowd=100, fresh=100 → score 100
+
 	if res.Score != 100 {
 		t.Fatalf("expected score 100, got %d", res.Score)
 	}
@@ -176,17 +176,17 @@ func TestScoreDaylightCaps(t *testing.T) {
 }
 
 func TestScoreDaylightLowerCapWins(t *testing.T) {
-	// rain cap 40 vs twilight cap 40: tie keeps the weather reason.
+
 	res := Score(goodDay(f64(-3), 80), daylightConfig())
 	if res.CapReason == nil || *res.CapReason != "rain" {
 		t.Fatalf("tie: want rain, got %v", res.CapReason)
 	}
-	// dark (10) beats rain (40).
+
 	res = Score(goodDay(f64(-20), 80), daylightConfig())
 	if res.CapReason == nil || *res.CapReason != "dark" || res.Score > 10 {
 		t.Fatalf("want dark<=10, got %v %d", res.CapReason, res.Score)
 	}
-	// heat cap 30 beats twilight 40.
+
 	in := goodDay(f64(-3), 5)
 	in.Weather.FeelsLikeC = f64(38)
 	res = Score(in, daylightConfig())

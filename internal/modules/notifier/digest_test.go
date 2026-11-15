@@ -22,7 +22,7 @@ func testDigest(tz string, startUTC time.Time, hours int) digest.Delivery {
 }
 
 func TestDigestCopy(t *testing.T) {
-	// Sat 2026-11-21 14:00 Amsterdam (CET, UTC+1) = 13:00Z.
+
 	sat := time.Date(2026, 11, 21, 13, 0, 0, 0, time.UTC)
 	cases := []struct {
 		locale, tz  string
@@ -38,7 +38,7 @@ func TestDigestCopy(t *testing.T) {
 		{"NL", "Europe/Amsterdam", sat.AddDate(0, 0, 1), 3, "Je weekendpicknick", "Zondag 14–17 uur bij Vondelpark ziet er het best uit (88)."},
 		{"en", "Asia/Kolkata", time.Date(2026, 11, 21, 8, 30, 0, 0, time.UTC), 2, "Your weekend picnic", "Saturday 2–4 PM at Vondelpark looks best (88)."},
 		{"en", "Asia/Kolkata", time.Date(2026, 11, 21, 9, 0, 0, 0, time.UTC), 2, "Your weekend picnic", "Saturday 2:30–4:30 PM at Vondelpark looks best (88)."},
-		// Local date differs from UTC date: Sun 00:00Z is still Sat 16:00 in LA.
+
 		{"en", "America/Los_Angeles", time.Date(2026, 11, 22, 0, 0, 0, 0, time.UTC), 2, "Your weekend picnic", "Saturday 4–6 PM at Vondelpark looks best (88)."},
 		{"en", "Europe/Amsterdam", time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC), 2, "Your weekend picnic", "Sunday 11 AM–1 PM at Vondelpark looks best (88)."},
 		{"en", "Europe/Amsterdam", time.Date(2026, 11, 22, 11, 0, 0, 0, time.UTC), 1, "Your weekend picnic", "Sunday 12–1 PM at Vondelpark looks best (88)."},

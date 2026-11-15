@@ -5,8 +5,6 @@ import (
 	"testing"
 )
 
-// refBBox is a slow but obviously-correct recursive walker used to check
-// the byte scanner.
 func refBBox(t *testing.T, geom string) (w, s, e, n float64) {
 	t.Helper()
 	var g struct {
@@ -41,9 +39,7 @@ func TestGeoBBox(t *testing.T) {
 	for _, geom := range []string{
 		`{"type":"Point","coordinates":[4.2997042,52.0972003]}`,
 		`{"type":"Point","coordinates": [ -0.5 , -1e-3 ]}`,
-		// 2-point LineString and 2-polygon MultiPolygon: the old walker
-		// treated any 2-element array as a coordinate pair and silently
-		// dropped these features from the pack.
+
 		`{"type":"LineString","coordinates":[[4.1,52.1],[4.3,52.4]]}`,
 		`{"type":"Polygon","coordinates":[[[4,52],[5,52],[5,53],[4,52]],[[4.2,52.2],[4.3,52.2],[4.3,52.3],[4.2,52.2]]]}`,
 		`{"type":"MultiPolygon","coordinates":[[[[4,52],[4.1,52],[4.1,52.1],[4,52]]],[[[6,51],[6.1,51],[6.1,51.1],[6,51]]]]}`,

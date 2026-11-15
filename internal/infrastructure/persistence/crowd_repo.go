@@ -148,7 +148,6 @@ func (r *CrowdRepo) DeleteStaleCommunity(ctx context.Context) (int64, error) {
 	return r.q.DeleteStaleCommunityEstimates(ctx)
 }
 
-// HolidaysRepo implements holidays.Repository.
 type HolidaysRepo struct{ q *Queries }
 
 func NewHolidaysRepo(q *Queries) *HolidaysRepo { return &HolidaysRepo{q: q} }

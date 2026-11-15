@@ -25,40 +25,23 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-// CacheOptions configures the GET response cache.
 type CacheOptions struct {
-	// TTL is how long an entry lives. Versioned entries also die on the
-	// next worker data bump; TTL is the fallback when Redis versioning is
-	// unavailable.
 	TTL time.Duration
-	// Versioned mixes cache.VersionKey into the key so worker bumps
-	// invalidate instantly. Use for responses derived from precomputed
-	// tables (spots, scores, forecasts, recommendations).
+
 	Versioned bool
-	// WeatherVersioned additionally mixes cache.WeatherVersionKey. Only
-	// routes that return raw weather rows (forecast) or the weather
-	// provider (spot detail) need it: weather that matters to every other
-	// route reaches it through scores, whose recompute bumps the data
-	// version. Implies Versioned.
+
 	WeatherVersioned bool
-	// Normalize rewrites a copy of the query values before the key is
-	// built. It must canonicalize values AND drop params that must not mint
-	// new entries (unknown params, per-request noise); it must not mutate
-	// c.Request. Only 200 responses are stored, so canonicalization may
-	// merge requests the handler treats identically — never map a request
-	// the handler would reject onto a key a valid request can hit.
+
 	Normalize func(v url.Values)
-	// Stats receives hit/miss/bypass counters; nil = DefaultCacheStats.
+
 	Stats *CacheStats
 }
 
 const (
-	cacheTimeout = 300 * time.Millisecond // Redis reads
-	// cacheWriteTimeout bounds the store of a computed response. The write
-	// is detached from the request (the client may be gone, the handler may
-	// have taken longer than cacheTimeout) so it gets its own budget.
+	cacheTimeout = 300 * time.Millisecond
+
 	cacheWriteTimeout = 500 * time.Millisecond
-	maxCacheEntry     = 1 << 20 // 1 MiB identity body — bigger responses bypass the cache
+	maxCacheEntry     = 1 << 20
 	cacheKeyPrefix    = "pic:resp:"
 
 	cacheHeaderHit       = "HIT"
@@ -66,40 +49,15 @@ const (
 	cacheHeaderBypass    = "BYPASS"
 	cacheHeaderCoalesced = "COALESCED"
 
-	// cacheCooldown is how long the middleware bypasses Redis after a
-	// failure, so an outage costs one slow request per window instead of a
-	// timeout on every request.
 	cacheCooldown = 5 * time.Second
 )
 
-// cachedEntry is a stored response. gz is the pre-compressed body (nil when
-// the body is too small or incompressible).
 type cachedEntry struct {
 	hdr  map[string][]string
 	body []byte
 	gz   []byte
 }
 
-// Cache memoizes GET responses in Redis. Only 200 + JSON bodies are stored;
-// everything else (errors, redirects, personalized routes) passes through.
-// Redis failures fail open — the request is served uncached — and a short
-// circuit breaker skips Redis entirely while it is down. Client cancellation
-// is not a Redis failure and never trips the breaker.
-//
-// Entries are Redis hashes: "b" = identity body, "z" = the same body gzipped
-// (served as is to clients that accept gzip, so hits cost no CPU), "h" =
-// JSON object of the response headers (minus per-request ones), so cache
-// hits keep headers like Cache-Control.
-//
-// Concurrent misses for one key are coalesced: one request runs the handler
-// and stores the result, the others are answered from that result (or run the
-// handler themselves when it was not cacheable). Each request still writes
-// only to its own gin.Context.
-//
-// X-Cache says what happened: HIT (from Redis), MISS (handler ran, response
-// cacheable), BYPASS (handler ran, response not cacheable), COALESCED
-// (answered from a concurrent request's result). No header is sent when the
-// cache is disabled or Redis is bypassed before the handler runs.
 func Cache(rdb *redis.Client, opts CacheOptions) gin.HandlerFunc {
 	var mu sync.Mutex
 	var downUntil time.Time
@@ -139,11 +97,7 @@ func Cache(rdb *redis.Client, opts CacheOptions) gin.HandlerFunc {
 		}
 
 		reqCtx := c.Request.Context()
-		// failOpen serves the request uncached after a Redis error. Only a
-		// genuine Redis/network failure (or our own timeout) opens the
-		// breaker: when the request's context is done the error is the
-		// client's doing — the app cancels in-flight map requests all the
-		// time — and says nothing about Redis.
+
 		failOpen := func(err error) {
 			if reqCtx.Err() != nil || errors.Is(err, context.Canceled) {
 				rs.bypassed(bypassCanceled)
@@ -157,8 +111,6 @@ func Cache(rdb *redis.Client, opts CacheOptions) gin.HandlerFunc {
 		ctx, cancel := context.WithTimeout(reqCtx, cacheTimeout)
 		defer cancel()
 
-		// The version is part of the key, so it must be read first. On
-		// Redis outage everything fails open.
 		version, err := readVersion(ctx, rdb, versioned, opts.WeatherVersioned)
 		if err != nil {
 			failOpen(err)
@@ -178,11 +130,6 @@ func Cache(rdb *redis.Client, opts CacheOptions) gin.HandlerFunc {
 			return
 		}
 
-		// Miss. One request per key computes; concurrent ones wait for its
-		// result instead of all hitting the database. Do (not DoChan): a
-		// panic is re-raised on the caller's own goroutine, where gin's
-		// Recovery can catch it — and fn recovers it itself so waiters
-		// never share it.
 		var ran bool
 		var panicVal any
 		res, _, _ := flight.Do(key, func() (any, error) {
@@ -212,16 +159,13 @@ func Cache(rdb *redis.Client, opts CacheOptions) gin.HandlerFunc {
 			serveEntry(c, shared, gzOK, cacheHeaderCoalesced)
 			return
 		}
-		// The leader's response was not cacheable (error, too big, panic):
-		// compute our own.
+
 		computeAndStore(c, rdb, key, opts.TTL, rs, markDown)
 	}
 }
 
 var errNotShareable = errors.New("response not cacheable")
 
-// readVersion returns the data version (plus the weather version when asked)
-// that keys are minted under; "" = unversioned / unset.
 func readVersion(ctx context.Context, rdb *redis.Client, versioned, weather bool) (string, error) {
 	if !versioned {
 		return "", nil
@@ -231,7 +175,7 @@ func readVersion(ctx context.Context, rdb *redis.Client, versioned, weather bool
 		if err != nil && !errors.Is(err, redis.Nil) {
 			return "", err
 		}
-		return v, nil // unset on a fresh Redis: proceed with ""
+		return v, nil
 	}
 	vals, err := rdb.MGet(ctx, cache.VersionKey, cache.WeatherVersionKey).Result()
 	if err != nil {
@@ -248,9 +192,6 @@ func readVersion(ctx context.Context, rdb *redis.Client, versioned, weather bool
 	return str(0) + "." + str(1), nil
 }
 
-// loadEntry fetches a stored response, or nil on a miss. Clients that accept
-// gzip read the compressed body ("z") and only fall back to the identity body
-// when none was stored; others read "b" directly — so a hit never moves both.
 func loadEntry(ctx context.Context, rdb *redis.Client, key string, gz bool) (*cachedEntry, error) {
 	field := "b"
 	if gz {
@@ -262,11 +203,11 @@ func loadEntry(ctx context.Context, rdb *redis.Client, key string, gz bool) (*ca
 	}
 	hraw, _ := vals[0].(string)
 	if hraw == "" {
-		return nil, nil // miss
+		return nil, nil
 	}
 	var hdr map[string][]string
 	if err := json.Unmarshal([]byte(hraw), &hdr); err != nil {
-		return nil, nil // corrupt entry: treat as a miss, it gets overwritten
+		return nil, nil
 	}
 	e := &cachedEntry{hdr: hdr}
 	if s, _ := vals[1].(string); s != "" {
@@ -278,9 +219,9 @@ func loadEntry(ctx context.Context, rdb *redis.Client, key string, gz bool) (*ca
 		return e, nil
 	}
 	if !gz {
-		return nil, nil // headers without a body: treat as a miss
+		return nil, nil
 	}
-	// gzip client, no compressed copy stored (tiny or incompressible body).
+
 	b, err := rdb.HGet(ctx, key, "b").Result()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
@@ -292,10 +233,6 @@ func loadEntry(ctx context.Context, rdb *redis.Client, key string, gz bool) (*ca
 	return e, nil
 }
 
-// serveEntry writes a stored/shared response. A gzip client gets the
-// pre-compressed body with Content-Encoding/Content-Length already set —
-// the outer Gzip middleware sees the encoding and leaves it alone — and
-// everyone else the identity body.
 func serveEntry(c *gin.Context, e *cachedEntry, gzOK bool, xcache string) {
 	applyCachedHeaders(c, e.hdr)
 	h := c.Writer.Header()
@@ -312,9 +249,6 @@ func serveEntry(c *gin.Context, e *cachedEntry, gzOK bool, xcache string) {
 	c.Abort()
 }
 
-// computeAndStore runs the rest of the chain, tees the response, and stores
-// it when cacheable. It returns the entry for coalesced waiters, nil when
-// the response must not be shared.
 func computeAndStore(c *gin.Context, rdb *redis.Client, key string, ttl time.Duration, rs *routeStats, markDown func(*routeStats)) *cachedEntry {
 	addVary(c.Writer.Header(), "Accept-Encoding")
 	w := &cacheWriter{ResponseWriter: c.Writer}
@@ -329,7 +263,7 @@ func computeAndStore(c *gin.Context, rdb *redis.Client, key string, ttl time.Dur
 		rs.bypassed(w.reason)
 		return nil
 	case w.overflow:
-		rs.bypassed(bypassSize) // grew past the cap on a later write
+		rs.bypassed(bypassSize)
 		return nil
 	}
 	hdrs := exportHeaders(w.Header())
@@ -346,9 +280,6 @@ func computeAndStore(c *gin.Context, rdb *redis.Client, key string, ttl time.Dur
 		}
 	}
 
-	// Detached from the request: the handler may have outlived the read
-	// timeout and the client may be gone, neither is a reason to drop the
-	// entry (or to blame Redis).
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), cacheWriteTimeout)
 	defer cancel()
 	pipe := rdb.TxPipeline()
@@ -365,9 +296,6 @@ func computeAndStore(c *gin.Context, rdb *redis.Client, key string, ttl time.Dur
 	return e
 }
 
-// cacheKey builds "pic:resp:" + sha256 over method, canonical query and the
-// current score hour. The hour bucket guarantees correctness at hour
-// rollovers even when the client omits `when`/`from`.
 func cacheKey(c *gin.Context, opts CacheOptions, version string) string {
 	u := c.Request.URL
 	q := u.Query()
@@ -403,20 +331,14 @@ func cacheKey(c *gin.Context, opts CacheOptions, version string) string {
 	return cacheKeyPrefix + hex.EncodeToString(sum[:])
 }
 
-// bypassNone is the zero "reason": the response is cacheable.
 const bypassNone bypassReason = -1
 
-// cacheWriter tees the response body into buf while passing everything
-// through to the client unchanged. At the first byte (or WriteHeaderNow) the
-// status, content type and size are known, so that is where the honest
-// X-Cache value (MISS = will be stored, BYPASS = will not) is set — headers
-// written after the body reaches the client are lost.
 type cacheWriter struct {
 	gin.ResponseWriter
 	buf      bytes.Buffer
 	overflow bool
 	decided  bool
-	reason   bypassReason // bypassNone when cacheable
+	reason   bypassReason
 }
 
 func (w *cacheWriter) decide(first int) {
@@ -457,18 +379,11 @@ func (w *cacheWriter) WriteString(s string) (int, error) {
 	return w.Write([]byte(s))
 }
 
-// WriteHeaderNow is how status-only responses (c.AbortWithStatus) reach the
-// client; the X-Cache decision must happen before the headers go out.
 func (w *cacheWriter) WriteHeaderNow() {
 	w.decide(0)
 	w.ResponseWriter.WriteHeaderNow()
 }
 
-// Per-request headers that must never be replayed from a shared entry:
-// X-Cache is set fresh on every response; X-Request-ID/Content-Length belong
-// to the individual request; Content-Encoding depends on the client's
-// Accept-Encoding (the gzip middleware sits outside the cache); Vary is
-// re-added on every response, so which client populated the entry is moot.
 var cacheSkipHeaders = map[string]bool{
 	"X-Cache":          true,
 	"X-Request-Id":     true,
@@ -498,12 +413,6 @@ func applyCachedHeaders(c *gin.Context, hdrs map[string][]string) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Query canonicalization for cache keys
-// ---------------------------------------------------------------------------
-
-// keepOnly drops every query param not in allowed so junk params (e.g.
-// &x=1, &x=2…) cannot mint new cache entries.
 func keepOnly(v url.Values, allowed ...string) {
 	set := make(map[string]struct{}, len(allowed))
 	for _, k := range allowed {
@@ -516,10 +425,6 @@ func keepOnly(v url.Values, allowed ...string) {
 	}
 }
 
-// canon1 rewrites v[key] to the canonical form of its first value. Handlers
-// read params via Get (first value wins); canon returns ok=false to leave
-// the raw value when it cannot be parsed — the handler will reject the
-// request and the response is never cached, so the key is never consulted.
 func canon1(v url.Values, key string, canon func(string) (string, bool)) {
 	raw := v.Get(key)
 	if raw == "" {
@@ -548,8 +453,6 @@ func canonInt(raw string) (string, bool) {
 	return strconv.Itoa(n), true
 }
 
-// canonTimeHour truncates an RFC3339 timestamp to the hour — the same
-// quantization the services apply, so requests inside one hour share keys.
 func canonTimeHour(raw string) (string, bool) {
 	t, err := time.Parse(time.RFC3339, raw)
 	if err != nil {
@@ -558,9 +461,6 @@ func canonTimeHour(raw string) (string, bool) {
 	return t.UTC().Truncate(time.Hour).Format(time.RFC3339), true
 }
 
-// canonEnumList sorts and dedupes a comma list, mirroring how the handlers
-// parse it (trim + dedupe, order irrelevant). An empty element means the
-// request is invalid — left raw so it can never alias a valid key.
 func canonEnumList(raw string) (string, bool) {
 	parts := strings.Split(raw, ",")
 	seen := map[string]bool{}
@@ -579,7 +479,6 @@ func canonEnumList(raw string) (string, bool) {
 	return strings.Join(out, ","), true
 }
 
-// canonMinScore mirrors ParseFilter: trim, integer 0..100.
 func canonMinScore(raw string) (string, bool) {
 	raw = strings.TrimSpace(raw)
 	n, err := strconv.Atoi(raw)
@@ -616,7 +515,7 @@ func canonInclude(raw string) (string, bool) {
 	for _, p := range parts {
 		p = strings.TrimSpace(p)
 		if p == "" {
-			continue // the handler ignores empty include values
+			continue
 		}
 		if !seen[p] {
 			seen[p] = true
@@ -637,9 +536,6 @@ func canonBBox(raw string) (string, bool) {
 	return strings.Join([]string{f(b.West), f(b.South), f(b.East), f(b.North)}, ","), true
 }
 
-// SpotsNormalize canonicalizes GET /v1/spots for the cache key: bbox snapped
-// to the same grid the handler queries, ids sorted, timestamps truncated to
-// the hour, and every param the handler ignores dropped.
 func SpotsNormalize(v url.Values) {
 	keepOnly(v, "bbox", "ids", "when", "from", "hours", "include",
 		"kinds", "amenities", "minScore")
@@ -652,21 +548,15 @@ func SpotsNormalize(v url.Values) {
 	canonicalizeFilterParams(v)
 }
 
-// canonGeo rounds a coordinate to ~110 m — the same rounding the handler
-// applies before querying, so the cached distanceM belongs to the canonical
-// position, not to whichever client populated the entry first.
 func canonGeo(limit float64) func(float64) float64 {
 	return func(f float64) float64 {
 		if math.IsNaN(f) || math.IsInf(f, 0) || math.Abs(f) > limit {
-			return f // out of range: pass through, the service rejects it
+			return f
 		}
 		return round3(f)
 	}
 }
 
-// canonRadiusM snaps the search radius to the same 100 m bucket the cache
-// key uses. Out-of-range values pass through untouched so the service still
-// applies its default/reject rules.
 func canonRadiusM(f float64) float64 {
 	if math.IsNaN(f) || math.IsInf(f, 0) || f <= 0 || f > recommendations.MaxRadiusM {
 		return f
@@ -674,9 +564,6 @@ func canonRadiusM(f float64) float64 {
 	return math.Round(f/100) * 100
 }
 
-// RecNormalize canonicalizes GET /v1/recommendations for the cache key.
-// lat/lon/radius/when are rounded to the exact values the handler queries
-// with, so a cache hit can never leak another user's distances.
 func RecNormalize(v url.Values) {
 	keepOnly(v, "lat", "lon", "radius", "when", "limit",
 		"kinds", "amenities", "minScore")
@@ -688,8 +575,6 @@ func RecNormalize(v url.Values) {
 	canonicalizeFilterParams(v)
 }
 
-// DropQueryParams removes every query param from the cache key. Use for
-// endpoints that take no query parameters at all — any param is noise.
 func DropQueryParams(v url.Values) {
 	for k := range v {
 		delete(v, k)

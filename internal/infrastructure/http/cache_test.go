@@ -71,8 +71,6 @@ func TestCacheHitSkipsHandler(t *testing.T) {
 	}
 }
 
-// A cache hit must replay the stored response headers (e.g. Cache-Control),
-// not just the body.
 func TestCacheHitPreservesHeaders(t *testing.T) {
 	rdb := cacheTestRedis(t)
 	gin.SetMode(gin.TestMode)
@@ -92,7 +90,7 @@ func TestCacheHitPreservesHeaders(t *testing.T) {
 			t.Fatalf("req %d: X-Cache=%q want %q", i, got, want)
 		}
 	}
-	// The junk param was dropped from the key AND the stored headers came back.
+
 	w := do(r, "GET", "/v1/packs?other=1", "1.2.3.4", nil, "")
 	if got := w.Header().Get("X-Cache"); got != "HIT" {
 		t.Fatalf("junk params must share the entry, X-Cache=%q", got)
@@ -139,12 +137,11 @@ func TestCacheSkipsNon200AndNilRedis(t *testing.T) {
 	if w.Code != 500 {
 		t.Fatalf("status %d", w.Code)
 	}
-	// Errors are never stored, and the header says so: BYPASS, not MISS.
+
 	if got := w.Header().Get("X-Cache"); got != "BYPASS" {
 		t.Fatalf("X-Cache=%q want BYPASS", got)
 	}
 
-	// Nil client: middleware must pass through untouched.
 	gin.SetMode(gin.TestMode)
 	r2 := gin.New()
 	var n2 atomic.Int32
@@ -165,8 +162,6 @@ func TestCacheSkipsNon200AndNilRedis(t *testing.T) {
 	}
 }
 
-// uniq returns a path+version namespace so tests sharing one Redis never
-// see each other's entries.
 func uniq(t *testing.T, rdb *redis.Client) string {
 	t.Helper()
 	ns := fmt.Sprintf("%d", time.Now().UnixNano())
@@ -196,8 +191,6 @@ func newReq(path string, hdr map[string]string) *http.Request {
 	return req
 }
 
-// A handler slower than the Redis read timeout must still get its response
-// stored (fresh write context) and must not trip the breaker.
 func TestCacheStoresSlowHandlerWithoutTrippingBreaker(t *testing.T) {
 	rdb := cacheTestRedis(t)
 	uniq(t, rdb)
@@ -222,8 +215,7 @@ func TestCacheStoresSlowHandlerWithoutTrippingBreaker(t *testing.T) {
 	if calls.Load() != 1 {
 		t.Fatalf("handler ran %d times", calls.Load())
 	}
-	// Breaker still closed: another route of the same middleware pair can
-	// reach Redis (MISS then HIT, never BYPASS), and no trip was recorded.
+
 	if got := do(r, "GET", "/fast", "1.2.3.4", nil, "").Header().Get("X-Cache"); got != "MISS" {
 		t.Fatalf("breaker open after slow handler: X-Cache=%q", got)
 	}
@@ -235,8 +227,6 @@ func TestCacheStoresSlowHandlerWithoutTrippingBreaker(t *testing.T) {
 	}
 }
 
-// A request whose context is already cancelled (the app aborts map requests
-// constantly) is not a Redis outage: the breaker stays closed.
 func TestCacheClientCancelDoesNotTripBreaker(t *testing.T) {
 	rdb := cacheTestRedis(t)
 	uniq(t, rdb)
@@ -254,14 +244,12 @@ func TestCacheClientCancelDoesNotTripBreaker(t *testing.T) {
 	if s := routeOf(t, st, "/c"); s.BreakerTrips != 0 || s.BypassByReason["canceled"] != 1 {
 		t.Fatalf("cancel misclassified: %+v", s)
 	}
-	// Next normal request goes through Redis, not the breaker.
+
 	if got := do(r, "GET", "/c", "1.2.3.4", nil, "").Header().Get("X-Cache"); got != "MISS" {
 		t.Fatalf("breaker open after client cancel: X-Cache=%q", got)
 	}
 }
 
-// Without any Redis server: a genuine outage opens the breaker, a cancelled
-// client does not.
 func TestCacheBreakerOnlyOnRealRedisFailure(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1", DialTimeout: 100 * time.Millisecond, MaxRetries: -1})
 	t.Cleanup(func() { _ = rdb.Close() })
@@ -281,7 +269,6 @@ func TestCacheBreakerOnlyOnRealRedisFailure(t *testing.T) {
 		t.Fatalf("cancel tripped the breaker: %+v", s)
 	}
 
-	// Real failure: served uncached, breaker opens, next request skips Redis.
 	if w := do(r, "GET", "/d", "1.2.3.4", nil, ""); w.Code != 200 {
 		t.Fatalf("outage must fail open, got %d", w.Code)
 	}
@@ -361,8 +348,6 @@ func gunzipBody(t *testing.T, b []byte) []byte {
 	return out
 }
 
-// Hits serve the stored gzip copy directly: exactly one layer of gzip, right
-// headers, identical content; non-gzip clients keep getting identity.
 func TestCacheHitServesPrecompressedGzip(t *testing.T) {
 	rdb := cacheTestRedis(t)
 	uniq(t, rdb)
@@ -412,8 +397,6 @@ func TestCacheHitServesPrecompressedGzip(t *testing.T) {
 	}
 }
 
-// Concurrent misses for one key run the handler once; the rest are served
-// from its result. Run with -race.
 func TestCacheCoalescesConcurrentMisses(t *testing.T) {
 	rdb := cacheTestRedis(t)
 	uniq(t, rdb)
@@ -477,8 +460,6 @@ func TestCacheCoalescesConcurrentMisses(t *testing.T) {
 	}
 }
 
-// A panicking leader must not take waiters (or the process) down: waiters
-// fall through to computing their own response.
 func TestCacheLeaderPanicDoesNotPoisonWaiters(t *testing.T) {
 	rdb := cacheTestRedis(t)
 	uniq(t, rdb)
@@ -518,8 +499,6 @@ func TestCacheLeaderPanicDoesNotPoisonWaiters(t *testing.T) {
 	}
 }
 
-// weather.refresh bumps only the weather version: weather-versioned routes
-// (forecast, detail) refresh, score-derived routes keep their entries.
 func TestCacheWeatherVersionScope(t *testing.T) {
 	rdb := cacheTestRedis(t)
 	uniq(t, rdb)

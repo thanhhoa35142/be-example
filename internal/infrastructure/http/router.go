@@ -11,33 +11,22 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/platform/ratelimit"
 )
 
-// Options configures the HTTP edge. Zero values fall back to safe defaults.
 type Options struct {
-	// TrustedProxies are the IPs/CIDRs whose X-Forwarded-For is believed.
-	// Default (empty): trust none, ClientIP is the socket peer. Behind a load
-	// balancer set this to the LB's address, otherwise every client shares the
-	// LB's rate-limit bucket.
-	TrustedProxies []string
-	// MaxBodyBytes is the default request body cap (default 64 KiB).
-	MaxBodyBytes int64
-	// Limits are the per-IP rate budgets (default DefaultRateLimits()).
-	Limits *RateLimits
-	// AdminToken enables /v1/admin when non-empty.
-	AdminToken string
-	// AdminFailed rate-limits failed admin auth per IP (default 10/min).
-	AdminFailed *ratelimit.Rule
-	// LimiterFor builds rate-limit checkers per (rule, namespace). Nil =
-	// in-memory limiters; set to ratelimit.NewRedis for shared buckets.
-	LimiterFor func(ratelimit.Rule, string) ratelimit.Checker
-	// Cache is the Redis client for GET response caching. Nil disables it.
-	Cache *redis.Client
+	TrustedProxies      []string
+	MaxBodyBytes        int64
+	Limits              *RateLimits
+	AdminToken          string
+	AdminAllowedOrigins []string
+	AdminFailed         *ratelimit.Rule
+	LimiterFor          func(ratelimit.Rule, string) ratelimit.Checker
+	Cache               *redis.Client
 }
 
 const (
 	defaultMaxBody = 64 << 10
-	// Routes that legitimately carry more than the default.
-	maxEventsBody   = 512 << 10 // 100 events x 4 KiB props + envelope
-	maxAppStoreBody = 256 << 10 // JWS with x5c chain + nested transaction
+
+	maxEventsBody   = 512 << 10
+	maxAppStoreBody = 256 << 10
 )
 
 type Handlers struct {
@@ -48,13 +37,12 @@ type Handlers struct {
 	Alerts          *AlertsHandler
 	Entitlement     *EntitlementHandler
 	Admin           *AdminHandler
+	AdminAuth       *AdminAuthHandler
 	Events          *EventsHandler
 	Digest          *DigestHandler
 	Share           *ShareHandler
 }
 
-// NewRouter builds the engine. Call gin.SetMode (config.ConfigureGinMode)
-// before this: Gin reads the mode when the engine is created.
 func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error) {
 	if opts.MaxBodyBytes <= 0 {
 		opts.MaxBodyBytes = defaultMaxBody
@@ -73,8 +61,7 @@ func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error
 	}
 
 	r := gin.New()
-	// Gin trusts every proxy by default, which makes ClientIP() spoofable via
-	// X-Forwarded-For. nil = trust none.
+
 	if err := r.SetTrustedProxies(opts.TrustedProxies); err != nil {
 		return nil, fmt.Errorf("trusted proxies: %w", err)
 	}
@@ -97,16 +84,11 @@ func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error
 		c.JSON(200, gin.H{"status": "ok"})
 	})
 
-	// Public share surface (universal links + fallback page), outside /v1.
 	if h.Share != nil {
 		r.GET("/s/:id", h.Share.Spot)
 		r.GET("/.well-known/apple-app-site-association", h.Share.AppleAppSiteAssociation)
 	}
 
-	// GET response cache. Versioned entries invalidate when the worker bumps
-	// the data version after ingest/scoring (weather: its own version, see
-	// cacheGetWeather); TTL is the
-	// fallback. Nil client = middleware passes through.
 	cacheGet := func(ttl time.Duration, versioned bool, normalize ...func(url.Values)) gin.HandlerFunc {
 		copts := CacheOptions{TTL: ttl, Versioned: versioned}
 		if len(normalize) > 0 {
@@ -114,9 +96,7 @@ func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error
 		}
 		return Cache(opts.Cache, copts)
 	}
-	// cacheGetWeather is cacheGet for routes that return raw weather rows
-	// (forecast) or the weather provider (spot detail): they also die on
-	// weather.refresh, which does not bump the shared data version.
+
 	cacheGetWeather := func(ttl time.Duration, normalize func(url.Values)) gin.HandlerFunc {
 		return Cache(opts.Cache, CacheOptions{TTL: ttl, Versioned: true, WeatherVersioned: true, Normalize: normalize})
 	}
@@ -125,9 +105,6 @@ func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error
 	{
 		if h.Spots != nil {
 			spots := v1.Group("/spots")
-			// SpotsNormalize snaps bbox to the grid the handler queries and
-			// drops params the handler ignores; the param-less routes drop
-			// every query param so junk can't mint entries.
 			spots.GET("", cacheGet(10*time.Minute, true, SpotsNormalize), h.Spots.List)
 			spots.GET("/:id", cacheGetWeather(10*time.Minute, DropQueryParams), h.Spots.Get)
 			spots.GET("/:id/forecast", cacheGetWeather(10*time.Minute, DropQueryParams), h.Spots.Forecast)
@@ -164,32 +141,56 @@ func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error
 			v1.POST("/entitlement/link", h.Entitlement.Link)
 			v1.POST("/appstore/notifications", h.Entitlement.AppStoreNotification)
 		}
-		// Other modules register their routes here as they are implemented.
+
 	}
 
-	// Staff surface — disabled unless ADMIN_TOKEN is configured.
-	if h.Admin != nil {
-		admin := v1.Group("/admin", AdminAudit(), AdminAuth(opts.AdminToken, limiterFor(adminFail, "authfail")))
-		{
-			admin.GET("/overview", h.Admin.Overview)
-			admin.GET("/freshness", h.Admin.Freshness)
-			admin.GET("/metrics", h.Admin.Metrics)
-			admin.GET("/events", h.Admin.Events)
-			admin.GET("/events/breakdown", h.Admin.EventBreakdown)
-			admin.GET("/cache", h.Admin.CacheStats)
-			admin.GET("/jobs", h.Admin.Jobs)
-			admin.GET("/jobs/schedules", h.Admin.JobSchedules)
-			admin.PATCH("/jobs/:job/schedule", h.Admin.UpdateJobSchedule)
-			admin.GET("/reports", h.Admin.Reports)
-			admin.PATCH("/reports/:id", h.Admin.ModerateReport)
-			admin.GET("/scoring-config", h.Admin.ScoringConfigs)
-			admin.POST("/scoring-config", h.Admin.CreateScoringConfig)
-			admin.POST("/scoring-config/:version/activate", h.Admin.ActivateScoringConfig)
-			admin.GET("/api-keys", h.Admin.APIKeys)
-			admin.POST("/api-keys", h.Admin.CreateAPIKey)
-			admin.POST("/api-keys/:id/revoke", h.Admin.RevokeAPIKey)
-			admin.POST("/api-keys/:id/grants", h.Admin.AddAPIKeyGrant)
-			admin.DELETE("/api-keys/:id/grants", h.Admin.RemoveAPIKeyGrant)
+	if h.Admin != nil || h.AdminAuth != nil {
+		admin := v1.Group("/admin", AdminAudit(), AdminCSRF(opts.AdminAllowedOrigins))
+		var sessions SessionAuthenticator
+		if h.AdminAuth != nil {
+			sessions = h.AdminAuth.Service()
+		}
+		authed := admin.Group("", AdminAuth(opts.AdminToken, sessions, limiterFor(adminFail, "authfail")))
+		if h.AdminAuth != nil {
+
+			admin.POST("/auth/login", h.AdminAuth.Login)
+			admin.POST("/auth/totp", h.AdminAuth.TOTP)
+			admin.POST("/auth/enroll", h.AdminAuth.Enroll)
+
+			authed.GET("/auth/me", h.AdminAuth.Me)
+			authed.POST("/auth/logout", h.AdminAuth.Logout)
+			authed.POST("/auth/password", h.AdminAuth.Password)
+			authed.POST("/auth/recovery-codes", h.AdminAuth.RecoveryCodes)
+			authed.GET("/auth/sessions", h.AdminAuth.Sessions)
+			authed.POST("/auth/sessions/revoke-others", h.AdminAuth.RevokeOtherSessions)
+		}
+		if h.Admin != nil {
+			authed.GET("/overview", h.Admin.Overview)
+			authed.GET("/freshness", h.Admin.Freshness)
+			authed.GET("/metrics", h.Admin.Metrics)
+			authed.GET("/events", h.Admin.Events)
+			authed.GET("/events/breakdown", h.Admin.EventBreakdown)
+			authed.GET("/cache", h.Admin.CacheStats)
+			authed.GET("/jobs", h.Admin.Jobs)
+			authed.GET("/jobs/schedules", h.Admin.JobSchedules)
+			authed.PATCH("/jobs/:job/schedule", h.Admin.UpdateJobSchedule)
+			authed.POST("/jobs/:job/run", h.Admin.RunJobNow)
+			authed.GET("/plan-limits", h.Admin.PlanLimits)
+			authed.PUT("/plan-limits/:plan/:feature", h.Admin.UpdatePlanLimit)
+			authed.GET("/city-packs", h.Admin.CityPacks)
+			authed.PATCH("/city-packs/:id", h.Admin.UpdateCityPack)
+			authed.GET("/spots", h.Admin.Spots)
+			authed.PATCH("/spots/:id", h.Admin.UpdateSpot)
+			authed.GET("/reports", h.Admin.Reports)
+			authed.PATCH("/reports/:id", h.Admin.ModerateReport)
+			authed.GET("/scoring-config", h.Admin.ScoringConfigs)
+			authed.POST("/scoring-config", h.Admin.CreateScoringConfig)
+			authed.POST("/scoring-config/:version/activate", h.Admin.ActivateScoringConfig)
+			authed.GET("/api-keys", h.Admin.APIKeys)
+			authed.POST("/api-keys", h.Admin.CreateAPIKey)
+			authed.POST("/api-keys/:id/revoke", h.Admin.RevokeAPIKey)
+			authed.POST("/api-keys/:id/grants", h.Admin.AddAPIKeyGrant)
+			authed.DELETE("/api-keys/:id/grants", h.Admin.RemoveAPIKeyGrant)
 		}
 	}
 

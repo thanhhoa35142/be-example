@@ -11,7 +11,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// weightKeys are the components the scorer expects.
 var weightKeys = map[string]bool{
 	"weather": true, "crowd": true, "amenity": true, "shade": true, "fresh": true,
 }
@@ -23,21 +22,22 @@ var thresholdKeys = map[string]bool{
 }
 
 type jobScheduleLimit struct {
-	min int64
-	max int64
+	min  int64
+	max  int64
+	desc string
 }
 
 var jobScheduleLimits = map[string]jobScheduleLimit{
-	"weather.refresh":        {min: 15 * 60, max: 60 * 60},
-	"crowd.refresh":          {min: 60 * 60, max: 30 * 24 * 60 * 60},
-	"crowd.aggregate":        {min: 60, max: 24 * 60 * 60},
-	"scoring.recompute":      {min: 5 * 60, max: 6 * 60 * 60},
-	"alerts.evaluate":        {min: 60, max: 60 * 60},
-	"digest.weekly":          {min: 15 * 60, max: 60 * 60},
-	"holidays.refresh":       {min: 24 * 60 * 60, max: 30 * 24 * 60 * 60},
-	"retention.purge":        {min: 60 * 60, max: 30 * 24 * 60 * 60},
-	"ingest.osm":             {min: 60 * 60, max: 7 * 24 * 60 * 60},
-	"ingest.extract.refresh": {min: 24 * 60 * 60, max: 30 * 24 * 60 * 60},
+	"weather.refresh":        {min: 15 * 60, max: 60 * 60, desc: "Fetch weather forecasts for the coming days"},
+	"crowd.refresh":          {min: 60 * 60, max: 30 * 24 * 60 * 60, desc: "Refresh provider crowd estimates"},
+	"crowd.aggregate":        {min: 60, max: 24 * 60 * 60, desc: "Aggregate community crowd reports"},
+	"scoring.recompute":      {min: 5 * 60, max: 6 * 60 * 60, desc: "Recompute spot scores for the forecast window"},
+	"alerts.evaluate":        {min: 60, max: 60 * 60, desc: "Evaluate alert rules and queue notifications"},
+	"digest.weekly":          {min: 15 * 60, max: 60 * 60, desc: "Send scheduled digest notifications"},
+	"holidays.refresh":       {min: 24 * 60 * 60, max: 30 * 24 * 60 * 60, desc: "Refresh the public-holiday calendar"},
+	"retention.purge":        {min: 60 * 60, max: 30 * 24 * 60 * 60, desc: "Delete expired job runs, events and reports"},
+	"ingest.osm":             {min: 60 * 60, max: 7 * 24 * 60 * 60, desc: "Import OSM city packs"},
+	"ingest.extract.refresh": {min: 24 * 60 * 60, max: 30 * 24 * 60 * 60, desc: "Download fresh OSM extracts"},
 }
 
 type Service struct {
@@ -48,12 +48,10 @@ func NewService(repo Repository) *Service {
 	return &Service{repo: repo}
 }
 
-// RecordJobStart/Finish are called by the worker around each job run.
 func (s *Service) RecordJobStart(ctx context.Context, job string) (int64, error) {
 	return s.repo.StartJobRun(ctx, job)
 }
 
-// AbandonJobRuns marks 'running' rows left behind by dead workers.
 func (s *Service) AbandonJobRuns(ctx context.Context, job string) error {
 	return s.repo.AbandonJobRuns(ctx, job)
 }
@@ -64,7 +62,7 @@ func (s *Service) RecordJobFinish(ctx context.Context, id int64, status string, 
 		msg := jobErr.Error()
 		errText = &msg
 	}
-	// best-effort: instrumentation must never fail the job itself
+
 	_ = s.repo.FinishJobRun(context.Background(), id, status, rowsAffected, errText, stats)
 }
 
@@ -76,7 +74,6 @@ func (s *Service) Freshness(ctx context.Context) (Freshness, error) {
 	return s.repo.Freshness(ctx)
 }
 
-// normalizeFilter applies defaults and validates the window.
 func normalizeFilter(f MetricsFilter, defaultDays int) (MetricsFilter, error) {
 	if f.To.IsZero() {
 		f.To = time.Now().UTC()
@@ -115,7 +112,6 @@ var (
 	propKeyRe   = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]{0,31}$`)
 )
 
-// EventBreakdown validates and runs a props breakdown. Since defaults to 30d ago.
 func (s *Service) EventBreakdown(ctx context.Context, in EventBreakdownInput, now time.Time) (EventBreakdown, error) {
 	if !eventNameRe.MatchString(in.Name) {
 		return EventBreakdown{}, fmt.Errorf("%w: name must match [a-z][a-z0-9_]{0,63}", ErrInvalidFilter)
@@ -140,9 +136,9 @@ func clampLimit(limit int) int {
 	return limit
 }
 
-func (s *Service) Jobs(ctx context.Context, limit int, beforeID *int64) (Page[JobRun], error) {
+func (s *Service) Jobs(ctx context.Context, limit int, beforeID *int64, status string) (Page[JobRun], error) {
 	limit = clampLimit(limit)
-	rows, err := s.repo.ListJobRuns(ctx, limit+1, beforeID)
+	rows, err := s.repo.ListJobRuns(ctx, limit+1, beforeID, status)
 	if err != nil {
 		return Page[JobRun]{}, err
 	}
@@ -172,6 +168,7 @@ func (s *Service) JobSchedules(ctx context.Context) ([]JobSchedule, error) {
 		}
 		schedules[i].MinIntervalSeconds = limits.min
 		schedules[i].MaxIntervalSeconds = limits.max
+		schedules[i].Description = limits.desc
 	}
 	return schedules, nil
 }
@@ -190,6 +187,7 @@ func (s *Service) JobSchedule(ctx context.Context, job string) (JobSchedule, err
 	}
 	schedule.MinIntervalSeconds = limits.min
 	schedule.MaxIntervalSeconds = limits.max
+	schedule.Description = limits.desc
 	return schedule, nil
 }
 
@@ -207,6 +205,7 @@ func (s *Service) UpdateJobSchedule(ctx context.Context, job string, intervalSec
 	}
 	schedule.MinIntervalSeconds = limits.min
 	schedule.MaxIntervalSeconds = limits.max
+	schedule.Description = limits.desc
 	return schedule, nil
 }
 
@@ -231,9 +230,6 @@ func (s *Service) PendingReports(ctx context.Context, limit int, after *ReportCu
 	return Page[PendingReport]{Items: rows}, nil
 }
 
-// ModerateReport sets a spot_report status (accepted/rejected). Accepting
-// a 'closed' report also closes the spot with reason 'closed_by_report' —
-// the ingest planner then treats it as admin-only (no auto-reopen).
 func (s *Service) ModerateReport(ctx context.Context, id uuid.UUID, status string) error {
 	if status != "accepted" && status != "rejected" {
 		return ErrInvalidStatus
@@ -262,8 +258,6 @@ func (s *Service) ListScoringConfigs(ctx context.Context) ([]ScoringConfigVersio
 	return s.repo.ListScoringConfigs(ctx)
 }
 
-// CreateScoringConfig validates and inserts a new version. activate=true makes
-// it effective immediately; otherwise it is stored as a far-future draft.
 func (s *Service) CreateScoringConfig(ctx context.Context, in ScoringConfigInput) (*ScoringConfigVersion, error) {
 	if err := validateConfigJSON(in.Weights, weightKeys, "weights"); err != nil {
 		return nil, err
@@ -294,7 +288,6 @@ func (s *Service) CreateScoringConfig(ctx context.Context, in ScoringConfigInput
 	return nil, fmt.Errorf("config version %d not found after insert", version)
 }
 
-// ActivateScoringConfig makes a stored version effective now.
 func (s *Service) ActivateScoringConfig(ctx context.Context, version int16) error {
 	ok, err := s.repo.ActivateScoringConfig(ctx, version)
 	if err != nil {

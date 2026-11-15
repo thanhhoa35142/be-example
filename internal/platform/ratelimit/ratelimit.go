@@ -1,6 +1,3 @@
-// Package ratelimit provides per-key (client IP) token-bucket limiters.
-// Limiter is in-memory (per process); RedisLimiter shares buckets across
-// replicas via Redis when REDIS_URL is configured.
 package ratelimit
 
 import (
@@ -13,18 +10,15 @@ import (
 
 const (
 	sweepEvery = time.Minute
-	// maxKeys bounds memory under a key-flood: past it, the idlest keys go.
+
 	maxKeys = 200_000
 )
 
-// Rule is a sustained rate with a burst allowance.
 type Rule struct {
 	Limit rate.Limit
 	Burst int
 }
 
-// PerMinute builds a Rule of n requests per minute with the given burst
-// (burst < 1 is raised to 1).
 func PerMinute(n float64, burst int) Rule {
 	if burst < 1 {
 		burst = 1
@@ -37,7 +31,6 @@ type entry struct {
 	seen time.Time
 }
 
-// Limiter hands out one token bucket per key.
 type Limiter struct {
 	rule Rule
 	now  func() time.Time
@@ -47,20 +40,14 @@ type Limiter struct {
 	lastSweep time.Time
 }
 
-// New returns a Limiter enforcing rule per key. A zero/negative Limit or Burst
-// disables limiting (Allow always succeeds).
 func New(rule Rule) *Limiter {
 	return &Limiter{rule: rule, now: time.Now, entries: map[string]*entry{}}
 }
 
-// Allow takes one token for key. When denied, retryAfter is the whole-second
-// delay (>= 1) after which a retry can succeed.
 func (l *Limiter) Allow(key string) (ok bool, retryAfter time.Duration) {
 	return l.take(key, true)
 }
 
-// Deny reports whether key is currently over its limit WITHOUT consuming a
-// token. Pair with Hit to rate-limit only failures (e.g. bad credentials).
 func (l *Limiter) Deny(key string) (denied bool, retryAfter time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -78,10 +65,8 @@ func (l *Limiter) Deny(key string) (denied bool, retryAfter time.Duration) {
 	return true, l.wait(e.lim, now)
 }
 
-// Hit consumes one token for key (recording a failure).
 func (l *Limiter) Hit(key string) { l.take(key, false) }
 
-// Len returns the number of tracked keys (for tests/metrics).
 func (l *Limiter) Len() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -113,7 +98,6 @@ func (l *Limiter) take(key string, report bool) (bool, time.Duration) {
 	return false, l.wait(e.lim, now)
 }
 
-// wait is the time until one token is available, rounded up to whole seconds.
 func (l *Limiter) wait(lim *rate.Limiter, now time.Time) time.Duration {
 	tokens := lim.TokensAt(now)
 	need := (1 - tokens) / float64(l.rule.Limit)
@@ -124,9 +108,6 @@ func (l *Limiter) wait(lim *rate.Limiter, now time.Time) time.Duration {
 	return time.Duration(secs) * time.Second
 }
 
-// sweep evicts idle keys: a bucket untouched long enough to have refilled
-// completely is indistinguishable from a fresh one, so dropping it is free.
-// Called with l.mu held.
 func (l *Limiter) sweep(now time.Time) {
 	if now.Sub(l.lastSweep) < sweepEvery && len(l.entries) < maxKeys {
 		return
@@ -138,7 +119,7 @@ func (l *Limiter) sweep(now time.Time) {
 			delete(l.entries, k)
 		}
 	}
-	if len(l.entries) >= maxKeys { // still flooded with live keys: shed the stalest half
+	if len(l.entries) >= maxKeys {
 		cutoff := now.Add(-idle / 2)
 		for k, e := range l.entries {
 			if e.seen.Before(cutoff) || len(l.entries) >= maxKeys {

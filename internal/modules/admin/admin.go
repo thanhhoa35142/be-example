@@ -1,6 +1,3 @@
-// Package admin provides internal operations: job_run instrumentation,
-// overview metrics, spot-report moderation, and scoring_config management.
-// Exposed only on the staff surface (ADMIN_TOKEN), never publicly.
 package admin
 
 import (
@@ -26,14 +23,11 @@ var (
 	ErrInvalidCursor       = errors.New("invalid cursor")
 )
 
-// Page is a keyset-paginated list response. NextCursor is nil on the last page.
 type Page[T any] struct {
 	Items      []T     `json:"items"`
 	NextCursor *string `json:"nextCursor"`
 }
 
-// ReportCursor is the keyset position in the moderation queue
-// (created_at, id), encoded as "<unixnano>|<uuid>".
 type ReportCursor struct {
 	CreatedAt time.Time
 	ID        uuid.UUID
@@ -59,7 +53,6 @@ func ParseReportCursor(s string) (ReportCursor, error) {
 	return ReportCursor{CreatedAt: time.Unix(0, n).UTC(), ID: id}, nil
 }
 
-// JobRun mirrors job_run rows.
 type JobRun struct {
 	ID           int64      `json:"id"`
 	Job          string     `json:"job"`
@@ -70,18 +63,19 @@ type JobRun struct {
 	Error        *string    `json:"error"`
 }
 
-// JobSchedule controls the execution interval for a registered worker job.
 type JobSchedule struct {
 	Job                string    `json:"job"`
+	Description        string    `json:"description"`
 	IntervalSeconds    int64     `json:"intervalSeconds"`
 	Enabled            bool      `json:"enabled"`
 	OffsetSeconds      int64     `json:"offsetSeconds"`
 	MinIntervalSeconds int64     `json:"minIntervalSeconds"`
 	MaxIntervalSeconds int64     `json:"maxIntervalSeconds"`
 	UpdatedAt          time.Time `json:"updatedAt"`
+
+	RunRequestedAt *time.Time `json:"runRequestedAt"`
 }
 
-// Overview aggregates headline counts for the dashboard.
 type Overview struct {
 	ActiveSpots         int64 `json:"activeSpots"`
 	SpotsWithFreshScore int64 `json:"spotsWithFreshScore"`
@@ -95,14 +89,12 @@ type Overview struct {
 	PlusDevices         int64 `json:"plusDevices"`
 }
 
-// Freshness reports the newest data timestamp per pipeline stage.
 type Freshness struct {
 	WeatherFetchedAt *time.Time `json:"weatherFetchedAt"`
 	ScoreComputedAt  *time.Time `json:"scoreComputedAt"`
 	CrowdUpdatedAt   *time.Time `json:"crowdUpdatedAt"`
 }
 
-// PendingReport is a spot_report awaiting moderation.
 type PendingReport struct {
 	ID        uuid.UUID `json:"id"`
 	SpotID    uuid.UUID `json:"spotId"`
@@ -112,7 +104,6 @@ type PendingReport struct {
 	CreatedAt time.Time `json:"createdAt"`
 }
 
-// Metrics aggregates analytical counters for the dashboard.
 type Metrics struct {
 	Score         ScoreMetrics    `json:"score"`
 	Feedback      []VerdictCount  `json:"feedback"`
@@ -122,13 +113,12 @@ type Metrics struct {
 	Deliveries    []DeliveryCount `json:"deliveries"`
 }
 
-// ScoreMetrics summarizes spot_score over the last 7 days.
 type ScoreMetrics struct {
 	TotalRows  int64   `json:"totalRows"`
 	AvgScore   float64 `json:"avgScore"`
 	CappedRows int64   `json:"cappedRows"`
 	Spots      int64   `json:"spots"`
-	// Histogram buckets: index 0 = scores 0-9, ..., 9 = 90-100.
+
 	Histogram [10]int64 `json:"histogram"`
 }
 
@@ -154,26 +144,22 @@ type StatusCount struct {
 	Count  int64  `json:"count"`
 }
 
-// DeliveryCount groups alert_delivery by apns_status (-1 = pending/failed send).
 type DeliveryCount struct {
 	APNsStatus int32 `json:"apnsStatus"`
 	Count      int64 `json:"count"`
 }
 
-// MetricsFilter scopes analytical queries. All fields optional except the
-// time range; nil means "no filter".
 type MetricsFilter struct {
 	From         time.Time
 	To           time.Time
-	CityPackID   *uuid.UUID // score metrics only
-	Kind         *string    // spot kind: park|beach|site|table
-	SpotID       *uuid.UUID // feedback metrics only
-	ReportType   *string    // reports only
-	ReportStatus *string    // reports only
-	EventName    *string    // event summary only
+	CityPackID   *uuid.UUID
+	Kind         *string
+	SpotID       *uuid.UUID
+	ReportType   *string
+	ReportStatus *string
+	EventName    *string
 }
 
-// EventSummary aggregates product events over a window.
 type EventSummary struct {
 	From   time.Time   `json:"from"`
 	To     time.Time   `json:"to"`
@@ -181,16 +167,13 @@ type EventSummary struct {
 	ByDay  []DayCount  `json:"byDay"`
 }
 
-// EventBreakdownInput selects an event name and the props to bucket by.
 type EventBreakdownInput struct {
 	Name  string
 	Prop  string
-	By    string // optional second prop
+	By    string
 	Since time.Time
 }
 
-// EventBreakdown buckets one event name by a props key (and optionally a
-// second). Count = events, Devices = distinct devices in the bucket.
 type EventBreakdown struct {
 	Name  string               `json:"name"`
 	Prop  string               `json:"prop"`
@@ -199,8 +182,6 @@ type EventBreakdown struct {
 	Items []EventBreakdownItem `json:"items"`
 }
 
-// EventBreakdownItem is one bucket. By is the second prop's value (only
-// present when the request set `by`). Events lacking a prop have value "".
 type EventBreakdownItem struct {
 	Value   string  `json:"value"`
 	By      *string `json:"by,omitempty"`
@@ -208,19 +189,16 @@ type EventBreakdownItem struct {
 	Devices int64   `json:"devices"`
 }
 
-// NameCount counts events per name.
 type NameCount struct {
 	Name  string `json:"name"`
 	Count int64  `json:"count"`
 }
 
-// DayCount counts events per UTC day.
 type DayCount struct {
 	Day   time.Time `json:"day"`
 	Count int64     `json:"count"`
 }
 
-// ScoringConfigVersion is one scoring_config row.
 type ScoringConfigVersion struct {
 	Version    int16           `json:"version"`
 	Weights    json.RawMessage `json:"weights"`
@@ -229,9 +207,8 @@ type ScoringConfigVersion struct {
 	IsActive   bool            `json:"isActive"`
 }
 
-// ScoringConfigInput creates a new config version.
 type ScoringConfigInput struct {
 	Weights    json.RawMessage `json:"weights"`
 	Thresholds json.RawMessage `json:"thresholds"`
-	Activate   bool            // if true, active_from = now(); else far-future draft
+	Activate   bool
 }

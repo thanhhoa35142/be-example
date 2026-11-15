@@ -1,8 +1,3 @@
-// Package ingest orchestrates the OSM → t_spots pipeline described in
-// docs/INGEST_STRATEGY.md: a FeatureSource streams raw OSM objects, the
-// pure Classifier tags them, everything lands in the raw layer
-// (t_ingest_features), then a pure planner decides creates/updates/closes
-// against canonical t_spots — all inside one transaction per city pack.
 package ingest
 
 import (
@@ -21,17 +16,10 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/modules/ingest/osm"
 )
 
-// ErrGuardTripped aborts a pack run when a guardrail trips (e.g. the run
-// would close more than MaxCloseFraction of the pack's active spots —
-// usually a truncated extract or broken filter).
 var ErrGuardTripped = errors.New("ingest guard tripped")
 
-// fallbackRadiusM bounds the spatial+name fallback: when an OSM object is
-// remapped to a new id, the new candidate may re-link to an existing
-// pending/active spot of the same kind and name within this distance.
 const fallbackRadiusM = 30.0
 
-// Stats is written to t_job_runs.stats after each pack run.
 type Stats struct {
 	FeaturesRead     int            `json:"features_read"`
 	ExcludedByReason map[string]int `json:"excluded_by_reason,omitempty"`
@@ -40,26 +28,23 @@ type Stats struct {
 	Created          int            `json:"created"`
 	Updated          int            `json:"updated"`
 	Unchanged        int            `json:"unchanged"`
-	DuplicateGeoms   int            `json:"duplicate_geoms,omitempty"` // line+area twins collapsed in the raw merge
+	DuplicateGeoms   int            `json:"duplicate_geoms,omitempty"`
 	Activated        int            `json:"activated"`
 	Pending          int            `json:"pending"`
 	BelowFloor       int            `json:"below_floor"`
 	Closed           int            `json:"closed"`
 	HiddenVanished   int            `json:"hidden_vanished"`
-	SkippedCurated   int            `json:"skipped_curated"` // curated/merged/admin-hidden/closed-by-report: data never touched
+	SkippedCurated   int            `json:"skipped_curated"`
 	FallbackMatched  int            `json:"fallback_matched"`
-	AmenitiesLinked  int            `json:"amenities_linked"` // (spot, type) rows written
+	AmenitiesLinked  int            `json:"amenities_linked"`
 	OrphanSites      int            `json:"orphan_sites"`
 	ForeignOwned     int            `json:"foreign_owned"`
 	GuardTripped     bool           `json:"guard_tripped,omitempty"`
 	GuardForced      bool           `json:"guard_forced,omitempty"`
-	// StageMs is wall time per pipeline stage (stream_copy, merge, load,
-	// plan, upsert_sources, lifecycle, amenities) — the first place to look
-	// when a pack gets slow.
+
 	StageMs map[string]int64 `json:"stage_ms,omitempty"`
 }
 
-// RawRow is one classified feature destined for t_ingest_features.
 type RawRow struct {
 	Source        string
 	SourceID      string
@@ -75,7 +60,6 @@ type RawRow struct {
 	RunID         int64
 }
 
-// CandidateRow mirrors ListCandidateFeatures.
 type CandidateRow struct {
 	Source         string
 	SourceID       string
@@ -84,14 +68,13 @@ type CandidateRow struct {
 	Version        int
 	TagsJSON       []byte
 	ContentHash    string
-	GeoJSON        string // ST_AsGeoJSON of the feature geometry
+	GeoJSON        string
 	Lon            float64
 	Lat            float64
-	PolygonGeoJSON *string // non-nil when the geometry is an area
-	AreaHa         float64 // polygon area in hectares (0 for points/lines)
+	PolygonGeoJSON *string
+	AreaHa         float64
 }
 
-// AbsorbedRow mirrors ListAbsorbedCandidates.
 type AbsorbedRow struct {
 	Source         string
 	SourceID       string
@@ -99,7 +82,6 @@ type AbsorbedRow struct {
 	ParentSourceID string
 }
 
-// TableClusterMember is one orphan table inside a DBSCAN cluster.
 type TableClusterMember struct {
 	Source   string
 	SourceID string
@@ -108,32 +90,28 @@ type TableClusterMember struct {
 	Lat      float64
 }
 
-// TableCluster groups orphan tables that form one candidate picnic site.
 type TableCluster struct {
-	ID      int64 // DBSCAN cluster id (only unique within this run)
+	ID      int64
 	Members []TableClusterMember
-	Lon     float64 // member centroid
+	Lon     float64
 	Lat     float64
 	Size    int
 }
 
-// SourceLink is the provenance record for one (source, source_id).
 type SourceLink struct {
 	SpotID      uuid.UUID
-	PackID      uuid.UUID // owning pack — differs on boundary straddlers
+	PackID      uuid.UUID
 	Version     int
-	Via         string // "primary" | "absorbed"
+	Via         string
 	ContentHash string
 	Found       bool
 }
 
-// SourcelessSpot is an active/pending spot with zero primary sources.
 type SourcelessSpot struct {
 	ID     uuid.UUID
 	Status string
 }
 
-// SpotRow mirrors ListPackSpots.
 type SpotRow struct {
 	ID           uuid.UUID
 	Status       string
@@ -152,7 +130,6 @@ type SpotRow struct {
 	StatusReason string
 }
 
-// NewSpot carries the fields needed to insert or refresh a t_spots row.
 type NewSpot struct {
 	Kind         string
 	Name         string
@@ -160,104 +137,80 @@ type NewSpot struct {
 	AttrsJSON    []byte
 	Lon          float64
 	Lat          float64
-	AreaGeoJSON  *string // nil → point-only spot
+	AreaGeoJSON  *string
 	Country      string
 	TZ           string
-	CellID       int64 // geo cell of (Lat, Lon); 0 → store computes it
+	CellID       int64
 	Status       string
 	Quality      int
 	StatusReason string
 }
 
-// SourceUpsert is one queued t_spot_sources write (flushed in one batch).
 type SourceUpsert struct {
 	SpotID      uuid.UUID
 	Source      string
 	SourceID    string
 	Version     int
-	Via         string // "primary" | "absorbed"
+	Via         string
 	ContentHash string
 }
 
-// Store is the tx-scoped persistence port the planner writes through.
-// Implemented by internal/infrastructure/persistence.
 type Store interface {
 	ClearRaw(ctx context.Context) error
-	// CopyRaw bulk-loads a batch of raw rows into staging (COPY).
+
 	CopyRaw(ctx context.Context, rows []RawRow) error
-	// MergeRaw moves staged rows into the raw layer, keeping one row per
-	// (source, source_id) — the highest-dimension geometry wins — and
-	// returns the number of raw rows kept.
+
 	MergeRaw(ctx context.Context) (int64, error)
 	Candidates(ctx context.Context) ([]CandidateRow, error)
 	Absorbed(ctx context.Context) ([]AbsorbedRow, error)
-	// AmenityTypes returns distinct picnic amenity types near each
-	// candidate (quality input), keyed by (source, source_id).
+
 	AmenityTypes(ctx context.Context) (map[[2]string]int, error)
-	// OrphanTableClusters returns DBSCAN clusters of table-kind candidates
-	// not absorbed into a park/beach. epsMerc is epsilon in Web Mercator
-	// meters (caller adjusts for latitude); minPts is minpoints.
+
 	OrphanTableClusters(ctx context.Context, epsMerc float64, minPts int) ([]TableCluster, error)
 	Spots(ctx context.Context) ([]SpotRow, error)
-	// SpotsNear returns pending/active spots within radiusM meters of
-	// (lon, lat), nearest first — used by the name+proximity fallback when
-	// SpotBySource misses (OSM object remaps).
+
 	SpotsNear(ctx context.Context, lon, lat, radiusM float64) ([]SpotRow, error)
-	// SourceLinks preloads provenance: every source of this pack's spots
-	// plus foreign-owned links of this run's candidates.
+
 	SourceLinks(ctx context.Context) (map[[2]string]SourceLink, error)
 	InsertSpot(ctx context.Context, s NewSpot) (uuid.UUID, error)
 	UpdateSpot(ctx context.Context, id uuid.UUID, s NewSpot) error
 	SetStatus(ctx context.Context, id uuid.UUID, status, reason string) error
-	// UpsertSources links sources to spots in one statement. via is
-	// "primary" (the candidate that IS the spot) or "absorbed" (child
-	// evidence); only primary sources keep a spot alive.
+
 	UpsertSources(ctx context.Context, ups []SourceUpsert) error
 	ResetSightings(ctx context.Context) error
 	BumpMissing(ctx context.Context) error
 	MissingActive(ctx context.Context, minMissingRuns int) ([]uuid.UUID, error)
 	MissingPending(ctx context.Context, minMissingRuns int) ([]uuid.UUID, error)
-	// Sourceless returns active/pending spots with no primary source —
-	// their identity moved elsewhere and they must be closed out.
+
 	Sourceless(ctx context.Context) ([]SourcelessSpot, error)
 	RecentConfirm(ctx context.Context, spotID uuid.UUID, days int) (bool, error)
 	ClearAmenities(ctx context.Context) error
-	// AssignAmenities attaches every amenity feature to its nearest
-	// active/pending spot footprint (set-based); returns rows written.
+
 	AssignAmenities(ctx context.Context, radiusDeg, radiusM float64) (int64, error)
 	TouchImport(ctx context.Context) error
-	// NotifyIngestDone emits pg_notify('pickhour_ingest') inside the tx —
-	// delivered only on commit, so dry-runs and rollbacks stay silent.
+
 	NotifyIngestDone(ctx context.Context) error
 }
 
-// Runner executes fn inside one DB transaction scoped to a pack;
-// dryRun rolls back instead of committing but still returns fn's error
-// (stats are collected either way).
 type Runner interface {
 	WithTx(ctx context.Context, packID uuid.UUID, dryRun bool, fn func(Store) error) error
 }
 
-// PackLister enumerates packs for the scheduled job.
 type PackLister interface {
 	ListIngestPacks(ctx context.Context) ([]osm.Pack, error)
 }
 
-// Service runs the ingest pipeline for one pack.
 type Service struct {
 	Src   osm.FeatureSource
 	Store Runner
 	Clf   osm.Classifier
 	Pol   osm.Policy
-	// AmenityRadiusM bounds how far an amenity feature may sit from a spot
-	// anchor/area and still count (PostGIS does the real distance check).
+
 	AmenityRadiusM float64
-	// ForceGuard lets an operator push through a run the blast-radius guard
-	// would abort (e.g. a real mass removal confirmed by hand).
+
 	ForceGuard bool
 }
 
-// rawBatchSize bounds the in-memory COPY buffer while streaming features.
 const rawBatchSize = 5000
 
 func (s *Service) policy() osm.Policy {
@@ -274,8 +227,6 @@ func (s *Service) classifier() osm.Classifier {
 	return s.Clf
 }
 
-// contentHash fingerprints the canonical inputs that should trigger a
-// spot update: kind + name + sorted tags + normalized geometry text.
 func contentHash(c osm.Classified, f osm.RawFeature) string {
 	h := sha256.New()
 	h.Write([]byte(c.Kind))
@@ -289,14 +240,6 @@ func contentHash(c osm.Classified, f osm.RawFeature) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// RunPack executes the full pipeline for one pack inside a single
-// transaction. The heavy FeatureSource I/O happens before the tx opens.
-//
-// Round-trips are bounded: the raw layer is COPY'd in batches, provenance
-// is preloaded once, source links are flushed in one batched upsert, and
-// amenities are assigned set-based. Only spot inserts, real spot updates
-// (unchanged spots are skipped) and the name+proximity fallback for
-// unmatched candidates remain per-row.
 func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRun bool) (Stats, error) {
 	var st Stats
 	snap, err := s.Src.Open(ctx, pack)
@@ -316,8 +259,7 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 		if err := store.ClearRaw(ctx); err != nil {
 			return err
 		}
-		// Stage 1: stream → classify → COPY into staging in bounded batches
-		// (the feature set never materializes in memory) → set-based merge.
+
 		clf := s.classifier()
 		batch := make([]RawRow, 0, rawBatchSize)
 		flush := func() error {
@@ -372,13 +314,12 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 
 		mark("merge")
 
-		// Stage 2: load planner inputs once.
 		absorbed, err := store.Absorbed(ctx)
 		if err != nil {
 			return err
 		}
-		absorbedSet := map[[2]string][2]string{} // child key → parent key
-		childCount := map[[2]string]int{}        // parent key → absorbed children
+		absorbedSet := map[[2]string][2]string{}
+		childCount := map[[2]string]int{}
 		for _, a := range absorbed {
 			absorbedSet[[2]string{a.Source, a.SourceID}] = [2]string{a.ParentSource, a.ParentSourceID}
 			childCount[[2]string{a.ParentSource, a.ParentSourceID}]++
@@ -417,8 +358,6 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 			}
 		}
 
-		// Queued provenance writes, deduped by key (last write wins) and
-		// mirrored into links so later lookups in this run see them.
 		var ups []SourceUpsert
 		upIdx := map[[2]string]int{}
 		queue := func(u SourceUpsert) {
@@ -433,9 +372,6 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 				Via: u.Via, ContentHash: u.ContentHash, Found: true}
 		}
 
-		// apply decides and writes the canonical row for an existing spot.
-		// Returns false when the spot is locked (curated, merged,
-		// admin-hidden, closed by report): its data is never touched.
 		apply := func(spotID uuid.UUID, ns NewSpot, sourceChanged bool) error {
 			sp := spotRow[spotID]
 			if locked(sp) {
@@ -493,7 +429,7 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 			return id, true, nil
 		}
 
-		parentSpot := map[[2]string]uuid.UUID{} // candidate key → spot id
+		parentSpot := map[[2]string]uuid.UUID{}
 		type childLink struct {
 			up        SourceUpsert
 			parentKey [2]string
@@ -504,7 +440,6 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 			key := [2]string{c.Source, c.SourceID}
 			parentKey, isAbsorbed := absorbedSet[key]
 
-			// Unabsorbed tables only become spots via orphan clustering.
 			if c.Kind == "table" && !isAbsorbed {
 				continue
 			}
@@ -521,13 +456,12 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 
 			link := links[key]
 			oldVersion, oldHash := link.Version, link.ContentHash
-			// A source still linked as 'absorbed' while its candidate is no
-			// longer absorbed became its own spot — treat as unmatched.
+
 			if link.Found && link.Via == "absorbed" && !isAbsorbed {
 				link.Found = false
 			}
 			if link.Found && link.PackID != pack.ID {
-				// Boundary straddler owned by another pack.
+
 				st.ForeignOwned++
 				continue
 			}
@@ -554,8 +488,7 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 			}
 			if !found {
 				if norm := normalizeName(name); norm != "" {
-					// OSM remap fallback: same kind + name within
-					// fallbackRadiusM, unique match only.
+
 					near, err := store.SpotsNear(ctx, c.Lon, c.Lat, fallbackRadiusM)
 					if err != nil {
 						return err
@@ -601,19 +534,16 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 			parentSpot[key] = spotID
 		}
 
-		// Absorbed children whose parents resolved after them.
 		for _, l := range lateChildren {
 			id, ok := parentSpot[l.parentKey]
 			if !ok {
-				continue // parent below floor / foreign — child stays raw-only
+				continue
 			}
 			l.up.SpotID = id
 			queue(l.up)
 			st.Absorbed++
 		}
 
-		// Stage 2b: orphan table clusters → synthetic kind=site spots.
-		// DBSCAN runs in Web Mercator; eps is stretched by 1/cos(lat).
 		eps := pol.OrphanClusterEpsM
 		if eps <= 0 {
 			eps = osm.DefaultPolicy.OrphanClusterEpsM
@@ -623,11 +553,9 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 		if err != nil {
 			return err
 		}
-		claimed := map[uuid.UUID]bool{} // one cluster per existing site spot
+		claimed := map[uuid.UUID]bool{}
 		for _, cl := range clusters {
-			// Drop members owned by another pack BEFORE deciding, otherwise
-			// a spot is created with no linkable source and closed again by
-			// the sourceless sweep — a junk row per run.
+
 			own := cl.Members[:0:0]
 			for _, m := range cl.Members {
 				if l := links[[2]string{m.Source, m.SourceID}]; l.Found && l.PackID != pack.ID {
@@ -648,9 +576,6 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 			lat /= float64(len(own))
 			quality := min(qp.TableEvidence+10*len(own), 100)
 
-			// Re-find via any member's provenance (kind=site only, and each
-			// spot only once — a split cluster must not map both halves to
-			// the same spot).
 			var spotID uuid.UUID
 			found := false
 			for _, m := range own {
@@ -679,7 +604,7 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 					return fmt.Errorf("insert table-cluster spot: %w", err)
 				}
 				if !ok {
-					continue // below floor — members stay raw-only
+					continue
 				}
 				spotID = id
 			}
@@ -697,17 +622,13 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 		}
 		mark("upsert_sources")
 
-		// Stage 3: sightings → missing runs → guarded closes.
 		if err := store.ResetSightings(ctx); err != nil {
 			return err
 		}
 		if err := store.BumpMissing(ctx); err != nil {
 			return err
 		}
-		// Blast-radius guard, evaluated on what is absent THIS run (not only
-		// on spots past CloseAfterMissing) so a truncated extract aborts on
-		// its first run, before raw layer/amenities are replaced. Sourceless
-		// closes count too.
+
 		absent, err := store.MissingActive(ctx, 1)
 		if err != nil {
 			return err
@@ -738,7 +659,7 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 			if ok, err := store.RecentConfirm(ctx, id, pol.ConfirmShieldDays); err != nil {
 				return err
 			} else if ok {
-				continue // shielded — stays active
+				continue
 			}
 			if err := store.SetStatus(ctx, id, string(osm.StatusClosed), osm.ReasonSourceMissing); err != nil {
 				return err
@@ -755,8 +676,7 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 			}
 			st.HiddenVanished++
 		}
-		// Spots whose primary sources all moved to other spots this run
-		// have no identity left — close/hide them.
+
 		for _, sp := range sourceless {
 			next := osm.StatusHidden
 			if sp.Status == string(osm.StatusActive) {
@@ -774,7 +694,6 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 
 		mark("lifecycle")
 
-		// Stage 4: amenities, set-based.
 		if err := store.ClearAmenities(ctx); err != nil {
 			return err
 		}
@@ -797,8 +716,6 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 	return st, err
 }
 
-// locked reports spots the importer must never modify (INGEST_STRATEGY D4):
-// curated, merged, hidden by an admin, closed by an accepted report.
 func locked(sp SpotRow) bool {
 	if sp.Curated {
 		return true
@@ -814,8 +731,6 @@ func locked(sp SpotRow) bool {
 	return false
 }
 
-// sameSpot reports whether writing ns would leave the canonical row as is
-// (lets unchanged spots skip the UPDATE entirely).
 func sameSpot(sp SpotRow, ns NewSpot) bool {
 	const eps = 1e-7
 	return sp.Quality == ns.Quality && sp.Name == ns.Name &&
@@ -826,7 +741,7 @@ func sameSpot(sp SpotRow, ns NewSpot) bool {
 
 func packCosLat(pack osm.Pack) float64 {
 	centerLat := (pack.Bounds.South + pack.Bounds.North) / 2
-	return math.Max(math.Cos(centerLat*math.Pi/180), 0.2) // polar packs: cap the stretch
+	return math.Max(math.Cos(centerLat*math.Pi/180), 0.2)
 }
 
 var attrKeys = []string{"access", "fee", "reservation", "nudism", "supervised", "capacity", "description", "wikidata", "website"}

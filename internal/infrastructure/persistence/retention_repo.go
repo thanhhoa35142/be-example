@@ -5,8 +5,6 @@ import (
 	"time"
 )
 
-// RetentionRepo deletes or scrubs rows past their retention window, in
-// bounded batches so long-running deletes never hold big locks.
 type RetentionRepo struct {
 	q *Queries
 }
@@ -15,10 +13,8 @@ func NewRetentionRepo(q *Queries) *RetentionRepo {
 	return &RetentionRepo{q: q}
 }
 
-// purgeBatch is the max rows touched per DELETE/UPDATE statement.
 const purgeBatch = 10000
 
-// PurgeStats reports rows removed per table during one retention run.
 type PurgeStats struct {
 	WeatherForecasts int64
 	SpotScores       int64
@@ -29,8 +25,6 @@ type PurgeStats struct {
 	PayloadsScrubbed int64
 }
 
-// Retention windows (spec §5). Apple notification payloads are scrubbed
-// rather than deleted so the audit trail survives.
 var (
 	weatherRetention   = 7 * 24 * time.Hour
 	scoreRetention     = 2 * 24 * time.Hour
@@ -41,8 +35,6 @@ var (
 	notificationMaxAge = 90 * 24 * time.Hour
 )
 
-// Purge loops each table in batches until nothing older than the cutoff
-// remains, then scrubs old apple_notification payloads.
 func (r *RetentionRepo) Purge(ctx context.Context) (PurgeStats, error) {
 	var st PurgeStats
 	now := time.Now().UTC()

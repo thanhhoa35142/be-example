@@ -52,7 +52,6 @@ func TestAuthorizeWildcardFields(t *testing.T) {
 	}
 }
 
-// fakeRepo is an in-memory Repository for service tests.
 type fakeRepo struct {
 	key    ApiKey
 	grants []Grant
@@ -106,7 +105,7 @@ func TestAuthenticateRejectsRevokedAndExpired(t *testing.T) {
 	} {
 		repo := &fakeRepo{key: ApiKey{Name: "k"}, grants: []Grant{{Effect: "allow", Resource: "*", Action: "*"}}}
 		mutate(&repo.key)
-		// Store under the hash of a real-looking key so lookup succeeds.
+
 		raw := KeyPrefixTag + "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 		repo.hash = HashKey(raw)
 		svc := NewService(repo)

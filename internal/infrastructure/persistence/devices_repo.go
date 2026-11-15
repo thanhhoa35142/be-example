@@ -19,8 +19,6 @@ type DevicesRepo struct {
 	pool *pgxpool.Pool
 }
 
-// NewDevicesRepo needs the pool to run the APNs-token takeover in one
-// transaction.
 func NewDevicesRepo(q *Queries, pool *pgxpool.Pool) *DevicesRepo {
 	return &DevicesRepo{q: q, pool: pool}
 }
@@ -39,9 +37,7 @@ func (r *DevicesRepo) Upsert(ctx context.Context, in devices.RegisterInput) (uui
 		AppVersion: textParam(in.AppVersion),
 		Prefs:      prefs,
 	}
-	// A concurrent registration of the same token by a third device can win
-	// the unique index between our release and upsert; one retry resolves it
-	// (the retry's release demotes the winner, last writer takes the token).
+
 	for attempt := 0; ; attempt++ {
 		id, err := r.upsertTakingOverToken(ctx, params)
 		var pgErr *pgconn.PgError
@@ -55,11 +51,6 @@ func (r *DevicesRepo) Upsert(ctx context.Context, in devices.RegisterInput) (uui
 	}
 }
 
-// upsertTakingOverToken demotes any other live holder of the APNs token
-// (token/env cleared, push_status 'unregistered') and upserts the device, in
-// one transaction. A reinstall that lost its Keychain gets a fresh device id
-// but the same APNs token; the new install takes the token over instead of
-// being locked out with a permanent conflict.
 func (r *DevicesRepo) upsertTakingOverToken(ctx context.Context, p UpsertDeviceParams) (uuid.UUID, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {

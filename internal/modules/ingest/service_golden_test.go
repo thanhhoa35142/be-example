@@ -1,19 +1,5 @@
 package ingest_test
 
-// Golden-fixture integration tests for the ingest planner: canned OSM
-// features stream through ingest.Service.RunPack against a real database,
-// and the resulting t_spots / t_spot_sources / t_spot_amenities /
-// t_ingest_features rows are asserted with SQL.
-//
-// Requires a migrated database; skipped when DATABASE_URL is unset.
-// Local DSN (TEST_DATABASE_URL): postgres://picnic:picnic@localhost:4343/picnic_test?sslmode=disable
-//
-// Each subtest creates its own t_city_packs row (status 'draft' so the
-// scheduled worker — which only lists beta/live packs — never picks it up)
-// and deletes it in cleanup. t_ingest_features cascades on pack delete;
-// t_spot_sources / t_spots do NOT cascade, so cleanup removes them
-// explicitly (t_spot_amenities does cascade from t_spots).
-
 import (
 	"context"
 	"errors"
@@ -30,12 +16,6 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/platform/testdb"
 )
 
-// ---------------------------------------------------------------------------
-// Fake osm.FeatureSource
-// ---------------------------------------------------------------------------
-
-// fixtureSource returns whatever features are currently set; tests mutate
-// the slice between RunPack calls (e.g. to simulate an empty extract).
 type fixtureSource struct {
 	features []osm.RawFeature
 }
@@ -61,16 +41,10 @@ func (s fixtureSnapshot) Features() iter.Seq2[osm.RawFeature, error] {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Fixture geometry helpers (small GeoJSON, EPSG:4326)
-// ---------------------------------------------------------------------------
-
 func goldenPoint(lon, lat float64) []byte {
 	return []byte(fmt.Sprintf(`{"type":"Point","coordinates":[%.6f,%.6f]}`, lon, lat))
 }
 
-// goldenPolygon returns an axis-aligned square of half-size d degrees
-// centered on (lon, lat).
 func goldenPolygon(lon, lat, d float64) []byte {
 	return []byte(fmt.Sprintf(
 		`{"type":"Polygon","coordinates":[[[%.6f,%.6f],[%.6f,%.6f],[%.6f,%.6f],[%.6f,%.6f],[%.6f,%.6f]]]}`,
@@ -87,10 +61,6 @@ func goldenFeature(sourceID string, version int, tags map[string]string, geom []
 	}
 }
 
-// ---------------------------------------------------------------------------
-// DB helpers
-// ---------------------------------------------------------------------------
-
 func goldenPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	dsn := testdb.DSN(t)
@@ -102,9 +72,6 @@ func goldenPool(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
-// seedGoldenPack inserts a boundary covering all fixture coordinates and
-// registers cleanup. Status 'draft' keeps the pack invisible to the
-// scheduled ingest worker (ListIngestPacks only selects beta/live).
 func seedGoldenPack(t *testing.T, pool *pgxpool.Pool, slug string) osm.Pack {
 	t.Helper()
 	ctx := context.Background()
@@ -127,8 +94,7 @@ func seedGoldenPack(t *testing.T, pool *pgxpool.Pool, slug string) osm.Pack {
 	}
 	t.Cleanup(func() {
 		c := context.Background()
-		// t_spot_sources has no cascade; t_spots cascades t_spot_amenities;
-		// t_ingest_features cascades from the pack.
+
 		_, _ = pool.Exec(c, `DELETE FROM t_spot_sources WHERE spot_id IN
 			(SELECT id FROM t_spots WHERE city_pack_id = $1)`, id)
 		_, _ = pool.Exec(c, `DELETE FROM t_spots WHERE city_pack_id = $1`, id)
@@ -191,10 +157,6 @@ func goldenSpots(t *testing.T, pool *pgxpool.Pool, packID uuid.UUID) []struct {
 	return out
 }
 
-// parkFixture builds the canonical "park absorbs children" feature set:
-// a named park polygon plus a picnic table, a picnic site and a toilet
-// inside it. All coordinates are relative to (lon, lat); the polygon half
-// size must exceed the child offsets.
 func parkFixture(slug string, lon, lat float64) []osm.RawFeature {
 	return []osm.RawFeature{
 		goldenFeature("w-park-"+slug, 1,
@@ -212,10 +174,6 @@ func parkFixture(slug string, lon, lat float64) []osm.RawFeature {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Golden scenarios
-// ---------------------------------------------------------------------------
-
 func TestGoldenIngest(t *testing.T) {
 	pool := goldenPool(t)
 	ctx := context.Background()
@@ -227,11 +185,10 @@ func TestGoldenIngest(t *testing.T) {
 
 		st := runGolden(t, ctx, pool, src, pack, osm.Policy{})
 
-		// 4 raw features: park/table/site are candidates, toilet is amenity.
 		if st.FeaturesRead != 4 || st.Candidates != 3 {
 			t.Fatalf("expected 4 features / 3 candidates, got %+v", st)
 		}
-		// One active park spot; the two children attach as sources.
+
 		if st.Created != 1 || st.Activated != 1 || st.Absorbed != 2 {
 			t.Fatalf("expected created=1 activated=1 absorbed=2, got %+v", st)
 		}
@@ -242,8 +199,7 @@ func TestGoldenIngest(t *testing.T) {
 		if len(spots) != 1 || spots[0].Kind != "park" || spots[0].Status != "active" {
 			t.Fatalf("expected single active park spot, got %+v", spots)
 		}
-		// Park quality: named(30)+area(20)+access(5)+size ~12 ha(10)
-		// +toilet(5)+table-evidence(25)=95.
+
 		if spots[0].Quality != 95 {
 			t.Fatalf("expected park quality 95, got %d", spots[0].Quality)
 		}
@@ -268,8 +224,7 @@ func TestGoldenIngest(t *testing.T) {
 	t.Run("orphan_table_cluster", func(t *testing.T) {
 		slug := "golden-orphan-tables"
 		pack := seedGoldenPack(t, pool, slug)
-		// Four picnic_table nodes within ~30 m of each other, no park
-		// polygon anywhere near → DBSCAN cluster → synthetic kind=site spot.
+
 		lon, lat := 5.20, 52.20
 		src := &fixtureSource{features: []osm.RawFeature{
 			goldenFeature("n-t1-"+slug, 1,
@@ -287,7 +242,7 @@ func TestGoldenIngest(t *testing.T) {
 		if st.Candidates != 4 || st.Created != 1 || st.OrphanSites != 1 {
 			t.Fatalf("expected candidates=4 created=1 orphan_sites=1, got %+v", st)
 		}
-		// Cluster quality = table-evidence(25) + 10*size(4) = 65 → active.
+
 		if st.Activated != 1 {
 			t.Fatalf("expected activated=1, got %+v", st)
 		}
@@ -314,9 +269,6 @@ func TestGoldenIngest(t *testing.T) {
 		}
 		st2 := runGolden(t, ctx, pool, src, pack, osm.Policy{})
 
-		// Second identical run: nothing created, the park is matched via
-		// provenance and skipped as unchanged (no UPDATE), absorbed children
-		// re-attach, nothing closes.
 		if st2.Created != 0 || st2.Closed != 0 {
 			t.Fatalf("second run: expected created=0 closed=0, got %+v", st2)
 		}
@@ -337,11 +289,10 @@ func TestGoldenIngest(t *testing.T) {
 		pack := seedGoldenPack(t, pool, slug)
 		lon, lat := 5.30, 52.30
 		src := &fixtureSource{features: []osm.RawFeature{
-			// Unnamed point park: quality 0 — below KeepPending(35).
+
 			goldenFeature("n-lowpt-"+slug, 1,
 				map[string]string{"leisure": "park"}, goldenPoint(lon, lat)),
-			// Unnamed park polygon: quality = HasArea(20) only — still
-			// below the floor. Documents that area alone is not enough.
+
 			goldenFeature("w-lowpoly-"+slug, 1,
 				map[string]string{"leisure": "park"}, goldenPolygon(lon+0.01, lat, 0.002)),
 		}}
@@ -351,7 +302,7 @@ func TestGoldenIngest(t *testing.T) {
 		if st.FeaturesRead != 2 || st.Candidates != 2 || st.Created != 0 {
 			t.Fatalf("expected 2 candidates created=0, got %+v", st)
 		}
-		// Both stay in the raw layer only — no t_spots rows at all.
+
 		if st.BelowFloor != 2 {
 			t.Fatalf("expected below_floor=2, got %+v", st)
 		}
@@ -359,7 +310,7 @@ func TestGoldenIngest(t *testing.T) {
 			`SELECT count(*) FROM t_spots WHERE city_pack_id = $1`, pack.ID); n != 0 {
 			t.Fatalf("expected 0 spots below floor, got %d", n)
 		}
-		// …but the raw rows are kept for audit with role='candidate'.
+
 		if n := goldenCount(t, pool, `
 			SELECT count(*) FROM t_ingest_features
 			WHERE pack_id = $1 AND role = 'candidate'`, pack.ID); n != 2 {
@@ -372,10 +323,6 @@ func TestGoldenIngest(t *testing.T) {
 		pack := seedGoldenPack(t, pool, slug)
 		src := &fixtureSource{features: parkFixture(slug, 5.25, 52.25)}
 
-		// Relax the close-fraction guard: this pack has a single active
-		// spot, so closing it would trip MaxCloseFraction=0.15 (1 > 0.15).
-		// The guard itself is covered elsewhere; here we test missing-run
-		// semantics.
 		pol := osm.DefaultPolicy
 		pol.MaxCloseFraction = 1.0
 
@@ -384,8 +331,6 @@ func TestGoldenIngest(t *testing.T) {
 			t.Fatalf("seed run: expected created=1 activated=1, got %+v", st1)
 		}
 
-		// Empty extract, run 1: all 3 sources (park + 2 absorbed children)
-		// bump missing_runs to 1 — below CloseAfterMissing(2), stays active.
 		src.features = nil
 		stEmpty1 := runGolden(t, ctx, pool, src, pack, pol)
 		if stEmpty1.FeaturesRead != 0 || stEmpty1.Closed != 0 {
@@ -401,10 +346,6 @@ func TestGoldenIngest(t *testing.T) {
 			t.Fatalf("after empty run 1: expected still-active spot, got %+v", spots)
 		}
 
-		// Empty extract, run 2: missing_runs hits 2 >= CloseAfterMissing →
-		// the spot closes with reason source_missing. Two empty runs total,
-		// not three: BumpMissing increments once per run and the close
-		// threshold is inclusive (>=).
 		stEmpty2 := runGolden(t, ctx, pool, src, pack, pol)
 		if stEmpty2.Closed != 1 {
 			t.Fatalf("empty run 2: expected closed=1, got %+v", stEmpty2)
@@ -414,9 +355,6 @@ func TestGoldenIngest(t *testing.T) {
 			t.Fatalf("expected closed/source_missing spot, got %+v", spots)
 		}
 
-		// The source comes back with IDENTICAL content (same hash): the
-		// importer closed it, so it must reopen — hash-only detection used
-		// to leave it closed forever.
 		src.features = parkFixture(slug, 5.25, 52.25)
 		stBack := runGolden(t, ctx, pool, src, pack, pol)
 		spots = goldenSpots(t, pool, pack.ID)
@@ -426,9 +364,7 @@ func TestGoldenIngest(t *testing.T) {
 	})
 
 	t.Run("line_area_twin_collapses", func(t *testing.T) {
-		// osmium exports a closed way twice (LineString + Polygon, same id
-		// once normalized). The raw merge must keep only the polygon: one
-		// spot, with its area.
+
 		slug := "golden-twin"
 		pack := seedGoldenPack(t, pool, slug)
 		lon, lat, d := 5.05, 52.05, 0.002
@@ -448,7 +384,7 @@ func TestGoldenIngest(t *testing.T) {
 			WHERE city_pack_id = $1 AND area IS NOT NULL`, pack.ID); n != 1 {
 			t.Fatalf("expected the single spot to keep its polygon, got %d with area", n)
 		}
-		// Anchor = ST_PointOnSurface → inside the area.
+
 		if n := goldenCount(t, pool, `SELECT count(*) FROM t_spots
 			WHERE city_pack_id = $1 AND ST_Intersects(area, geom::geometry)`, pack.ID); n != 1 {
 			t.Fatalf("expected anchor inside area")
@@ -464,7 +400,7 @@ func TestGoldenIngest(t *testing.T) {
 			WHERE city_pack_id = $1`, pack.ID); err != nil {
 			t.Fatal(err)
 		}
-		// Upstream rename must NOT overwrite the curated row.
+
 		src.features[0].Tags = map[string]string{"leisure": "park", "name": "Upstream Rename", "access": "yes"}
 		st := runGolden(t, ctx, pool, src, pack, osm.Policy{})
 		if st.SkippedCurated != 1 || st.Updated != 0 {
@@ -482,9 +418,6 @@ func TestGoldenIngest(t *testing.T) {
 		src := &fixtureSource{features: parkFixture(slug, 5.22, 52.22)}
 		runGolden(t, ctx, pool, src, pack, osm.Policy{})
 
-		// Truncated extract: the guard must abort on the FIRST absent run
-		// (before raw layer and amenities get replaced), not only once
-		// missing_runs reaches CloseAfterMissing.
 		src.features = nil
 		svc := &ingest.Service{Src: src, Store: persistence.NewIngestRepo(pool)}
 		st, err := svc.RunPack(ctx, pack, 0, false)
@@ -499,7 +432,7 @@ func TestGoldenIngest(t *testing.T) {
 			JOIN t_spots sp ON sp.id = a.spot_id WHERE sp.city_pack_id = $1`, pack.ID); n != 1 {
 			t.Fatalf("amenities must survive an aborted run, got %d", n)
 		}
-		// Operator override commits.
+
 		svc.ForceGuard = true
 		if st, err := svc.RunPack(ctx, pack, 0, false); err != nil || !st.GuardForced {
 			t.Fatalf("forced run: err=%v stats=%+v", err, st)
@@ -507,8 +440,7 @@ func TestGoldenIngest(t *testing.T) {
 	})
 
 	t.Run("amenity_on_point_only_site", func(t *testing.T) {
-		// Orphan-cluster sites have no polygon; they used to never receive
-		// amenities (the query required area IS NOT NULL).
+
 		slug := "golden-point-amenity"
 		pack := seedGoldenPack(t, pool, slug)
 		lon, lat := 5.32, 52.32
@@ -519,9 +451,9 @@ func TestGoldenIngest(t *testing.T) {
 		}
 		feats = append(feats,
 			goldenFeature("n-water-"+slug, 1, map[string]string{"amenity": "drinking_water"},
-				goldenPoint(lon+0.0005, lat)), // ~35 m
+				goldenPoint(lon+0.0005, lat)),
 			goldenFeature("n-far-"+slug, 1, map[string]string{"amenity": "toilets"},
-				goldenPoint(lon+0.01, lat))) // ~690 m — out of radius
+				goldenPoint(lon+0.01, lat)))
 		st := runGolden(t, ctx, pool, &fixtureSource{features: feats}, pack, osm.Policy{})
 		if st.OrphanSites != 1 || st.AmenitiesLinked != 1 {
 			t.Fatalf("expected orphan_sites=1 amenities_linked=1, got %+v", st)

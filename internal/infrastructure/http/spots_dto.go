@@ -9,29 +9,24 @@ import (
 )
 
 type geoJSONPoint struct {
-	Type        string    `json:"type"` // "Point"
+	Type        string    `json:"type"`
 	Coordinates []float64 `json:"coordinates"`
 }
 
 type geoJSONFeature struct {
-	Type       string         `json:"type"` // "Feature"
+	Type       string         `json:"type"`
 	Geometry   geoJSONPoint   `json:"geometry"`
 	Properties map[string]any `json:"properties"`
 }
 
 type geoJSONFeatureCollection struct {
-	Type     string           `json:"type"` // "FeatureCollection"
+	Type     string           `json:"type"`
 	Features []geoJSONFeature `json:"features"`
-	// Truncated / Total are only present when a wide viewport was capped to
-	// the best-scoring spots: Total is the number of matching spots.
+
 	Truncated bool `json:"truncated,omitempty"`
 	Total     int  `json:"total,omitempty"`
 }
 
-// toFeatureCollection renders the viewport/batch result. withArea / withScores
-// add the optional `area` / `scores` properties (absent otherwise); both are
-// pre-serialized JSON from the query, so `area` is an explicit null for point
-// spots and `scores` is [] when no hour has a score.
 func toFeatureCollection(items []spots.SpotWithScore, when time.Time, withArea, withScores bool) geoJSONFeatureCollection {
 	features := make([]geoJSONFeature, 0, len(items))
 	for _, item := range items {
@@ -94,7 +89,6 @@ func scoreProps(s *spots.ScoreSnapshot) map[string]any {
 	}
 }
 
-// detailResponse is the JSON shape for GET /v1/spots/{id}.
 type detailResponse struct {
 	ID             string          `json:"id"`
 	Kind           string          `json:"kind"`
@@ -108,7 +102,7 @@ type detailResponse struct {
 	LastVerifiedAt *time.Time      `json:"lastVerifiedAt"`
 	Amenities      []spots.Amenity `json:"amenities"`
 	Sources        []spots.Source  `json:"sources"`
-	// WeatherSource: "weatherkit" | "openmeteo" | null (no weather yet).
+
 	WeatherSource *string `json:"weatherSource"`
 }
 

@@ -1,4 +1,3 @@
-// Package httpx provides shared HTTP helpers: RFC 7807 problem details.
 package httpx
 
 import (
@@ -11,7 +10,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// Stable machine-readable error codes. Clients switch on Code, never Title.
 const (
 	CodeBadRequest    = "bad_request"
 	CodeInvalidID     = "invalid_id"
@@ -27,26 +25,28 @@ const (
 	CodeRateLimited   = "rate_limited"
 	CodePlanLimit     = "plan_limit"
 	CodeInternal      = "internal_error"
-	// CodePayloadTooLarge: request body over the size limit (413).
+
 	CodePayloadTooLarge = "payload_too_large"
-	// CodeUnauthorized: missing/invalid staff credentials (401).
+
 	CodeUnauthorized = "unauthorized"
-	// CodeDeviceLimit: subscription already linked to the max number of
-	// active devices (409).
+
 	CodeDeviceLimit = "device_limit"
-	// CodeAccountMismatch: the transaction's appAccountToken belongs to a
-	// different device (403).
+
 	CodeAccountMismatch = "account_mismatch"
-	// CodeUnavailable: a required server-side capability is not configured
-	// (503), e.g. App Store verification.
+
+	CodeForbidden = "forbidden"
+
+	CodeWrongPassword = "wrong_password"
+
+	CodeWeakPassword = "weak_password"
+
+	CodePasswordUnchanged = "password_unchanged"
+
 	CodeUnavailable = "service_unavailable"
-	// CodeTimeout: the request exceeded a server-side deadline (statement
-	// or lock timeout) — transient, safe to retry (503).
+
 	CodeTimeout = "timeout"
 )
 
-// Problem is an RFC 7807 problem-details body extended with a stable
-// machine-readable Code and the RequestID for support correlation.
 type Problem struct {
 	Type      string `json:"type"`
 	Code      string `json:"code"`
@@ -57,7 +57,6 @@ type Problem struct {
 	RequestID string `json:"requestId,omitempty"`
 }
 
-// WriteProblem responds with a problem+json body.
 func WriteProblem(c *gin.Context, status int, code, title, detail string) {
 	c.Header("Content-Type", "application/problem+json")
 	c.JSON(status, Problem{
@@ -71,9 +70,6 @@ func WriteProblem(c *gin.Context, status int, code, title, detail string) {
 	})
 }
 
-// isDBTimeout reports whether err is a server-side deadline expiry rather
-// than a bug: context deadline, Postgres statement_timeout (57014) or
-// lock_timeout (55P03). These are transient — the client should retry.
 func isDBTimeout(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return true
@@ -85,9 +81,6 @@ func isDBTimeout(err error) bool {
 	return false
 }
 
-// WriteError logs the underlying error server-side (with request id for
-// correlation) and returns a generic error — internals are never leaked.
-// DB timeouts map to 503 (retryable) instead of 500.
 func WriteError(c *gin.Context, err error) {
 	slog.ErrorContext(c.Request.Context(), "request failed",
 		"request_id", c.GetString("requestID"),

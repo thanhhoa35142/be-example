@@ -14,8 +14,6 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/modules/spots"
 )
 
-// --- Output DTOs (flat camelCase JSON for agent consumption) ---
-
 type scoreOut struct {
 	Score      *int           `json:"score,omitempty"`
 	Confidence *int           `json:"confidence,omitempty"`
@@ -59,13 +57,11 @@ type packOut struct {
 	Name        string     `json:"name"`
 	Country     string     `json:"country"`
 	TZ          string     `json:"tz"`
-	Center      [2]float64 `json:"center"` // lon, lat
-	BBox        [4]float64 `json:"bbox"`   // west, south, east, north
+	Center      [2]float64 `json:"center"`
+	BBox        [4]float64 `json:"bbox"`
 	ActiveSpots int        `json:"activeSpots"`
 }
 
-// All MCP tools are read-only against closed-world data (our own DB), so
-// every tool carries the same annotations — clients can auto-approve them.
 var readOnlyAnnotations = &mcp.ToolAnnotations{
 	ReadOnlyHint:   true,
 	IdempotentHint: true,
@@ -107,8 +103,6 @@ func toSpotOut(s spots.Spot, score *spots.ScoreSnapshot) spotOut {
 	}
 }
 
-// --- Tool input types ---
-
 type bboxArgs struct {
 	West  float64 `json:"west" jsonschema:"western longitude (degrees)"`
 	South float64 `json:"south" jsonschema:"southern latitude (degrees)"`
@@ -129,10 +123,6 @@ type recommendArgs struct {
 	When    string  `json:"when,omitempty" jsonschema:"optional RFC3339 timestamp; defaults to current hour"`
 }
 
-// toolError maps a service error to a message that is safe to show an agent.
-// Known domain errors get a clean, stable message; anything else (database,
-// driver, internal) is logged server-side and replaced by a generic one so no
-// internals leak through the MCP channel.
 func toolError(ctx context.Context, tool string, err error) error {
 	var merged spots.MergedError
 	switch {
@@ -171,8 +161,6 @@ func parseSpotID(s string) (uuid.UUID, error) {
 	}
 	return id, nil
 }
-
-// --- Registration ---
 
 func registerTools(s *mcp.Server, spotsSvc *spots.Service, recSvc *recommendations.Service, keysSvc *apikeys.Service) {
 	mcp.AddTool(s, &mcp.Tool{

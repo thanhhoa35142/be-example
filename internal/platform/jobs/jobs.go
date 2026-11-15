@@ -1,5 +1,3 @@
-// Package jobs runs background jobs guarded by Postgres advisory locks so
-// overlapping workers never execute the same job twice.
 package jobs
 
 import (
@@ -13,8 +11,6 @@ import (
 
 var ErrLockNotAcquired = errors.New("job lock not acquired")
 
-// Acquire takes the session-level advisory lock for name and returns a
-// release function. Returns ErrLockNotAcquired when another session holds it.
 func Acquire(ctx context.Context, pool *pgxpool.Pool, name string) (func(), error) {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
@@ -36,9 +32,6 @@ func Acquire(ctx context.Context, pool *pgxpool.Pool, name string) (func(), erro
 	}, nil
 }
 
-// RunWithLock executes fn while holding a session-level advisory lock derived
-// from name. If another session holds the lock, it returns ErrLockNotAcquired
-// without running fn.
 func RunWithLock(ctx context.Context, pool *pgxpool.Pool, name string, fn func(ctx context.Context) error) error {
 	release, err := Acquire(ctx, pool, name)
 	if err != nil {

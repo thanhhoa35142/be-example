@@ -2,6 +2,7 @@ package http
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -10,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/thanhhoa35142/be-example/internal/modules/adminauth"
 	"github.com/thanhhoa35142/be-example/internal/platform/ratelimit"
 )
 
@@ -51,7 +54,7 @@ func TestRateLimitClassesAndExemptions(t *testing.T) {
 	r.POST("/v1/x", ok)
 	r.POST("/v1/devices", ok)
 
-	for i := 0; i < 50; i++ { // health probes are never limited
+	for i := 0; i < 50; i++ {
 		if w := do(r, "GET", "/healthz", "9.9.9.9", nil, ""); w.Code != 200 {
 			t.Fatalf("healthz limited at %d", i)
 		}
@@ -71,7 +74,7 @@ func TestRateLimitClassesAndExemptions(t *testing.T) {
 	if w.Header().Get("Content-Type") != "application/problem+json" {
 		t.Fatalf("content type %q", w.Header().Get("Content-Type"))
 	}
-	// Other IPs and the write budget are independent.
+
 	if w := do(r, "GET", "/v1/x", "2.2.2.2", nil, ""); w.Code != 200 {
 		t.Fatalf("other ip: %d", w.Code)
 	}
@@ -83,7 +86,7 @@ func TestRateLimitClassesAndExemptions(t *testing.T) {
 	if w := do(r, "POST", "/v1/x", "1.1.1.1", nil, ""); w.Code != 429 {
 		t.Fatalf("write over budget: %d", w.Code)
 	}
-	// POST /v1/devices has its own (tighter) bucket.
+
 	if w := do(r, "POST", "/v1/devices", "3.3.3.3", nil, ""); w.Code != 200 {
 		t.Fatalf("device 1: %d", w.Code)
 	}
@@ -108,8 +111,7 @@ func TestClientIPIgnoresSpoofedForwardedFor(t *testing.T) {
 		r.GET("/v1/probe", ok)
 		return r
 	}
-	// Default: no trusted proxy. Rotating X-Forwarded-For must not mint
-	// fresh buckets.
+
 	r := build(nil)
 	for i := 0; i < 2; i++ {
 		do(r, "GET", "/v1/probe", "4.4.4.4", map[string]string{"X-Forwarded-For": "10.0.0." + string(rune('1'+i))}, "")
@@ -117,7 +119,7 @@ func TestClientIPIgnoresSpoofedForwardedFor(t *testing.T) {
 	if w := do(r, "GET", "/v1/probe", "4.4.4.4", map[string]string{"X-Forwarded-For": "10.9.9.9"}, ""); w.Code != 429 {
 		t.Fatalf("spoofed XFF bypassed the limiter: %d", w.Code)
 	}
-	// When the peer IS a configured proxy, XFF identifies the client.
+
 	r = build([]string{"4.4.4.4"})
 	for i := 0; i < 2; i++ {
 		do(r, "GET", "/v1/probe", "4.4.4.4", map[string]string{"X-Forwarded-For": "7.7.7.7"}, "")
@@ -153,7 +155,7 @@ func TestBodyLimit(t *testing.T) {
 	if w.Code != 413 || problemCode(t, w) != "payload_too_large" {
 		t.Fatalf("over limit: %d %s", w.Code, w.Body)
 	}
-	// Chunked/unknown length bodies are capped too.
+
 	req := httptest.NewRequest("POST", "/small", io_NoLen(bytes.NewReader([]byte(pad(200)))))
 	req.ContentLength = -1
 	rec := httptest.NewRecorder()
@@ -216,7 +218,7 @@ func TestAdminAuth(t *testing.T) {
 	build := func(token string) *gin.Engine {
 		r := gin.New()
 		r.Use(RequestID())
-		g := r.Group("/admin", AdminAudit(), AdminAuth(token, ratelimit.New(ratelimit.PerMinute(60, 3))))
+		g := r.Group("/admin", AdminAudit(), AdminAuth(token, nil, ratelimit.New(ratelimit.PerMinute(60, 3))))
 		g.GET("/x", ok)
 		g.POST("/x", ok)
 		return r
@@ -233,8 +235,7 @@ func TestAdminAuth(t *testing.T) {
 			t.Errorf("header %q: %d", h, w.Code)
 		}
 	}
-	// 3 failures burn the per-IP budget; then even the right token is 429
-	// for that IP, while another IP is unaffected.
+
 	w := do(r, "GET", "/admin/x", "2.2.2.2", auth("Bearer s3cret"), "")
 	if w.Code != 429 || w.Header().Get("Retry-After") == "" || problemCode(t, w) != "rate_limited" {
 		t.Fatalf("lockout: %d %s", w.Code, w.Body)
@@ -242,12 +243,12 @@ func TestAdminAuth(t *testing.T) {
 	if w := do(r, "GET", "/admin/x", "5.5.5.5", auth("Bearer s3cret"), ""); w.Code != 200 {
 		t.Fatalf("other ip: %d", w.Code)
 	}
-	// Failure responses are problem JSON, not ad-hoc gin.H.
+
 	w = do(r, "GET", "/admin/x", "6.6.6.6", auth("Bearer nope"), "")
 	if w.Code != 401 || problemCode(t, w) != "unauthorized" || w.Header().Get("WWW-Authenticate") == "" {
 		t.Fatalf("401 shape: %d %s", w.Code, w.Body)
 	}
-	// Disabled surface.
+
 	if w := do(build(""), "GET", "/admin/x", "1.1.1.1", auth("Bearer "), ""); w.Code != 404 || problemCode(t, w) != "not_found" {
 		t.Fatalf("disabled: %d %s", w.Code, w.Body)
 	}
@@ -262,7 +263,7 @@ func TestAdminAuditLogsMutatingRequestsWithoutToken(t *testing.T) {
 
 	r := gin.New()
 	r.Use(RequestID())
-	g := r.Group("/admin", AdminAudit(), AdminAuth("s3cret", ratelimit.New(ratelimit.PerMinute(60, 5))))
+	g := r.Group("/admin", AdminAudit(), AdminAuth("s3cret", nil, ratelimit.New(ratelimit.PerMinute(60, 5))))
 	g.GET("/x", ok)
 	g.POST("/x", ok)
 
@@ -284,5 +285,91 @@ func TestAdminAuditLogsMutatingRequestsWithoutToken(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "s3cret") || strings.Contains(buf.String(), "wrong-token") {
 		t.Fatal("token leaked into audit log")
+	}
+}
+
+type fakeSessions struct {
+	validToken string
+	userID     uuid.UUID
+}
+
+func (f fakeSessions) Authenticate(_ context.Context, token string) (*adminauth.Session, *adminauth.User, error) {
+	if token != f.validToken {
+		return nil, nil, adminauth.ErrInvalidSession
+	}
+	return &adminauth.Session{ID: uuid.New(), UserID: f.userID},
+		&adminauth.User{ID: f.userID, Email: "ops@example.com"}, nil
+}
+
+func TestAdminAuthSessionCookie(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	uid := uuid.New()
+	sessions := fakeSessions{validToken: "tok-good", userID: uid}
+	r := gin.New()
+	r.Use(RequestID())
+	g := r.Group("/admin", AdminAudit(), AdminAuth("", sessions, ratelimit.New(ratelimit.PerMinute(60, 50))))
+	g.GET("/x", func(c *gin.Context) {
+		ok(c)
+	})
+
+	good := map[string]string{"Cookie": AdminSessionCookie + "=tok-good"}
+	if w := do(r, "GET", "/admin/x", "1.1.1.1", good, ""); w.Code != 200 {
+		t.Fatalf("valid session: %d", w.Code)
+	}
+	bad := map[string]string{"Cookie": AdminSessionCookie + "=tok-bad"}
+	if w := do(r, "GET", "/admin/x", "1.1.1.1", bad, ""); w.Code != 401 {
+		t.Fatalf("bad session: %d", w.Code)
+	}
+	if w := do(r, "GET", "/admin/x", "1.1.1.1", nil, ""); w.Code != 401 {
+		t.Fatalf("no credentials: %d", w.Code)
+	}
+}
+
+func TestAdminCSRF(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	build := func(origins []string) *gin.Engine {
+		r := gin.New()
+		r.Use(RequestID(), AdminCSRF(origins))
+		r.POST("/x", ok)
+		r.GET("/x", ok)
+		return r
+	}
+	r := build(nil)
+
+	if w := do(r, "GET", "/x", "1.1.1.1", nil, ""); w.Code != 200 {
+		t.Fatalf("GET: %d", w.Code)
+	}
+
+	if w := do(r, "POST", "/x", "1.1.1.1", nil, ""); w.Code != 403 || problemCode(t, w) != "forbidden" {
+		t.Fatalf("missing header: %d %s", w.Code, w.Body)
+	}
+
+	if w := do(r, "POST", "/x", "1.1.1.1", map[string]string{
+		"Authorization": "Bearer x", AdminCSRFHeader: "",
+	}, ""); w.Code != 200 {
+		t.Fatalf("bearer: %d", w.Code)
+	}
+
+	if w := do(r, "POST", "/x", "1.1.1.1", map[string]string{AdminCSRFHeader: "1"}, ""); w.Code != 200 {
+		t.Fatalf("no origin: %d", w.Code)
+	}
+
+	if w := do(r, "POST", "/x", "1.1.1.1", map[string]string{
+		AdminCSRFHeader: "1", "Origin": "https://admin.example.com", "X-Forwarded-Host": "admin.example.com",
+	}, ""); w.Code != 200 {
+		t.Fatalf("xfh origin: %d %s", w.Code, w.Body)
+	}
+
+	if w := do(r, "POST", "/x", "1.1.1.1", map[string]string{
+		AdminCSRFHeader: "1", "Origin": "https://evil.example.com", "X-Forwarded-Host": "admin.example.com",
+	}, ""); w.Code != 403 {
+		t.Fatalf("evil origin: %d", w.Code)
+	}
+
+	r2 := build([]string{"https://ops.example.com"})
+	if w := do(r2, "POST", "/x", "1.1.1.1", map[string]string{
+		AdminCSRFHeader: "1", "Origin": "https://ops.example.com",
+	}, ""); w.Code != 200 {
+		t.Fatalf("allowlisted origin: %d", w.Code)
 	}
 }

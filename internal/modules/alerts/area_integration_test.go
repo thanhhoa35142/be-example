@@ -14,8 +14,6 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/platform/testdb"
 )
 
-// onlyRule restricts Evaluate to one rule so the test never touches real
-// rules in the dev database.
 type onlyRule struct {
 	alerts.Repository
 	id uuid.UUID
@@ -39,9 +37,6 @@ func (c *captureSender) Send(_ context.Context, d alerts.Delivery) error {
 	return nil
 }
 
-// TestAreaRuleEvaluate creates an area rule over Amsterdam from a coarse
-// lat/lon, evaluates it in a daytime window and checks the pushed spot is the
-// best active spot within the radius of the cell center.
 func TestAreaRuleEvaluate(t *testing.T) {
 	dsn := testdb.DSN(t)
 	ctx := context.Background()
@@ -53,8 +48,6 @@ func TestAreaRuleEvaluate(t *testing.T) {
 	q := persistence.New(pool)
 	repo := persistence.NewAlertsRepo(q, pool)
 
-	// A noon-UTC hour (13:00 Amsterdam in winter, 14:00 in summer) that has
-	// scores; daytime so the darkness cap does not zero everything.
 	var hour time.Time
 	for i := 0; i < 7 && hour.IsZero(); i++ {
 		h := time.Now().UTC().Truncate(24*time.Hour).AddDate(0, 0, i).Add(12 * time.Hour)
@@ -80,7 +73,7 @@ func TestAreaRuleEvaluate(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM t_devices WHERE id = $1`, dev) }) // cascades rules/deliveries
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM t_devices WHERE id = $1`, dev) })
 
 	svc := alerts.NewService(repo, entitlement.NewService(persistence.NewEntitlementRepo(q, pool)), nil)
 	radius := 3000
@@ -98,7 +91,6 @@ func TestAreaRuleEvaluate(t *testing.T) {
 		t.Fatal("no area center")
 	}
 
-	// Second rule on a Free device must hit the plan limit.
 	if _, err := svc.Create(ctx, dev, alerts.RuleInput{
 		Area: &alerts.LatLon{Lat: 52.0, Lon: 4.3}, RadiusM: &radius,
 		MinScore: 0, DaysMask: 127, StartLocal: "00:00", EndLocal: "23:59", TZ: "UTC",
@@ -106,7 +98,6 @@ func TestAreaRuleEvaluate(t *testing.T) {
 		t.Fatal("expected plan limit for second rule on free plan")
 	}
 
-	// Expected best spot, computed independently of the production query.
 	lat, lon, _ := rule.AreaCenter()
 	var wantID uuid.UUID
 	var wantScore int
@@ -137,7 +128,6 @@ func TestAreaRuleEvaluate(t *testing.T) {
 		t.Fatalf("delivery %+v, want spot %s score %d", d, wantID, wantScore)
 	}
 
-	// Same window again: de-duplicated.
 	st, err = ev.Evaluate(ctx, now.Add(5*time.Minute))
 	if err != nil || st.Fired != 0 {
 		t.Fatalf("second evaluate fired again: %+v err=%v", st, err)

@@ -7,9 +7,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// NewPool opens a pgxpool with per-connection runtime GUCs (statement_timeout,
-// lock_timeout, jit, …) applied to every connection the pool creates.
-// maxConns <= 0 keeps the pgxpool default.
 func NewPool(ctx context.Context, databaseURL string, runtimeParams map[string]string, maxConns int32) (*pgxpool.Pool, error) {
 	poolCfg, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {

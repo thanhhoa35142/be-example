@@ -19,21 +19,17 @@ func NewService(repo Repository) *Service {
 	return &Service{repo: repo, now: time.Now}
 }
 
-// writeBatchSize is the number of estimate rows per upsert statement.
 const writeBatchSize = 10000
 
 type Stats struct {
 	Spots   int
-	Slots   int // model slots computed
-	Written int // rows actually inserted or changed (unchanged rows are skipped)
+	Slots   int
+	Written int
 	Skipped int
-	// Deleted is stale community estimates removed (AggregateCommunity only).
+
 	Deleted int
 }
 
-// Refresh recomputes the weekly crowd profile (dow × hour) for every active
-// spot and upserts crowd_estimate rows with source='model'. Runs daily; the
-// model is cheap and weather inputs change hourly.
 func (s *Service) Refresh(ctx context.Context) (Stats, error) {
 	spots, err := s.repo.Spots(ctx)
 	if err != nil {
@@ -47,15 +43,13 @@ func (s *Service) Refresh(ctx context.Context) (Stats, error) {
 		return Stats{}, nil
 	}
 
-	// Weather window: covers every "next occurrence" date (today..+6d local)
-	// regardless of spot timezone.
 	from := s.now().UTC().Add(-24 * time.Hour)
 	to := s.now().UTC().Add(8 * 24 * time.Hour)
 
 	cellSet := map[int64]struct{}{}
 	countrySet := map[string]struct{}{}
 	for _, sp := range spots {
-		// Weather rows live on the coarser weather grid.
+
 		cellSet[geo.WeatherCellID(sp.CellID)] = struct{}{}
 		countrySet[sp.Country] = struct{}{}
 	}
@@ -80,7 +74,6 @@ func (s *Service) Refresh(ctx context.Context) (Stats, error) {
 	}
 	holIdx := indexHolidays(holRows)
 
-	// Pass 1: raw estimates per spot for normalization.
 	type estimate struct {
 		spot Spot
 		raw  [7][24]float64
@@ -95,7 +88,6 @@ func (s *Service) Refresh(ctx context.Context) (Stats, error) {
 		ests = append(ests, estimate{spot: sp, raw: raw})
 	}
 
-	// Pass 2: normalize per (kind, city_pack) peak → 0-100, then write.
 	peaks := map[peakKey]float64{}
 	for _, e := range ests {
 		for _, row := range e.raw {
@@ -152,12 +144,11 @@ type peakKey struct {
 	city uuid.UUID
 }
 
-// estimateSpot computes the raw (unnormalized) weekly profile for one spot.
 func (s *Service) estimateSpot(
 	sp Spot,
 	curves map[CurveKey]float64,
 	weatherIdx map[int64]map[time.Time]WeatherPoint,
-	holIdx map[string]map[string]string, // country -> "YYYY-MM-DD" -> kind
+	holIdx map[string]map[string]string,
 ) ([7][24]float64, error) {
 	var raw [7][24]float64
 
@@ -173,7 +164,7 @@ func (s *Service) estimateSpot(
 	cellWeather := weatherIdx[geo.WeatherCellID(sp.CellID)]
 
 	for dow := 0; dow < 7; dow++ {
-		// Next calendar date (in spot-local time) with this weekday.
+
 		date := today.AddDate(0, 0, (dow-todayDow+7)%7)
 		dateKey := date.Format("2006-01-02")
 		holKind := holIdx[sp.Country][dateKey]
@@ -195,16 +186,8 @@ func (s *Service) estimateSpot(
 	return raw, nil
 }
 
-// MinCommunityReports is the minimum number of DISTINCT devices that must have
-// voted on a slot before community data overrides the model (spec: "đủ số báo
-// cáo tối thiểu"). Each device counts once and its own votes are averaged
-// first, so one device (or a few fake ones) cannot set a spot's crowd level.
-// crowd_estimate.n_reports stores this distinct-device count.
 const MinCommunityReports = 5
 
-// AggregateCommunity folds crowd_report rows into crowd_estimate slots with
-// source='community', then drops stale community rows so the model reclaims
-// them. Level mapping: reports are 1-3, mapped to 10/50/90 on the 0-100 scale.
 func (s *Service) AggregateCommunity(ctx context.Context) (Stats, error) {
 	slots, err := s.repo.CommunityStats(ctx, MinCommunityReports)
 	if err != nil {
@@ -212,7 +195,7 @@ func (s *Service) AggregateCommunity(ctx context.Context) (Stats, error) {
 	}
 	var st Stats
 	for _, slot := range slots {
-		// avg level 1..3 → 10..90 linearly.
+
 		level := int((slot.AvgLevel-1)*40 + 10 + 0.5)
 		if level < 0 {
 			level = 0
@@ -255,7 +238,7 @@ func indexHolidays(rows []Holiday) map[string]map[string]string {
 			m[h.Country] = byDate
 		}
 		key := h.Date.UTC().Format("2006-01-02")
-		// Prefer 'public' over 'school' when both exist for a date.
+
 		if h.Kind == "public" || byDate[key] != "public" {
 			byDate[key] = h.Kind
 		}

@@ -11,13 +11,11 @@ import (
 	"github.com/google/uuid"
 )
 
-// memRepo is an in-memory Repository mirroring the SQL semantics that matter:
-// the last_signed_date guard, terminal revocation and the device cap.
 type memRepo struct {
 	devices map[string]bool
 	subs    map[string]Subscription
-	links   map[string]map[string]bool // otid -> devices
-	notes   map[string]string          // uuid -> status
+	links   map[string]map[string]bool
+	notes   map[string]string
 }
 
 func newMemRepo() *memRepo {
@@ -121,16 +119,15 @@ func TestLinkAccountTokenBinding(t *testing.T) {
 	repo.devices[dev] = true
 	now := time.Now()
 
-	// Token naming another device: refused.
 	_, err := svc.LinkTransaction(t.Context(), dev, pki.tx(t, "1", now, fmt.Sprintf(`,"appAccountToken":%q`, other)))
 	if !errors.Is(err, ErrAccountTokenMismatch) {
 		t.Fatalf("mismatch: %v", err)
 	}
-	// Token equal to the device (any case): accepted.
+
 	if _, err := svc.LinkTransaction(t.Context(), dev, pki.tx(t, "1", now, fmt.Sprintf(`,"appAccountToken":%q`, strings.ToUpper(dev)))); err != nil {
 		t.Fatalf("matching token: %v", err)
 	}
-	// No token / non-UUID token: accepted (the app does not set it yet).
+
 	if _, err := svc.LinkTransaction(t.Context(), dev, pki.tx(t, "2", now, ``)); err != nil {
 		t.Fatalf("no token: %v", err)
 	}
@@ -155,7 +152,7 @@ func TestLinkDeviceCap(t *testing.T) {
 	if _, err := svc.LinkTransaction(t.Context(), extra, pki.tx(t, "1", now.Add(time.Minute), ``)); !errors.Is(err, ErrDeviceLimit) {
 		t.Fatalf("over cap: %v", err)
 	}
-	// Re-linking an already-linked device still works at the cap.
+
 	if _, err := svc.LinkTransaction(t.Context(), last, pki.tx(t, "1", now.Add(2*time.Minute), ``)); err != nil {
 		t.Fatalf("relink at cap: %v", err)
 	}
@@ -167,11 +164,10 @@ func TestRefundedCannotBeReactivatedByOlderTransaction(t *testing.T) {
 	repo.devices[dev] = true
 	t0 := time.Now().Add(-48 * time.Hour)
 
-	// 1. Purchase (signed t0), linked.
 	if e, err := svc.LinkTransaction(t.Context(), dev, pki.tx(t, "1", t0, ``)); err != nil || e.Plan != PlanPlus {
 		t.Fatalf("purchase: %v %v", e, err)
 	}
-	// 2. Refund notification signed t0+1h, with a revoked inner transaction.
+
 	t1 := t0.Add(time.Hour)
 	revoked := pki.tx(t, "1", t1, fmt.Sprintf(`,"revocationDate":%d`, t1.UnixMilli()))
 	if err := svc.ProcessNotification(t.Context(), pki.notification(t, uuid.NewString(), t1, revoked)); err != nil {
@@ -180,7 +176,7 @@ func TestRefundedCannotBeReactivatedByOlderTransaction(t *testing.T) {
 	if e, _ := svc.Entitlement(t.Context(), dev); e.Plan != PlanFree {
 		t.Fatal("refund did not revoke")
 	}
-	// 3. Replay the old, validly signed pre-refund transaction (signedDate t0).
+
 	e, err := svc.LinkTransaction(t.Context(), dev, pki.tx(t, "1", t0, ``))
 	if err != nil {
 		t.Fatal(err)
@@ -188,7 +184,7 @@ func TestRefundedCannotBeReactivatedByOlderTransaction(t *testing.T) {
 	if e.Plan != PlanFree || repo.subs["1"].Status != "revoked" {
 		t.Fatalf("old transaction reactivated a refunded subscription: plan=%s status=%s", e.Plan, repo.subs["1"].Status)
 	}
-	// 4. Even a newer-signed, non-revoked transaction cannot un-revoke.
+
 	t2 := t1.Add(time.Hour)
 	if e, _ := svc.LinkTransaction(t.Context(), dev, pki.tx(t, "1", t2, ``)); e.Plan != PlanFree || repo.subs["1"].Status != "revoked" {
 		t.Fatalf("newer non-revoked transaction un-revoked: status=%s", repo.subs["1"].Status)
@@ -199,7 +195,6 @@ func TestNotificationOrderingAndNestedVerification(t *testing.T) {
 	svc, pki, repo := newTestService(t, defaultCfg())
 	t0 := time.Now().Add(-time.Hour)
 
-	// Late notification (signed before what we already hold) is ignored.
 	if err := svc.ProcessNotification(t.Context(), pki.notification(t, uuid.NewString(), t0.Add(10*time.Minute), pki.tx(t, "1", t0.Add(10*time.Minute), ``))); err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +205,7 @@ func TestNotificationOrderingAndNestedVerification(t *testing.T) {
 	if repo.notes[stale] != "ignored" {
 		t.Fatalf("stale notification status = %q", repo.notes[stale])
 	}
-	// Newer notification applies and the stored date is Apple's signedDate.
+
 	fresh := uuid.NewString()
 	t1 := t0.Add(30 * time.Minute)
 	if err := svc.ProcessNotification(t.Context(), pki.notification(t, fresh, t1, pki.tx(t, "1", t1, ``))); err != nil {
@@ -220,8 +215,6 @@ func TestNotificationOrderingAndNestedVerification(t *testing.T) {
 		t.Fatalf("fresh: %q last=%v", repo.notes[fresh], repo.subs["1"].LastSignedDate)
 	}
 
-	// A nested transaction with a bad signature rejects the whole notification
-	// (it must not be silently dropped and marked processed).
 	other := newTestPKI(t, pkiOpts{})
 	bad := uuid.NewString()
 	err := svc.ProcessNotification(t.Context(), pki.notification(t, bad, t1.Add(time.Minute), other.tx(t, "2", t1, ``)))
@@ -231,7 +224,7 @@ func TestNotificationOrderingAndNestedVerification(t *testing.T) {
 	if _, ok := repo.notes[bad]; ok || repo.subs["2"].OriginalTransactionID != "" {
 		t.Fatal("rejected notification was recorded/applied")
 	}
-	// Wrong bundle id on the outer payload.
+
 	wrong := pki.sign(t, fmt.Sprintf(`{"notificationType":"X","notificationUUID":%q,"signedDate":1,"data":{"environment":"Production","bundleId":"com.evil"}}`, uuid.NewString()))
 	if err := svc.ProcessNotification(t.Context(), wrong); !errors.Is(err, ErrInvalidNotice) {
 		t.Fatalf("wrong bundle: %v", err)

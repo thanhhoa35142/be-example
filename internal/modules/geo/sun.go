@@ -5,14 +5,9 @@ import (
 	"time"
 )
 
-// SunElevationDeg returns the apparent solar elevation in degrees above the
-// horizon (atmospheric refraction included) for a WGS84 latitude/longitude at
-// the given instant. Longitude is positive east. Algorithm: NOAA General Solar
-// Position Calculations (Meeus); accuracy is a few hundredths of a degree for
-// 1900-2100, far better than the ~0.1° callers need.
 func SunElevationDeg(latDeg, lonDeg float64, t time.Time) float64 {
 	t = t.UTC()
-	// Julian day and Julian century.
+
 	jd := float64(t.Unix())/86400.0 + 2440587.5
 	jc := (jd - 2451545.0) / 36525.0
 
@@ -37,7 +32,7 @@ func SunElevationDeg(latDeg, lonDeg float64, t time.Time) float64 {
 		2*eccent*math.Sin(m) +
 		4*eccent*y*math.Sin(m)*math.Cos(2*geomMeanLon*rad) -
 		0.5*y*y*math.Sin(4*geomMeanLon*rad) -
-		1.25*eccent*eccent*math.Sin(2*m)) // minutes
+		1.25*eccent*eccent*math.Sin(2*m))
 
 	utcMin := float64(t.Hour()*60+t.Minute()) + float64(t.Second())/60 + float64(t.Nanosecond())/6e10
 	trueSolarMin := math.Mod(utcMin+eqTime+4*lonDeg, 1440)
@@ -51,7 +46,6 @@ func SunElevationDeg(latDeg, lonDeg float64, t time.Time) float64 {
 	cosZ = math.Max(-1, math.Min(1, cosZ))
 	elev := 90 - math.Acos(cosZ)/rad
 
-	// Atmospheric refraction correction (NOAA).
 	var refr float64
 	switch {
 	case elev > 85:

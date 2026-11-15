@@ -9,8 +9,6 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/modules/scoring"
 )
 
-// Batched score upsert: nullable components round-trip, unchanged rows are
-// not rewritten (computed_at stays), changed rows are.
 func TestUpsertScoresBatchSkipsUnchanged(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
@@ -47,12 +45,11 @@ func TestUpsertScoresBatchSkipsUnchanged(t *testing.T) {
 		t.Fatalf("row 2 should have NULL components: %v %v %v err=%v", sw, ssh, cap2, err)
 	}
 
-	// Identical rewrite: nothing touched.
 	t2 := t1.Add(time.Hour)
 	if n, err := repo.UpsertScores(ctx, version, rows, t2); err != nil || n != 0 {
 		t.Fatalf("unchanged: n=%d err=%v", n, err)
 	}
-	// One row changes.
+
 	rows[1].Score = 56
 	t3 := t2.Add(time.Hour)
 	if n, err := repo.UpsertScores(ctx, version, rows, t3); err != nil || n != 1 {

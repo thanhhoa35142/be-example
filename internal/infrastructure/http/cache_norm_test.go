@@ -22,13 +22,13 @@ func canonBBoxOf(t *testing.T, raw string) string {
 }
 
 func TestCanonBBoxSnapsToGrid(t *testing.T) {
-	// Nearby viewports must canonicalize to the same grid box.
+
 	a := canonBBoxOf(t, "4.841,52.341,4.859,52.359")
 	b := canonBBoxOf(t, "4.843,52.345,4.857,52.357")
 	if a != b {
 		t.Fatalf("nearby bboxes diverged: %q vs %q", a, b)
 	}
-	// The canonical box must CONTAIN the raw one (outward expansion).
+
 	want := "4.84,52.34,4.86,52.36"
 	if a != want {
 		t.Fatalf("canonBBox=%q want %q", a, want)
@@ -36,9 +36,8 @@ func TestCanonBBoxSnapsToGrid(t *testing.T) {
 }
 
 func TestCanonBBoxFallbackOnTooLarge(t *testing.T) {
-	// A bbox at the 0.5° cap cannot expand without exceeding it — the raw
-	// values must be kept so the service's own validation decides.
-	raw := "4.001,52,4.501,52.5" // width 0.5; expansion would hit 0.52
+
+	raw := "4.001,52,4.501,52.5"
 	if got := canonBBoxOf(t, raw); got != raw {
 		t.Fatalf("canonBBox=%q want raw %q", got, raw)
 	}
@@ -104,13 +103,13 @@ func TestRecNormalizeMatchesHandlerCanon(t *testing.T) {
 
 func TestCanonRadiusMEdges(t *testing.T) {
 	for in, want := range map[float64]float64{
-		0:     0,     // service default path — pass through
-		-5:    -5,    // ditto
-		50001: 50001, // over max — service rejects, pass through
+		0:     0,
+		-5:    -5,
+		50001: 50001,
 		550:   600,
 		549:   500,
 		5000:  5000,
-		49999: 50000, // clamps into the max bucket, still ≤ MaxRadiusM
+		49999: 50000,
 	} {
 		if got := canonRadiusM(in); got != want {
 			t.Fatalf("canonRadiusM(%v)=%v want %v", in, got, want)
@@ -128,8 +127,7 @@ func TestCanonGeoBounds(t *testing.T) {
 }
 
 func TestInvalidValuesAreNotCanonicalized(t *testing.T) {
-	// Unparseable values stay raw: the handler rejects them and the
-	// response is never cached, so the key is never consulted.
+
 	v := mustQuery(t, "bbox=bogus&hours=abc&when=yesterday&kinds=park,,beach")
 	SpotsNormalize(v)
 	if v.Get("bbox") != "bogus" || v.Get("hours") != "abc" ||

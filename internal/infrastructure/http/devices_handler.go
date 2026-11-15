@@ -28,7 +28,6 @@ type registerDeviceRequest struct {
 	Prefs      map[string]any `json:"prefs"`
 }
 
-// POST /v1/devices — register or refresh a device (id is client-generated).
 func (h *DevicesHandler) Register(c *gin.Context) {
 	var req registerDeviceRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -59,8 +58,6 @@ func (h *DevicesHandler) Register(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"id": outID.String()}})
 }
 
-// DELETE /v1/devices/:id — soft-delete (GDPR/CCPA unlink). Device ID acts as
-// the capability token until a real auth scheme exists.
 func (h *DevicesHandler) Delete(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {

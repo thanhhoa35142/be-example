@@ -1,4 +1,3 @@
-// Package config loads runtime configuration from environment variables.
 package config
 
 import (
@@ -6,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 )
@@ -13,48 +13,69 @@ import (
 type Config struct {
 	Port              string
 	DatabaseURL       string
-	RedisURL          string // REDIS_URL: shared rate-limit buckets; empty = in-memory
-	WeatherProvider   string // "open-meteo" (default) | "weatherkit"
-	WeatherH3Res      int    // H3 resolution for weather cells (default 6)
-	WeatherDailyLimit int    // max provider calls/day (default 9000)
-	RunMigrations     bool   // auto-run DB migrations on boot (default true)
-	OverpassURL       string // Overpass interpreter endpoint (ingest dev path)
-	IngestExtractDir  string // local dir for Geofabrik .pbf snapshots
-	IngestSource      string // "overpass" (default, dev) | "osmium" (prod path)
-	OsmiumPBF         string // path to the .osm.pbf extract for osmium source
-	OsmiumCmd         string // optional command prefix (e.g. docker wrapper), space-separated
+	RedisURL          string
+	WeatherProvider   string
+	WeatherH3Res      int
+	WeatherDailyLimit int
+	RunMigrations     bool
+	OverpassURL       string
+	IngestExtractDir  string
+	IngestSource      string
+	OsmiumPBF         string
+	OsmiumCmd         string
 
-	AppEnv string // APP_ENV: "production" switches Gin to release mode
+	AppEnv string
 
-	// App Store verification (entitlement). Empty bundle id = every signed
-	// payload is refused (fail closed).
-	AppStoreBundleID     string // APPSTORE_BUNDLE_ID
-	AppStoreAllowSandbox bool   // APPSTORE_ALLOW_SANDBOX (default true)
-	// Share page / universal links (GET /s/{spotId}).
-	AppleAppIDs   []string // APPLE_APP_IDS: comma-separated "<TeamID>.<bundle id>"; empty = no association file
-	AppStoreAppID string   // APPSTORE_APP_ID: numeric App Store id for the "Get the App" link
+	AppStoreBundleID     string
+	AppStoreAllowSandbox bool
 
-	// HTTP hardening.
-	TrustedProxies []string // TRUSTED_PROXIES: comma-separated IPs/CIDRs allowed to set X-Forwarded-For (default none)
-	MaxBodyBytes   int64    // BODY_MAX_BYTES: default request body cap (default 64 KiB)
+	AppleAppIDs   []string
+	AppStoreAppID string
 
-	RateReadPerMin     int // RATE_READ_PER_MIN: per-IP GET budget (default 600)
-	RateReadBurst      int // RATE_READ_BURST (default 120)
-	RateWritePerMin    int // RATE_WRITE_PER_MIN: per-IP POST/PUT/PATCH/DELETE (default 60)
-	RateWriteBurst     int // RATE_WRITE_BURST (default 30)
-	RateDevicePerHour  int // RATE_DEVICE_PER_HOUR: per-IP POST /v1/devices (default 30)
-	RateDeviceBurst    int // RATE_DEVICE_BURST (default 10)
-	RateAuthFailPerMin int // RATE_AUTH_FAIL_PER_MIN: failed admin / MCP auth attempts per IP (default 10)
+	TrustedProxies []string
+	MaxBodyBytes   int64
 
-	// DB pool runtime settings (sent as connection GUCs).
-	DBStatementTimeout string // DB_STATEMENT_TIMEOUT: per-statement cap for API-facing pools (default "5s", "0" disables)
-	DBLockTimeout      string // DB_LOCK_TIMEOUT: lock wait cap (default "2s", "0" disables)
-	DBMaxConns         int32  // DB_MAX_CONNS: pool size (0 = pgxpool default)
-	DBJIT              string // DB_JIT: "off" disables LLVM JIT compilation (default "off" for API-facing pools)
+	RateReadPerMin     int
+	RateReadBurst      int
+	RateWritePerMin    int
+	RateWriteBurst     int
+	RateDevicePerHour  int
+	RateDeviceBurst    int
+	RateAuthFailPerMin int
+
+	MFASecretKeys       string
+	MFASecretKeysCLI    string
+	AdminAllowedOrigins []string
+	MFAChallengeTTL     time.Duration
+	MFASessionTTL       time.Duration
+	MFASessionIdleTTL   time.Duration
+	MFAMaxFailures      int
+	MFALockoutTTL       time.Duration
+
+	DBStatementTimeout string
+	DBLockTimeout      string
+	DBMaxConns         int32
+	DBJIT              string
 }
 
 func Load() (Config, error) {
 	_ = godotenv.Load()
+	mfaChallengeTTL, err := getEnvDuration("MFA_CHALLENGE_TTL", 5*time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
+	mfaSessionTTL, err := getEnvDuration("MFA_SESSION_TTL", 12*time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
+	mfaSessionIdleTTL, err := getEnvDuration("MFA_SESSION_IDLE_TTL", 30*time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
+	mfaLockoutTTL, err := getEnvDuration("MFA_LOCKOUT_TTL", 15*time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
 		Port:              getEnv("PORT", "8080"),
 		DatabaseURL:       os.Getenv("DATABASE_URL"),
@@ -86,6 +107,15 @@ func Load() (Config, error) {
 		RateDeviceBurst:    getEnvInt("RATE_DEVICE_BURST", 10),
 		RateAuthFailPerMin: getEnvInt("RATE_AUTH_FAIL_PER_MIN", 10),
 
+		MFASecretKeys:       os.Getenv("MFA_SECRET_KEYS"),
+		MFASecretKeysCLI:    os.Getenv("MFA_SECRET_KEYS_CLI"),
+		AdminAllowedOrigins: splitList(os.Getenv("ADMIN_ALLOWED_ORIGINS")),
+		MFAChallengeTTL:     mfaChallengeTTL,
+		MFASessionTTL:       mfaSessionTTL,
+		MFASessionIdleTTL:   mfaSessionIdleTTL,
+		MFAMaxFailures:      getEnvInt("MFA_MAX_FAILURES", 5),
+		MFALockoutTTL:       mfaLockoutTTL,
+
 		DBStatementTimeout: getEnv("DB_STATEMENT_TIMEOUT", "5s"),
 		DBLockTimeout:      getEnv("DB_LOCK_TIMEOUT", "2s"),
 		DBMaxConns:         int32(getEnvInt("DB_MAX_CONNS", 0)),
@@ -100,17 +130,14 @@ func Load() (Config, error) {
 	if cfg.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("DATABASE_URL is required")
 	}
+	if cfg.MFAMaxFailures < 1 {
+		return Config{}, fmt.Errorf("MFA_MAX_FAILURES must be >= 1, got %d", cfg.MFAMaxFailures)
+	}
 	return cfg, nil
 }
 
-// IsProduction reports APP_ENV=production.
 func (c Config) IsProduction() bool { return c.AppEnv == "production" }
 
-// DBRuntimeParams returns per-connection GUC settings for API-facing pools:
-// a statement/lock timeout so one slow query can't hold a pooled connection
-// forever, and jit=off by default — LLVM JIT compilation costs 0.2-1s per
-// execution on high-cost plans, which is pure latency on request paths.
-// Empty values are skipped ("0" is a valid GUC meaning "disabled").
 func (c Config) DBRuntimeParams() map[string]string {
 	params := map[string]string{}
 	if c.DBStatementTimeout != "" {
@@ -125,9 +152,6 @@ func (c Config) DBRuntimeParams() map[string]string {
 	return params
 }
 
-// ConfigureGinMode sets Gin's mode; call it BEFORE gin.New() — Gin reads the
-// mode when the engine is built. An explicit GIN_MODE always wins; otherwise
-// APP_ENV=production selects release mode and everything else debug.
 func (c Config) ConfigureGinMode(set func(mode string)) {
 	switch {
 	case os.Getenv("GIN_MODE") != "":
@@ -163,4 +187,16 @@ func getEnvInt(key string, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+func getEnvDuration(key string, fallback time.Duration) (time.Duration, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("%s must be a positive Go duration (e.g. 12h), got %q", key, v)
+	}
+	return d, nil
 }

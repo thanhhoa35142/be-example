@@ -144,9 +144,6 @@ func (r *ScoringRepository) UpsertScores(ctx context.Context, configVersion int1
 	return r.queries.UpsertSpotScoresBatch(ctx, p)
 }
 
-// sentinel encodes a nullable component for the batch upsert: sqlc array
-// params cannot carry NULL, and valid components are 0..100, so -1 = NULL
-// (the query applies NULLIF(x, -1)).
 func sentinel(v *int) int16 {
 	if v == nil {
 		return -1

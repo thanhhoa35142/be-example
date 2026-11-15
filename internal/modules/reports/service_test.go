@@ -63,7 +63,7 @@ func TestSpotReportValidationAndRateLimit(t *testing.T) {
 	if err := s.SubmitSpotReport(t.Context(), in(ReportIssue, ptr("no_toilet"))); err != nil {
 		t.Fatalf("valid issue: %v", err)
 	}
-	// A code on a non-issue report is dropped, not an error (CHECK pairs them).
+
 	if err := s.SubmitSpotReport(t.Context(), in(ReportConfirm, ptr("x"))); err != nil {
 		t.Fatalf("confirm with stray code: %v", err)
 	}

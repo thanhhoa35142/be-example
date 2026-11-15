@@ -9,8 +9,6 @@ import (
 
 const testBundle = "com.pickhour.app"
 
-// newTestService wires a Service with the self-generated PKI and an in-memory
-// repo. now is fixed so status derivation is deterministic.
 func newTestService(t *testing.T, cfg Config) (*Service, *testPKI, *memRepo) {
 	t.Helper()
 	pki := newTestPKI(t, pkiOpts{})

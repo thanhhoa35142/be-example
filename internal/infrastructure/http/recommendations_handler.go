@@ -19,12 +19,8 @@ func NewRecommendationsHandler(svc *recommendations.Service) *RecommendationsHan
 	return &RecommendationsHandler{svc: svc}
 }
 
-// GET /v1/recommendations?lat=&lon=&radius=&when=&limit=
 func (h *RecommendationsHandler) List(c *gin.Context) {
-	// Canonicalize lat/lon/radius/when to the exact values the cache key
-	// uses (see RecNormalize): the response — including distanceM — must be
-	// computed from the canonical position, or a cache hit would leak the
-	// first requester's distances to a different nearby user.
+
 	lat, err := strconv.ParseFloat(c.Query("lat"), 64)
 	if err != nil {
 		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidQuery, "Invalid lat", "expected decimal degrees")
@@ -70,8 +66,7 @@ func (h *RecommendationsHandler) List(c *gin.Context) {
 		return
 	}
 	q.Filter = f
-	// The cache key buckets `when` to the hour; the echoed `when` in the
-	// response must be the same canonical value.
+
 	q.When = q.When.UTC().Truncate(time.Hour)
 
 	items, err := h.svc.Recommend(c.Request.Context(), q)

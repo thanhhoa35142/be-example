@@ -12,22 +12,13 @@ import (
 	"time"
 )
 
-// OverpassSource is the dev/fallback FeatureSource: it queries a public
-// Overpass API for the pack bbox instead of a reproducible .pbf snapshot.
-// See INGEST_STRATEGY §2 — no golden tests run against this adapter.
-//
-// Limitation (v1): relations (multipolygon parks/beaches) are reduced to a
-// centroid Point because member geometry is not assembled client-side.
-// The osmium path handles them properly.
 type OverpassSource struct {
-	// URL is the interpreter endpoint, e.g. https://overpass-api.de/api/interpreter
 	URL    string
 	Client *http.Client
 }
 
-// overpassQuery selects every tag family the Classifier knows about.
 func overpassQuery(b Bounds) string {
-	// Overpass bbox order: (south, west, north, east).
+
 	bbox := fmt.Sprintf("(%f,%f,%f,%f)", b.South, b.West, b.North, b.East)
 	return fmt.Sprintf(`[out:json][timeout:180];(
   nwr["leisure"~"^(park|picnic_table|playground|firepit|dog_park)$"]%s;
@@ -38,7 +29,7 @@ func overpassQuery(b Bounds) string {
 }
 
 type overpassElement struct {
-	Type     string            `json:"type"` // "node" | "way" | "relation"
+	Type     string            `json:"type"`
 	ID       int64             `json:"id"`
 	Lat      float64           `json:"lat"`
 	Lon      float64           `json:"lon"`
@@ -61,8 +52,6 @@ type overpassResponse struct {
 	Elements []overpassElement `json:"elements"`
 }
 
-// overpassSnapshot buffers the whole response — Overpass returns one JSON
-// document anyway, so streaming buys nothing.
 type overpassSnapshot struct {
 	asOf     time.Time
 	features []RawFeature
@@ -132,8 +121,6 @@ func closedRing(pts []struct {
 	return first.Lat == last.Lat && first.Lon == last.Lon
 }
 
-// elementGeoJSON converts one Overpass element to GeoJSON. Relations are
-// reduced to a centroid of member geometry (v1 limitation).
 func elementGeoJSON(e overpassElement) []byte {
 	switch e.Type {
 	case "node":
@@ -147,7 +134,7 @@ func elementGeoJSON(e overpassElement) []byte {
 		}
 		return lineGeoJSON(e.Geometry)
 	case "relation":
-		// Centroid of all member vertices.
+
 		var sumLat, sumLon float64
 		n := 0
 		for _, m := range e.Members {
@@ -165,7 +152,6 @@ func elementGeoJSON(e overpassElement) []byte {
 	return nil
 }
 
-// Open queries Overpass for the pack bbox and returns a buffered snapshot.
 func (s *OverpassSource) Open(ctx context.Context, p Pack) (Snapshot, error) {
 	endpoint := s.URL
 	if endpoint == "" {

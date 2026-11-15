@@ -37,18 +37,13 @@ import (
 	platformlog "github.com/thanhhoa35142/be-example/internal/platform/log"
 )
 
-// job is a periodic background task. Workers compute ahead; the API only reads.
 type job struct {
 	name string
 	fn   func(ctx context.Context) error
-	// initialDelay staggers the first run after boot so jobs that share a
-	// provider don't all fire at t=0. Subsequent ticks keep the offset
-	// because intervals are fixed.
+
 	initialDelay time.Duration
 }
 
-// jobRunIDKey carries the current t_job_runs.id to job functions that need
-// it (ingest stamps it on t_ingest_features.run_id for traceability).
 type jobRunIDKey struct{}
 
 func jobRunID(ctx context.Context) int64 {
@@ -56,8 +51,6 @@ func jobRunID(ctx context.Context) int64 {
 	return id
 }
 
-// jobStatsKey carries a per-run stats accumulator so job functions can
-// persist structured stats into t_job_runs.stats at finish.
 type jobStatsKey struct{}
 
 type jobStatsBag struct {
@@ -100,14 +93,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("db config: %v", err)
 	}
-	// Each job holds one conn for its advisory lock; size the pool so all
-	// registered jobs can run concurrently.
+
 	poolCfg.MaxConns = 12
-	// Worker statements are batch work (ingest, scoring recompute) and can
-	// legitimately run for minutes — no statement_timeout unless
-	// DB_STATEMENT_TIMEOUT is set explicitly. lock_timeout still applies so
-	// a stuck lock wait can't pin a conn forever. JIT stays at the PG
-	// default: compilation cost amortizes over long batch queries.
+
 	if poolCfg.ConnConfig.RuntimeParams == nil {
 		poolCfg.ConnConfig.RuntimeParams = map[string]string{}
 	}
@@ -126,10 +114,6 @@ func main() {
 	}
 	defer pool.Close()
 
-	// Redis bumps the shared data version after jobs that change data behind
-	// cached API GETs; nil = caching disabled (API falls back to TTL only).
-	// The client is kept even when the boot ping fails: go-redis reconnects
-	// on its own, so bumps resume once Redis is back.
 	var rdb *redis.Client
 	if cfg.RedisURL != "" {
 		if opts, err := redis.ParseURL(cfg.RedisURL); err == nil {
@@ -143,23 +127,7 @@ func main() {
 			logger.Warn("bad REDIS_URL — cache version bumps disabled", "error", err)
 		}
 	}
-	// cacheDirtyKey marks (per job run) that the job wrote data behind
-	// cached GETs; bumpCache only bumps the shared version when set, so
-	// jobs that changed nothing don't flush every cache entry.
-	//
-	// Two versions exist. The data version (touchCache) flushes every
-	// cached GET. The weather version (touchWeatherCache) flushes only the
-	// routes that return raw weather rows. Why weather does not touch the
-	// data version: it is observable in list/recommendation/detail
-	// responses only through the scores computed from it, and scores change
-	// only when scoring.recompute rewrites them — which bumps the data
-	// version itself (and runs a few minutes after weather.refresh, see
-	// t_worker_job_schedules). Bumping at weather.refresh as well flushed
-	// every entry a second time per hour for nothing: the refilled entries
-	// carried the same old scores. The same holds for crowd/holiday inputs.
-	// Anything a response shows directly from its table (spots, packs: ingest;
-	// forecast weather: weather.refresh via the weather version) still
-	// invalidates at once.
+
 	type cacheDirty struct{ data, weather atomic.Bool }
 	type cacheDirtyKey struct{}
 	bumpCache := func(fn func(context.Context) error) func(context.Context) error {
@@ -186,14 +154,13 @@ func main() {
 			return nil
 		}
 	}
-	// touchCache flags the current job run as having changed data shown
-	// directly by cached GETs.
+
 	touchCache := func(ctx context.Context) {
 		if d, ok := ctx.Value(cacheDirtyKey{}).(*cacheDirty); ok {
 			d.data.Store(true)
 		}
 	}
-	// touchWeatherCache flags changed raw weather rows (forecast endpoint).
+
 	touchWeatherCache := func(ctx context.Context) {
 		if d, ok := ctx.Value(cacheDirtyKey{}).(*cacheDirty); ok {
 			d.weather.Store(true)
@@ -202,7 +169,6 @@ func main() {
 
 	queries := persistence.New(pool)
 
-	// Register scheduled jobs here as modules are implemented.
 	scoringRepo := persistence.NewScoringRepository(queries)
 	scoringSvc := scoring.NewService(scoringRepo)
 
@@ -239,16 +205,14 @@ func main() {
 	)
 
 	var osmiumSrc *osm.OsmiumSource
-	// Ingest: Overpass dev path by default; INGEST_SOURCE=osmium switches to
-	// the production .pbf pipeline behind the same osm.FeatureSource port.
+
 	ingestRepo := persistence.NewIngestRepo(pool)
 	var featureSource osm.FeatureSource = &osm.OverpassSource{
 		URL:    cfg.OverpassURL,
 		Client: httpx.NewClient(httpx.Policy{Name: "overpass", RatePerSec: 1, Burst: 2, Timeout: 300 * time.Second}),
 	}
 	if cfg.IngestSource == "osmium" {
-		// OSMIUM_PBF pins one extract (dev); otherwise each pack resolves
-		// <INGEST_EXTRACT_DIR>/<basename(osm_extract)>.osm.pbf itself.
+
 		var cmd []string
 		if cfg.OsmiumCmd != "" {
 			cmd = strings.Fields(cfg.OsmiumCmd)
@@ -260,9 +224,7 @@ func main() {
 		}
 		featureSource = osmiumSrc
 	}
-	// Osmium disk hygiene (skipped when OSMIUM_PBF pins a single dev file):
-	// each extract is downloaded → turned into cached artifacts → its raw
-	// .pbf deleted, one extract at a time, so peak disk is ONE raw extract.
+
 	osmiumMode := osmiumSrc != nil && cfg.OsmiumPBF == ""
 	prepareExtract := func(ctx context.Context, e string) error {
 		if err := osmiumSrc.Prepare(ctx, e); err != nil {
@@ -285,16 +247,13 @@ func main() {
 		if err != nil {
 			return err
 		}
-		// Resolve which packs will actually run (slug filter + freshness
-		// gate) so extract ensure/cleanup only touches those extracts.
+
 		var todo []int
 		for i := range packs {
 			if *packSlug != "" && packs[i].Slug != *packSlug {
 				continue
 			}
-			// Freshness gate: skip packs whose extract hasn't been
-			// re-fetched since the last import (scheduled runs only —
-			// an explicit -pack one-shot always runs).
+
 			if *packSlug == "" && packs[i].ExtractFetchedAt != nil &&
 				packs[i].LastImportAt != nil &&
 				!packs[i].ExtractFetchedAt.After(*packs[i].LastImportAt) {
@@ -302,8 +261,7 @@ func main() {
 			}
 			todo = append(todo, i)
 		}
-		// Make sure every extract has artifacts; a broken extract only
-		// skips its own packs.
+
 		failedExtract := map[string]error{}
 		if osmiumMode {
 			seen := map[string]bool{}
@@ -325,10 +283,9 @@ func main() {
 				}
 			}
 		}
-		// One failing pack (guard trip, bad geometry…) must not starve the
-		// packs after it: keep going and report every failure.
+
 		var errs []error
-		mutated := false // any pack wrote spot/amenity/source data → bump cache
+		mutated := false
 		for _, i := range todo {
 			if err := ctx.Err(); err != nil {
 				errs = append(errs, err)
@@ -380,18 +337,13 @@ func main() {
 	registry := []job{
 		{
 			name:         "weather.refresh",
-			initialDelay: 0, // provider-bound: goes first
+			initialDelay: 0,
 			fn: bumpCache(func(ctx context.Context) error {
 				stats, err := weatherSvc.Refresh(ctx)
 				if err != nil {
 					return err
 				}
-				// ReplaceRows deletes+rewrites each fetched cell's range
-				// (and restamps fetched_at), so any replaced cell changed
-				// the raw weather the forecast endpoint returns. Scores
-				// are untouched until scoring.recompute, so only the
-				// weather version is bumped (see cacheDirtyKey above).
-				// A quota-skipped run replaces nothing → no bump.
+
 				if stats.Replaced > 0 {
 					touchWeatherCache(ctx)
 				}
@@ -400,8 +352,7 @@ func main() {
 			}),
 		},
 		{
-			// Weekly, offline (rickar/cal): must have run before the next
-			// crowd.refresh to be seen, so it goes ahead of it.
+
 			name:         "holidays.refresh",
 			initialDelay: 6 * time.Minute,
 			fn: bumpCache(func(ctx context.Context) error {
@@ -413,8 +364,7 @@ func main() {
 					bag.set("uncovered_countries", stats.Uncovered)
 					bag.set("per_country", stats.PerCountry)
 				}
-				// No cache bump: holidays only feed scoring, whose recompute
-				// bumps when scores change (see cacheDirtyKey above).
+
 				if err != nil {
 					return err
 				}
@@ -424,14 +374,13 @@ func main() {
 		},
 		{
 			name:         "crowd.refresh",
-			initialDelay: 7 * time.Minute, // daily, heaviest — offset far out
+			initialDelay: 7 * time.Minute,
 			fn: bumpCache(func(ctx context.Context) error {
 				stats, err := crowdSvc.Refresh(ctx)
 				if err != nil {
 					return err
 				}
-				// No cache bump: crowd estimates only feed scoring, whose
-				// recompute bumps when scores change (see cacheDirtyKey).
+
 				logger.Info("crowd done", "spots", stats.Spots, "slots", stats.Slots, "written", stats.Written, "skipped", stats.Skipped)
 				return nil
 			}),
@@ -444,15 +393,14 @@ func main() {
 				if err != nil {
 					return err
 				}
-				// No cache bump: community crowd aggregates only feed
-				// scoring, whose recompute bumps when scores change.
+
 				logger.Info("crowd aggregate done", "written", stats.Written, "deleted", stats.Deleted)
 				return nil
 			}),
 		},
 		{
 			name:         "scoring.recompute",
-			initialDelay: 4 * time.Minute, // after weather+crowd have fresh data
+			initialDelay: 4 * time.Minute,
 			fn: bumpCache(func(ctx context.Context) error {
 				stats, err := scoringSvc.Recompute(ctx)
 				if err != nil {
@@ -479,8 +427,7 @@ func main() {
 			},
 		},
 		{
-			// Hourly tick; each run only sends to devices whose local clock is
-			// the digest's send weekday/hour (default Thu 18:00), once per day.
+
 			name:         "digest.weekly",
 			initialDelay: 5 * time.Minute,
 			fn: func(ctx context.Context) error {
@@ -516,8 +463,7 @@ func main() {
 				}
 				fetched, err := ingest.RefreshExtracts(ctx, nil, cfg.IngestExtractDir, extracts, 7*24*time.Hour, false,
 					func(e string) error {
-						// Stamp first: the download succeeded even if the
-						// artifact build below fails (ingest retries it).
+
 						if err := ingestRepo.MarkExtractFetched(ctx, e, time.Now().UTC()); err != nil {
 							return err
 						}
@@ -532,10 +478,8 @@ func main() {
 		},
 		{
 			name:         "retention.purge",
-			initialDelay: 10 * time.Minute, // daily, lowest priority — runs last
-			// No bumpCache: purged rows (old forecasts, scores, events,
-			// reports, job runs) are all outside the windows cached GETs
-			// serve, so a purge never changes a cached response.
+			initialDelay: 10 * time.Minute,
+
 			fn: func(ctx context.Context) error {
 				stats, err := persistence.NewRetentionRepo(queries).Purge(ctx)
 				if err != nil {
@@ -555,7 +499,6 @@ func main() {
 		logger.Info("worker started, no jobs registered")
 	}
 
-	// One-shot mode: `worker -job ingest.osm -pack amsterdam -dry-run`.
 	if *jobName != "" {
 		for _, j := range registry {
 			if j.name == *jobName {
@@ -570,8 +513,6 @@ func main() {
 		go runJob(ctx, pool, logger, adminSvc, j)
 	}
 
-	// Wake-up channel: a committed ingest notifies 'pickhour_ingest' and we
-	// kick scoring.recompute immediately instead of waiting for its tick.
 	go listenIngestDone(ctx, pool, logger, adminSvc, registry)
 
 	<-ctx.Done()
@@ -584,9 +525,6 @@ func runJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, adminS
 		executeJob(ctx, pool, logger, adminSvc, j)
 	}
 
-	// First schedule load decides the boot offset and enabled flag; offset
-	// comes from t_worker_job_schedules (falls back to the static
-	// initialDelay when the row is missing).
 	interval := time.Duration(0)
 	enabled := true
 	offset := j.initialDelay
@@ -606,7 +544,7 @@ func runJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, adminS
 		}
 	}
 	if enabled {
-		run() // run once at startup, then on every tick
+		run()
 	}
 
 	var timer *time.Timer
@@ -661,17 +599,22 @@ func runJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, adminS
 			refreshSchedule(true)
 		case <-pollTicker.C:
 			refreshSchedule(true)
+
+			if requested, err := adminSvc.ClaimJobRunRequest(ctx, j.name); err != nil {
+				logger.Error("job run request check failed", "job", j.name, "error", err)
+			} else if requested {
+				logger.Info("job run requested from admin console", "job", j.name)
+				run()
+			}
 		}
 	}
 }
 
-// executeJob runs one job under its advisory lock with t_job_runs
-// instrumentation. Used by both the periodic loop and -job one-shot mode.
 func executeJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, adminSvc *admin.Service, j job) {
-	// Per-run advisory lock: only one replica executes the job at a time.
+
 	release, err := jobs.Acquire(ctx, pool, j.name)
 	if errors.Is(err, jobs.ErrLockNotAcquired) {
-		return // another replica owns this tick
+		return
 	}
 	if err != nil {
 		logger.Error("job lock failed", "job", j.name, "error", err)
@@ -679,8 +622,6 @@ func executeJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, ad
 	}
 	defer release()
 
-	// Winning the lock means any 'running' rows for this job are orphans
-	// from a dead worker — abandon them before recording this run.
 	if err := adminSvc.AbandonJobRuns(ctx, j.name); err != nil {
 		logger.Warn("job orphan sweep failed", "job", j.name, "error", err)
 	}
@@ -713,9 +654,6 @@ func executeJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, ad
 	}
 }
 
-// listenIngestDone LISTENs on 'pickhour_ingest' and runs scoring.recompute
-// shortly after each committed ingest, debounced so a multi-pack run
-// triggers at most one extra scoring pass.
 func listenIngestDone(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, adminSvc *admin.Service, registry []job) {
 	var scoring *job
 	for i := range registry {
@@ -741,8 +679,6 @@ func listenIngestDone(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logg
 	}
 	logger.Info("ingest listener ready")
 
-	// WaitForNotification blocks, so it runs in its own goroutine feeding a
-	// channel; the select below can then debounce on a timer.
 	notifyCh := make(chan struct{}, 64)
 	go func() {
 		defer close(notifyCh)
@@ -774,7 +710,7 @@ func listenIngestDone(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logg
 			return
 		case _, ok := <-notifyCh:
 			if !ok {
-				return // listener conn died
+				return
 			}
 			pending = true
 			if timer == nil {

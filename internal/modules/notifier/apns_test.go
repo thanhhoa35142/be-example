@@ -58,7 +58,6 @@ func TestProviderTokenIsValidES256JWT(t *testing.T) {
 		t.Fatalf("iat missing: %v", claims)
 	}
 
-	// Verify signature: ES256 = raw R||S over SHA-256 of signing input.
 	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil || len(sig) != 64 {
 		t.Fatalf("signature must be 64 raw bytes, got %d err=%v", len(sig), err)
@@ -70,7 +69,6 @@ func TestProviderTokenIsValidES256JWT(t *testing.T) {
 		t.Fatal("JWT signature does not verify")
 	}
 
-	// Cached token is stable within the window.
 	again, _ := c.providerToken()
 	if again != tok {
 		t.Fatal("provider token should be cached")

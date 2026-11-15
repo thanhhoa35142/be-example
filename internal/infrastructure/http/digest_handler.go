@@ -38,7 +38,6 @@ func deviceParam(c *gin.Context) (uuid.UUID, bool) {
 	return id, true
 }
 
-// PUT /v1/devices/:id/digest — create/replace the weekend digest (Plus).
 func (h *DigestHandler) Put(c *gin.Context) {
 	deviceID, ok := deviceParam(c)
 	if !ok {
@@ -64,11 +63,10 @@ func (h *DigestHandler) Put(c *gin.Context) {
 		return
 	}
 	dto := digestDTO(d)
-	dto["skippedIds"] = skipped // always an array; empty when nothing was dropped
+	dto["skippedIds"] = skipped
 	c.JSON(http.StatusOK, gin.H{"data": dto})
 }
 
-// GET /v1/devices/:id/digest
 func (h *DigestHandler) Get(c *gin.Context) {
 	deviceID, ok := deviceParam(c)
 	if !ok {
@@ -82,7 +80,6 @@ func (h *DigestHandler) Get(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": digestDTO(d)})
 }
 
-// DELETE /v1/devices/:id/digest
 func (h *DigestHandler) Delete(c *gin.Context) {
 	deviceID, ok := deviceParam(c)
 	if !ok {

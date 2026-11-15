@@ -26,20 +26,14 @@ func NewService(repo Repository, plans PlanResolver, sender Sender, log *slog.Lo
 	return &Service{repo: repo, plans: plans, sender: sender, log: log}
 }
 
-// Get returns the device's digest or ErrNotFound.
 func (s *Service) Get(ctx context.Context, deviceID uuid.UUID) (*Digest, error) {
 	return s.repo.Get(ctx, deviceID)
 }
 
-// Delete removes the device's digest (idempotent).
 func (s *Service) Delete(ctx context.Context, deviceID uuid.UUID) error {
 	return s.repo.Delete(ctx, deviceID)
 }
 
-// Upsert creates/replaces the digest. Plus only. Spot ids are resolved
-// (merged → target), de-duplicated and kept in request order. Unknown or
-// inactive ids are dropped and returned as skipped (request order, never nil);
-// an enabled digest left with no spots is ErrInvalid.
 func (s *Service) Upsert(ctx context.Context, deviceID uuid.UUID, spotIDs []uuid.UUID, enabled bool) (*Digest, []uuid.UUID, error) {
 	if len(spotIDs) > MaxSpots {
 		return nil, nil, fmt.Errorf("%w: at most %d spotIds", ErrInvalid, MaxSpots)
@@ -94,8 +88,6 @@ type scoreKey struct {
 	date time.Time
 }
 
-// RunWeekly sends the weekend digest to every due device. Per-device
-// failures are logged and never abort the run.
 func (s *Service) RunWeekly(ctx context.Context, now time.Time) (Stats, error) {
 	var st Stats
 	cands, err := s.repo.ListCandidates(ctx)
@@ -166,14 +158,14 @@ func (s *Service) RunWeekly(ctx context.Context, now time.Time) (Stats, error) {
 		del, ok, hadErr := s.best(ctx, log, c, d.today, spots, cache, now)
 		if !ok {
 			if hadErr {
-				// Incomplete data: free the slot so a later run can retry.
+
 				if rerr := s.repo.Release(ctx, c.DeviceID, d.today, c.LastSentOn); rerr != nil {
 					log.Error("digest release failed", "error", rerr)
 				}
 				st.Failed++
 				continue
 			}
-			// Nothing qualifies: stay silent, slot remains claimed.
+
 			st.NoWindow++
 			continue
 		}
@@ -194,7 +186,6 @@ func (s *Service) RunWeekly(ctx context.Context, now time.Time) (Stats, error) {
 	return st, nil
 }
 
-// best finds the single best (spot, day, window) for the device.
 func (s *Service) best(ctx context.Context, log *slog.Logger, c Candidate, today time.Time,
 	spots map[uuid.UUID]SpotInfo, cache map[scoreKey][]HourScore, now time.Time) (Delivery, bool, bool) {
 
@@ -207,7 +198,7 @@ func (s *Service) best(ctx context.Context, log *slog.Logger, c Candidate, today
 	for _, id := range c.SpotIDs {
 		sp, ok := spots[id]
 		if !ok {
-			continue // merged away / deactivated since the digest was saved
+			continue
 		}
 		loc, err := time.LoadLocation(sp.TZ)
 		if err != nil {

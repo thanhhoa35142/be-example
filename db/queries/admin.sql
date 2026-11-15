@@ -12,6 +12,7 @@ WHERE id = $1;
 SELECT id, job, started_at, finished_at, status, rows_affected, error
 FROM t_job_runs
 WHERE (sqlc.narg('before_id')::bigint IS NULL OR id < sqlc.narg('before_id'))
+  AND (sqlc.narg('status')::text IS NULL OR status = sqlc.narg('status'))
 ORDER BY id DESC
 LIMIT $1;
 
@@ -199,3 +200,69 @@ FROM t_events
 WHERE created_at >= sqlc.arg('from_ts') AND created_at < sqlc.arg('to_ts')
 GROUP BY day
 ORDER BY day DESC;
+
+-- ---- admin console: run-now, plan limits, city packs, spot lookup ----
+
+-- name: RequestJobRun :one
+UPDATE t_worker_job_schedules
+SET run_requested_at = now()
+WHERE job = $1
+RETURNING *;
+
+-- name: ClaimJobRunRequest :execrows
+-- Atomic claim: with several worker replicas only one sees rows = 1.
+UPDATE t_worker_job_schedules
+SET run_requested_at = NULL
+WHERE job = $1 AND run_requested_at IS NOT NULL;
+
+-- name: ListPlanLimits :many
+SELECT plan, feature, limit_value
+FROM t_plan_limits
+ORDER BY feature, plan;
+
+-- name: UpdatePlanLimit :execrows
+UPDATE t_plan_limits
+SET limit_value = $3
+WHERE plan = $1 AND feature = $2;
+
+-- name: ListAdminCityPacks :many
+SELECT p.id, p.slug, p.name, p.country, p.tz, p.status, p.last_import_at,
+       (SELECT count(*) FROM t_spots s
+         WHERE s.city_pack_id = p.id AND s.status = 'active')::bigint AS active_spots,
+       (SELECT count(*) FROM t_spots s
+         WHERE s.city_pack_id = p.id)::bigint AS total_spots
+FROM t_city_packs p
+ORDER BY p.country, p.name;
+
+-- name: GetCityPackStatus :one
+SELECT status, last_import_at FROM t_city_packs WHERE id = $1;
+
+-- name: UpdateCityPackStatus :execrows
+UPDATE t_city_packs SET status = $2 WHERE id = $1;
+
+-- name: SearchAdminSpots :many
+-- Staff lookup across every status. `q` is an already-escaped ILIKE pattern.
+SELECT s.id, s.name, s.kind, s.city, s.country, s.status, s.status_reason,
+       s.curated, s.last_verified_at, s.updated_at,
+       ST_Y(s.geom::geometry)::float8 AS lat,
+       ST_X(s.geom::geometry)::float8 AS lon,
+       p.slug AS pack_slug, p.name AS pack_name
+FROM t_spots s
+JOIN t_city_packs p ON p.id = s.city_pack_id
+WHERE (sqlc.narg('id')::uuid IS NULL OR s.id = sqlc.narg('id'))
+  AND (sqlc.narg('q')::text IS NULL OR s.name ILIKE sqlc.narg('q'))
+  AND (sqlc.narg('status')::text IS NULL OR s.status = sqlc.narg('status'))
+  AND (sqlc.narg('pack_slug')::text IS NULL OR p.slug = sqlc.narg('pack_slug'))
+ORDER BY s.name NULLS LAST, s.id
+LIMIT sqlc.arg('row_limit');
+
+-- name: GetSpotStatus :one
+SELECT status FROM t_spots WHERE id = $1;
+
+-- name: AdminSetSpotStatus :execrows
+-- Admin-owned status change. The reason marks the row as staff-decided so
+-- the ingest planner never re-evaluates it.
+UPDATE t_spots
+SET status = sqlc.arg('status'), status_reason = sqlc.narg('reason'),
+    status_changed_at = now(), updated_at = now()
+WHERE id = sqlc.arg('id') AND status = ANY(sqlc.arg('from_statuses')::text[]);

@@ -12,15 +12,6 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/modules/digest"
 )
 
-// DigestPayload is the APNs body of the weekly weekend digest.
-//
-//   - kind        — "digest.weekend"
-//   - spotId      — UUID string; tap opens SpotDetail
-//   - windowStart — RFC3339 UTC start of the best window
-//   - windowEnd   — RFC3339 UTC end (exclusive)
-//   - score       — rounded mean hourly score of the window
-//
-// Custom keys are top-level next to "aps" (APNs requirement).
 type DigestPayload struct {
 	APS         APSBody `json:"aps"`
 	Kind        string  `json:"kind"`
@@ -49,7 +40,6 @@ var weekdayNames = map[string][7]string{
 	"nl": {"Zondag", "Maandag", "Dinsdag", "Woensdag", "Donderdag", "Vrijdag", "Zaterdag"},
 }
 
-// digestCopy renders the banner in spot-local time: 12h for en, 24h for nl.
 func digestCopy(locale string, d digest.Delivery) (title, body string) {
 	loc, err := time.LoadLocation(d.SpotTZ)
 	if err != nil {
@@ -92,7 +82,6 @@ func clock12(t time.Time) (string, string) {
 	return fmt.Sprintf("%d:%02d", h, t.Minute()), m
 }
 
-// range12: "2–5 PM" when both ends share a meridiem, else "11 AM–2 PM".
 func range12(s, e time.Time) string {
 	sc, sm := clock12(s)
 	ec, em := clock12(e)
@@ -102,8 +91,6 @@ func range12(s, e time.Time) string {
 	return sc + " " + sm + "–" + ec + " " + em
 }
 
-// DigestSender pushes weekly digests via the same APNs client/token provider
-// as alert pushes.
 type DigestSender struct{ *Sender }
 
 func NewDigestSender(s *Sender) *DigestSender { return &DigestSender{s} }

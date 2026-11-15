@@ -13,15 +13,12 @@ import (
 )
 
 const (
-	// KeyPrefixTag marks live keys; "phk_" + 32 random bytes base64url.
 	KeyPrefixTag = "phk_"
 	keyRandBytes = 32
-	// DisplayPrefixLen is how much of the secret is safe to show/store.
+
 	DisplayPrefixLen = 16
 )
 
-// IssuedKey is returned once at creation — the only time the raw secret
-// is visible. Only KeyPrefix + hash persist.
 type IssuedKey struct {
 	ApiKey
 	Secret string `json:"secret"`
@@ -36,7 +33,6 @@ func NewService(repo Repository) *Service {
 	return &Service{repo: repo, now: time.Now}
 }
 
-// HashKey returns the stored form of a raw key.
 func HashKey(raw string) []byte {
 	sum := sha256.Sum256([]byte(strings.TrimSpace(raw)))
 	return sum[:]
@@ -60,8 +56,6 @@ func validateGrant(g Grant) error {
 	return nil
 }
 
-// Create issues a new key with the given grants. The returned IssuedKey
-// carries the raw secret exactly once.
 func (s *Service) Create(ctx context.Context, name, description string, specs []GrantSpec, expiresAt *time.Time, rateLimitRPS int) (IssuedKey, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -98,7 +92,7 @@ func (s *Service) Create(ctx context.Context, name, description string, specs []
 	if err := s.repo.CreateKey(ctx, key, HashKey(secret), grants); err != nil {
 		return IssuedKey{}, err
 	}
-	// Re-fetch so the caller gets the generated id.
+
 	stored, err := s.repo.FindByHash(ctx, HashKey(secret))
 	if err != nil {
 		return IssuedKey{}, err
@@ -106,8 +100,6 @@ func (s *Service) Create(ctx context.Context, name, description string, specs []
 	return IssuedKey{ApiKey: stored, Secret: secret}, nil
 }
 
-// Authenticate resolves a raw bearer token into an Auth (key + grants).
-// It validates revocation/expiry and stamps last_used_at off-path.
 func (s *Service) Authenticate(ctx context.Context, raw string) (*Auth, error) {
 	raw = strings.TrimSpace(raw)
 	if !strings.HasPrefix(raw, KeyPrefixTag) {
@@ -128,7 +120,7 @@ func (s *Service) Authenticate(ctx context.Context, raw string) (*Auth, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Best-effort usage stamp; never block or fail auth on it.
+
 	go func() {
 		bg := context.WithoutCancel(ctx)
 		_ = s.repo.TouchLastUsed(bg, key.ID)
@@ -136,7 +128,6 @@ func (s *Service) Authenticate(ctx context.Context, raw string) (*Auth, error) {
 	return &Auth{Key: key, Grants: grants}, nil
 }
 
-// Authorize checks a (resource, action) pair against the key's grants.
 func (s *Service) Authorize(auth *Auth, resource, action string) error {
 	return auth.Authorize(resource, action)
 }
@@ -145,8 +136,6 @@ func (s *Service) List(ctx context.Context) ([]ApiKey, error) {
 	return s.repo.ListKeys(ctx)
 }
 
-// ListWithGrants returns every key with its grants attached — the admin
-// list view. Key counts are small; per-key grant fetch is fine.
 func (s *Service) ListWithGrants(ctx context.Context) ([]KeyWithGrants, error) {
 	keys, err := s.repo.ListKeys(ctx)
 	if err != nil {

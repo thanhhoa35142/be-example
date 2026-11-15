@@ -25,14 +25,11 @@ import (
 	"github.com/rickar/cal/v2/us"
 )
 
-// Day is one national public holiday. Date is midnight UTC of the calendar
-// day (no time zone: it is a civil date).
 type Day struct {
 	Date time.Time
 	Name string
 }
 
-// national maps ISO 3166-1 alpha-2 to the library's national holiday list.
 var national = map[string][]*cal.Holiday{
 	"AT": at.Holidays,
 	"BE": be.Holidays,
@@ -50,13 +47,10 @@ var national = map[string][]*cal.Holiday{
 	"PT": pt.Holidays,
 	"SE": se.Holidays,
 	"US": us.Holidays,
-	// CH's list mixes in cantonal days; keep only those observed (almost)
-	// everywhere. See chCantonal.
+
 	"CH": withoutHolidays(ch.Holidays, chCantonal()),
 }
 
-// auStates: the library has no national AU list, only per-state ones. A date
-// counts as national only when every state/territory observes it.
 var auStates = [][]*cal.Holiday{
 	au.HolidaysACT, au.HolidaysNSW, au.HolidaysNT, au.HolidaysQLD,
 	au.HolidaysSA, au.HolidaysTAS, au.HolidaysVIC, au.HolidaysWA,
@@ -83,7 +77,6 @@ func withoutHolidays(list, drop []*cal.Holiday) []*cal.Holiday {
 	return out
 }
 
-// Covered reports whether the library has holidays for the country.
 func Covered(country string) bool {
 	if country == "AU" {
 		return true
@@ -92,7 +85,6 @@ func Covered(country string) bool {
 	return ok
 }
 
-// CoveredCountries lists every supported country, sorted.
 func CoveredCountries() []string {
 	out := []string{"AU"}
 	for c := range national {
@@ -102,20 +94,12 @@ func CoveredCountries() []string {
 	return out
 }
 
-// civil builds the calendar day of t as midnight UTC. cal returns midnight
-// in the host's local zone, so t.UTC() would shift the date on hosts east of
-// UTC; read the wall-clock fields instead.
 func civil(t time.Time) time.Time {
 	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
 }
 
-// counts reports whether a library observance is a real day off. "Other"
-// (e.g. Swedish eves) is excluded; public, bank and religious days count.
 func counts(h *cal.Holiday) bool { return h.Type != cal.ObservanceOther }
 
-// For returns the national public holidays of country in year, one per date
-// (observed date, i.e. after weekend substitution), sorted ascending. ok is
-// false when the country is not covered.
 func For(country string, year int) (days []Day, ok bool) {
 	if country == "AU" {
 		return australia(year), true
@@ -135,11 +119,11 @@ func collect(list []*cal.Holiday, year int) []Day {
 		}
 		_, observed := h.Calc(year)
 		if observed.IsZero() {
-			continue // not observed that year
+			continue
 		}
 		d := civil(observed)
 		if d.Year() != year {
-			continue // e.g. 1 Jan substitute landing in the next year
+			continue
 		}
 		if _, dup := byDate[d]; !dup {
 			byDate[d] = h.Name
@@ -158,7 +142,7 @@ func australia(year int) []Day {
 		perState = append(perState, m)
 	}
 	common := map[time.Time]string{}
-	for date, name := range perState[1] { // NSW names (English)
+	for date, name := range perState[1] {
 		all := true
 		for _, m := range perState {
 			if _, has := m[date]; !has {

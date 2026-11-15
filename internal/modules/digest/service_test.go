@@ -83,7 +83,7 @@ func TestRunWeekly(t *testing.T) {
 	ams, _ := time.LoadLocation("Europe/Amsterdam")
 	dev, devFree, devNoWin := uuid.New(), uuid.New(), uuid.New()
 	spotA, spotB := uuid.New(), uuid.New()
-	// Thursday 2026-11-19 18:10 Amsterdam.
+
 	now := time.Date(2026, 11, 19, 18, 10, 0, 0, ams)
 
 	sat := time.Date(2026, 11, 21, 0, 0, 0, 0, ams)
@@ -114,7 +114,7 @@ func TestRunWeekly(t *testing.T) {
 
 	t.Run("sends best window, skips free, silent when none", func(t *testing.T) {
 		repo := newRepo()
-		// devNoWin follows an empty spot.
+
 		repo.cands[2].SpotIDs = []uuid.UUID{uuid.New()}
 		snd := &fakeSender{}
 		st, err := NewService(repo, plans, snd, nil).RunWeekly(context.Background(), now)
@@ -125,7 +125,7 @@ func TestRunWeekly(t *testing.T) {
 			t.Fatalf("stats %+v", st)
 		}
 		d := snd.got[0]
-		// Westerpark Sunday 13–15 local (92,91 → mean 91.5 → 92) beats Vondelpark Saturday (80).
+
 		if d.SpotID != spotB || d.Score != 92 || d.WindowStart.Hour() != 12 || d.WindowEnd.Sub(d.WindowStart) != 2*time.Hour {
 			t.Fatalf("delivery %+v", d)
 		}
@@ -142,7 +142,7 @@ func TestRunWeekly(t *testing.T) {
 			t.Fatal(err)
 		}
 		first := len(snd.got)
-		// Second run: candidates now carry last_sent_on like the DB would.
+
 		for i := range repo.cands {
 			repo.cands[i].LastSentOn = repo.claimed[repo.cands[i].DeviceID]
 		}
@@ -155,7 +155,7 @@ func TestRunWeekly(t *testing.T) {
 	t.Run("claim race: loser does not send", func(t *testing.T) {
 		repo := newRepo()
 		d := time.Date(2026, 11, 19, 0, 0, 0, 0, time.UTC)
-		repo.claimed[dev] = &d // another replica won
+		repo.claimed[dev] = &d
 		snd := &fakeSender{}
 		if _, err := NewService(repo, plans, snd, nil).RunWeekly(context.Background(), now); err != nil {
 			t.Fatal(err)
@@ -209,13 +209,13 @@ func TestUpsertValidation(t *testing.T) {
 	if skipped == nil || len(skipped) != 0 {
 		t.Fatalf("skipped should be empty non-nil, got %#v", skipped)
 	}
-	// Unknown ids are dropped and reported; the rest is kept.
+
 	gone := uuid.New()
 	d, skipped, err = svc.Upsert(ctx, dev, []uuid.UUID{b, gone, a}, true)
 	if err != nil || len(d.SpotIDs) != 2 || len(skipped) != 1 || skipped[0] != gone {
 		t.Fatalf("skip unknown: %v %+v %v", err, d, skipped)
 	}
-	// All unknown + enabled -> invalid; all unknown + disabled -> ok, empty.
+
 	if _, _, err := svc.Upsert(ctx, dev, []uuid.UUID{gone}, true); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("all unknown enabled: %v", err)
 	}

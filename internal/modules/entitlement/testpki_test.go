@@ -15,9 +15,6 @@ import (
 	"time"
 )
 
-// testPKI is a self-generated stand-in for Apple's chain: a P-384 root, a
-// P-384 intermediate carrying the WWDR marker OID and a P-256 leaf carrying the
-// receipt-signing marker OID. Nothing in production trusts it.
 type testPKI struct {
 	rootCert  *x509.Certificate
 	interCert *x509.Certificate
@@ -29,7 +26,7 @@ type testPKI struct {
 type pkiOpts struct {
 	skipLeafOID  bool
 	skipInterOID bool
-	leafNotAfter time.Time // zero = +1h
+	leafNotAfter time.Time
 }
 
 func mustKey(t *testing.T, c elliptic.Curve) *ecdsa.PrivateKey {
@@ -105,7 +102,6 @@ func (p *testPKI) verifier(t *testing.T) *AppleVerifier {
 
 func b64(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
 
-// signWith builds a compact JWS with the given header fields and raw R||S.
 func (p *testPKI) signWith(t *testing.T, header map[string]any, payload string) string {
 	t.Helper()
 	enc := base64.RawURLEncoding.EncodeToString
@@ -129,7 +125,6 @@ func (p *testPKI) header() map[string]any {
 	}
 }
 
-// sign is the normal, valid JWS over payload.
 func (p *testPKI) sign(t *testing.T, payload string) string {
 	t.Helper()
 	return p.signWith(t, p.header(), payload)

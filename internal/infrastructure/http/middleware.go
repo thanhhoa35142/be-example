@@ -14,8 +14,6 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/platform/httpx"
 )
 
-// requestIDRe is the only shape of client-supplied X-Request-ID we echo into
-// logs and responses: short and free of control chars / log-injection bytes.
 var requestIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 func RequestID() gin.HandlerFunc {
@@ -30,8 +28,6 @@ func RequestID() gin.HandlerFunc {
 	}
 }
 
-// ClientInfo captures client-identification headers (X-Client,
-// X-Client-Version, User-Agent) into the gin context for logging.
 func ClientInfo() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Set("client", c.GetHeader("X-Client"))
@@ -52,8 +48,6 @@ func Logger() gin.HandlerFunc {
 	})
 }
 
-// Recovery replaces gin.Recovery with one that logs the panic + stack via
-// slog so crashes are debuggable instead of silent 500s.
 func Recovery() gin.HandlerFunc {
 	return gin.CustomRecovery(func(c *gin.Context, recovered any) {
 		slog.ErrorContext(c.Request.Context(), "panic recovered",
@@ -68,8 +62,6 @@ func Recovery() gin.HandlerFunc {
 	})
 }
 
-// pathWithoutQuery drops the query string so identifiers/credentials passed
-// as query parameters (legacy ?deviceId=) never reach the access log.
 func pathWithoutQuery(p string) string {
 	if i := strings.IndexByte(p, '?'); i >= 0 {
 		return p[:i]

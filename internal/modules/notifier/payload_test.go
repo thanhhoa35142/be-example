@@ -30,7 +30,6 @@ func TestBuildPayloadContract(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Custom keys must be top-level next to "aps" (APNs requirement).
 	for _, key := range []string{"spotId", "ruleId", "score", "windowStart", "kind"} {
 		if _, ok := m[key]; !ok {
 			t.Fatalf("payload missing top-level key %q: %s", key, body)
@@ -63,7 +62,7 @@ func TestAlertCopyLocales(t *testing.T) {
 		"nl":      "nl",
 		"nl-NL":   "nl",
 		"NL_be":   "nl",
-		"de":      "en", // fallback
+		"de":      "en",
 		"":        "en",
 		"zh-Hans": "en",
 	}
@@ -77,7 +76,7 @@ func TestAlertCopyLocales(t *testing.T) {
 			t.Fatalf("locale %q: baseLang=%q want %q", in, baseLang(in), wantTitle)
 		}
 	}
-	// Dutch copy sanity.
+
 	title, _ := alertCopy("nl", testDelivery())
 	if title != "Goed moment voor een picknick" {
 		t.Fatalf("nl title: %q", title)

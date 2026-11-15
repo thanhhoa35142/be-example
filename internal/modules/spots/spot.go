@@ -16,7 +16,6 @@ const (
 	KindBeach Kind = "beach"
 )
 
-// BBox is a viewport in WGS84 degrees: west, south, east, north.
 type BBox struct {
 	West  float64
 	South float64
@@ -24,10 +23,8 @@ type BBox struct {
 	North float64
 }
 
-// Names maps language codes (OSM name:xx tags) to localized names.
 type Names map[string]string
 
-// Reason is a score explanation code with parameters; the app translates it.
 type Reason struct {
 	Code   string         `json:"code"`
 	Params map[string]any `json:"params,omitempty"`
@@ -47,7 +44,6 @@ type Spot struct {
 	LastVerifiedAt *time.Time
 }
 
-// ScoreSnapshot is the precomputed score for one spot at one hour.
 type ScoreSnapshot struct {
 	Score      *int
 	Confidence *int
@@ -59,22 +55,18 @@ type ScoreSnapshot struct {
 type SpotWithScore struct {
 	Spot
 	Score *ScoreSnapshot
-	// Area is the simplified outline (GeoJSON MultiPolygon), only loaded when
-	// ListQuery.IncludeArea is set; nil for point spots.
+
 	Area json.RawMessage
-	// HourlyScores is a pre-serialized JSON array of {tsHour, score, capReason},
-	// only loaded when ListQuery.Hours > 0; nil when no hour has a score.
+
 	HourlyScores json.RawMessage
 }
 
-// ListQuery selects spots either by viewport or by id (exactly one of BBox /
-// IDs). Scores are read at When (default From, default now).
 type ListQuery struct {
 	BBox        *BBox
 	IDs         []uuid.UUID
 	When        *time.Time
-	From        *time.Time // start of the hourly series; used with Hours
-	Hours       int        // 0 = no hourly series, else 1..MaxScoreHours
+	From        *time.Time
+	Hours       int
 	IncludeArea bool
 	Filter      Filter
 }
@@ -94,20 +86,17 @@ type ForecastPoint struct {
 	CapReason  *string    `json:"capReason,omitempty"`
 	Reasons    []Reason   `json:"reasons"`
 	Confidence int        `json:"confidence"`
-	// Weather is the raw forecast behind the score for this hour; nil when
-	// the hour has no weather row.
+
 	Weather *HourWeather `json:"weather,omitempty"`
 }
 
-// HourWeather is the provider forecast for one hour (metric units; the
-// client converts for display). Absent keys mean the provider had no value.
 type HourWeather struct {
 	TempC      *float64 `json:"tempC,omitempty"`
 	FeelsLikeC *float64 `json:"feelsLikeC,omitempty"`
-	PrecipProb *int     `json:"precipProb,omitempty"` // 0-100 %
+	PrecipProb *int     `json:"precipProb,omitempty"`
 	WindKmh    *float64 `json:"windKmh,omitempty"`
 	UV         *float64 `json:"uv,omitempty"`
-	Cloud      *int     `json:"cloud,omitempty"` // 0-100 %
+	Cloud      *int     `json:"cloud,omitempty"`
 }
 
 type Amenity struct {
@@ -127,8 +116,7 @@ type SpotDetail struct {
 	Spot
 	Status string `json:"-"`
 	CellID int64  `json:"-"`
-	// WeatherSource is the provider of the weather behind the scores
-	// ("weatherkit" | "openmeteo"); nil when the spot has no weather yet.
+
 	WeatherSource *string         `json:"-"`
 	MergedInto    *uuid.UUID      `json:"-"`
 	AreaGeoJSON   json.RawMessage `json:"area,omitempty"`
@@ -136,13 +124,12 @@ type SpotDetail struct {
 	Sources       []Source        `json:"sources"`
 }
 
-// Pack is a city pack as listed to the app.
 type Pack struct {
 	Slug        string
 	Name        string
 	Country     string
 	TZ          string
-	Center      [2]float64 // lon, lat
-	BBox        [4]float64 // west, south, east, north
+	Center      [2]float64
+	BBox        [4]float64
 	ActiveSpots int
 }

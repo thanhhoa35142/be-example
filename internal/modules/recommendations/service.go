@@ -14,8 +14,6 @@ func NewService(repo Repository) *Service {
 	return &Service{repo: repo}
 }
 
-// Recommend returns the best-scoring spots around a point at a given hour
-// (default: current hour, quantized for edge-cache friendliness).
 func (s *Service) Recommend(ctx context.Context, q Query) ([]Item, error) {
 	if math.IsNaN(q.Lat) || q.Lat < -90 || q.Lat > 90 ||
 		math.IsNaN(q.Lon) || q.Lon < -180 || q.Lon > 180 {

@@ -15,7 +15,7 @@ func baseInput() RuleInput {
 }
 
 func TestAreaCellRoundsBeforeConverting(t *testing.T) {
-	// Different raw values that round to the same 2-decimal point share a cell.
+
 	a, err := AreaCell(LatLon{Lat: 52.3612, Lon: 4.8791})
 	if err != nil {
 		t.Fatal(err)
@@ -55,7 +55,6 @@ func TestNormalizeShapes(t *testing.T) {
 	cell := uint64(0x871f1d489ffffff)
 	area := &LatLon{Lat: 52.36, Lon: 4.88}
 
-	// area -> cell, raw point dropped
 	in := baseInput()
 	in.Area = area
 	out, err := normalize(in)
@@ -63,7 +62,6 @@ func TestNormalizeShapes(t *testing.T) {
 		t.Fatalf("area: %+v err=%v", out, err)
 	}
 
-	// exactly one required
 	for name, mut := range map[string]func(*RuleInput){
 		"none":       func(*RuleInput) {},
 		"spot+cell":  func(i *RuleInput) { i.SpotID = &spot; i.H3Cell = &cell },
@@ -83,7 +81,6 @@ func TestNormalizeShapes(t *testing.T) {
 		}
 	}
 
-	// spot rule without radius and cell rule still fine
 	in = baseInput()
 	in.SpotID = &spot
 	in.RadiusM = nil

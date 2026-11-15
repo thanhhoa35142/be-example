@@ -14,11 +14,10 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/modules/alerts"
 )
 
-// memAlertsRepo embeds the Repository port; only rule CRUD is implemented.
 type memAlertsRepo struct {
 	alerts.Repository
 	rules       map[uuid.UUID]alerts.Rule
-	missingSpot *uuid.UUID // SpotActive reports false for this spot
+	missingSpot *uuid.UUID
 }
 
 func (r *memAlertsRepo) DeviceExists(context.Context, uuid.UUID) (bool, error) { return true, nil }
@@ -103,7 +102,6 @@ func TestAlertsHandlerArea(t *testing.T) {
 		}
 	}
 
-	// Free plan: area rules count toward the single-rule cap.
 	free := uuid.New()
 	h2 := NewAlertsHandler(alerts.NewService(&memAlertsRepo{rules: map[uuid.UUID]alerts.Rule{uuid.New(): {}}}, planMap{free: "free"}, nil))
 	r2 := gin.New()
@@ -156,7 +154,6 @@ func TestAlertsHandlerValidation(t *testing.T) {
 		t.Errorf("missing spot: want 404, got %d %s", w.Code, w.Body)
 	}
 
-	// Device id: header preferred, legacy query still accepted, neither -> 400.
 	get := func(hdr, query string) int {
 		req := httptest.NewRequest("GET", "/v1/alerts"+query, nil)
 		if hdr != "" {

@@ -23,7 +23,6 @@ type trackEventsRequest struct {
 	Events   []events.Input `json:"events"`
 }
 
-// POST /v1/events — batch product analytics events.
 func (h *EventsHandler) Track(c *gin.Context) {
 	var req trackEventsRequest
 	if err := c.ShouldBindJSON(&req); err != nil {

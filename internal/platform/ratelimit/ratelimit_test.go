@@ -7,7 +7,7 @@ import (
 )
 
 func TestAllowAndRetryAfter(t *testing.T) {
-	l := New(PerMinute(60, 2)) // 1/s, burst 2
+	l := New(PerMinute(60, 2))
 	now := time.Unix(1_000_000, 0)
 	l.now = func() time.Time { return now }
 

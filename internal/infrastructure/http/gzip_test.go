@@ -150,8 +150,6 @@ func TestGzipRedirectAndWriteString(t *testing.T) {
 	}
 }
 
-// Status/Written/Size must describe the pending response, not the untouched
-// underlying writer.
 func TestGzipWriterReportsPendingState(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()

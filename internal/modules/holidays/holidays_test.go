@@ -48,8 +48,6 @@ func TestGB2026(t *testing.T) {
 	}
 }
 
-// cal returns midnight in time.Local; a naive .UTC() would shift every date
-// back a day on hosts east of UTC.
 func TestNoDateShiftInEasternZone(t *testing.T) {
 	old := time.Local
 	defer func() { time.Local = old }()
@@ -77,7 +75,7 @@ func TestRegionalAndEveDaysExcluded(t *testing.T) {
 		t.Error("CH national day missing")
 	}
 	se := dates(mustFor(t, "SE", 2026))
-	for _, d := range []string{"2026-12-24", "2026-12-31"} { // Julafton / Nyarsafton: ObservanceOther
+	for _, d := range []string{"2026-12-24", "2026-12-31"} {
 		if _, ok := se[d]; ok {
 			t.Errorf("SE eve %s must be excluded", d)
 		}
@@ -91,7 +89,7 @@ func TestAustraliaOnlyCommonDates(t *testing.T) {
 			t.Errorf("AU %s should be national: %v", d, au)
 		}
 	}
-	// King's Birthday / Labour Day differ per state.
+
 	for _, d := range []string{"2026-06-08", "2026-10-05"} {
 		if _, ok := au[d]; ok {
 			t.Errorf("AU %s is state-specific", d)

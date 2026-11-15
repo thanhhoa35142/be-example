@@ -15,11 +15,8 @@ type Service struct {
 	now      func() time.Time
 }
 
-// Option configures a Service.
 type Option func(*Service)
 
-// WithVerifier installs the JWS verifier and policy. Without it the service
-// still resolves plans but refuses every signed payload (ErrNotConfigured).
 func WithVerifier(v PayloadVerifier, cfg Config) Option {
 	return func(s *Service) { s.verifier, s.cfg = v, cfg }
 }
@@ -32,19 +29,12 @@ func NewService(repo Repository, opts ...Option) *Service {
 	return s
 }
 
-// LinkTransaction verifies a StoreKit signed transaction (signature, Apple
-// chain, bundle id, environment), upserts the subscription, and links it to
-// the device. Returns ErrDeviceNotFound when the device is unknown,
-// ErrAccountTokenMismatch when the transaction's appAccountToken names another
-// device, and ErrDeviceLimit when the transaction is already on
-// MaxDevicesPerSubscription active devices.
 func (s *Service) LinkTransaction(ctx context.Context, deviceID, signedTransaction string) (*Entitlement, error) {
 	sub, accountToken, err := s.decodeTransaction(signedTransaction)
 	if err != nil {
 		return nil, err
 	}
-	// appAccountToken is optional; when the app sets it to the device id and
-	// it parses as a UUID it must match the device linking the transaction.
+
 	if tok, perr := uuid.Parse(accountToken); perr == nil {
 		if dev, derr := uuid.Parse(deviceID); derr != nil || tok != dev {
 			return nil, ErrAccountTokenMismatch
@@ -57,8 +47,7 @@ func (s *Service) LinkTransaction(ctx context.Context, deviceID, signedTransacti
 	if !exists {
 		return nil, ErrDeviceNotFound
 	}
-	// A stale transaction (older signedDate) or an attempt to un-revoke is
-	// dropped by the upsert; the plan below then reflects the stored state.
+
 	if _, err := s.repo.UpsertSubscription(ctx, *sub); err != nil {
 		return nil, err
 	}
@@ -68,7 +57,6 @@ func (s *Service) LinkTransaction(ctx context.Context, deviceID, signedTransacti
 	return s.Entitlement(ctx, deviceID)
 }
 
-// Plan implements alerts.PlanResolver.
 func (s *Service) Plan(ctx context.Context, deviceID uuid.UUID) (string, error) {
 	e, err := s.Entitlement(ctx, deviceID.String())
 	if err != nil {
@@ -77,7 +65,6 @@ func (s *Service) Plan(ctx context.Context, deviceID uuid.UUID) (string, error) 
 	return string(e.Plan), nil
 }
 
-// Entitlement resolves the effective plan for a device.
 func (s *Service) Entitlement(ctx context.Context, deviceID string) (*Entitlement, error) {
 	sub, err := s.repo.ActiveSubscription(ctx, deviceID)
 	if err != nil {
@@ -89,8 +76,6 @@ func (s *Service) Entitlement(ctx context.Context, deviceID string) (*Entitlemen
 	return &Entitlement{Plan: PlanPlus, Subscription: sub}, nil
 }
 
-// ProcessNotification handles an App Store Server Notification V2: records it
-// for audit and upserts the embedded transaction when present.
 func (s *Service) ProcessNotification(ctx context.Context, signedPayload string) error {
 	n, sub, rawPayload, err := s.decodeNotification(signedPayload)
 	if err != nil {
@@ -115,8 +100,7 @@ func (s *Service) ProcessNotification(ctx context.Context, signedPayload string)
 	if sub == nil {
 		return s.repo.MarkNotificationProcessed(ctx, n.NotificationUUID)
 	}
-	// Out-of-order guard: ignore notifications whose signed_date is not newer
-	// than what the subscription already applied.
+
 	if lastSigned, ok, err := s.repo.SubscriptionLastSignedDate(ctx, otid); err != nil {
 		return s.markFailed(ctx, n.NotificationUUID, err)
 	} else if ok && !lastSigned.Before(signedAt) {
@@ -127,7 +111,7 @@ func (s *Service) ProcessNotification(ctx context.Context, signedPayload string)
 		return s.markFailed(ctx, n.NotificationUUID, err)
 	}
 	if !applied {
-		// Stale by the transaction's own signedDate, or it would un-revoke.
+
 		return s.repo.MarkNotificationIgnored(ctx, n.NotificationUUID)
 	}
 	slog.InfoContext(ctx, "app store notification processed",

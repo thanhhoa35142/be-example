@@ -44,14 +44,11 @@ func readDevice(t *testing.T, pool *pgxpool.Pool, id uuid.UUID) deviceRow {
 	return r
 }
 
-// A reinstall that lost its Keychain registers a NEW device id with the SAME
-// APNs token: the new device takes the token over, the old one is demoted
-// consistently (ck_t_devices_push_token_pair) instead of a permanent 409.
 func TestRegisterDeviceTakesOverAPNsToken(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
 	repo := persistence.NewDevicesRepo(persistence.New(pool), pool)
-	token := uuid.NewString() + uuid.NewString()[:4] // opaque unique string
+	token := uuid.NewString() + uuid.NewString()[:4]
 
 	oldID, newID := uuid.New(), uuid.New()
 	t.Cleanup(func() {
@@ -70,7 +67,7 @@ func TestRegisterDeviceTakesOverAPNsToken(t *testing.T) {
 	if cur.token == nil || *cur.token != token || *cur.status != "active" || *cur.env != "sandbox" {
 		t.Errorf("new holder wrong: %+v", cur)
 	}
-	// The old install can re-register later without a token and stays valid.
+
 	if _, err := repo.Upsert(ctx, devices.RegisterInput{ID: oldID}); err != nil {
 		t.Fatalf("re-register old: %v", err)
 	}
@@ -79,8 +76,6 @@ func TestRegisterDeviceTakesOverAPNsToken(t *testing.T) {
 	}
 }
 
-// Many devices registering the same token at once: no error escapes and the
-// unique index leaves exactly one holder.
 func TestRegisterDeviceTokenTakeoverConcurrent(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
@@ -115,7 +110,6 @@ func TestRegisterDeviceTokenTakeoverConcurrent(t *testing.T) {
 	}
 }
 
-// Re-registering a deleted device keeps working but nothing personal returns.
 func TestResurrectedDeviceStartsClean(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
@@ -146,7 +140,7 @@ func TestResurrectedDeviceStartsClean(t *testing.T) {
 	if deleted || tok != nil || env != nil || loc != nil || tz != nil || ver != nil || status != "none" || prefs != "{}" {
 		t.Fatalf("personal data resurrected: tok=%v env=%v loc=%v tz=%v ver=%v status=%s prefs=%s deleted=%v", tok, env, loc, tz, ver, status, prefs, deleted)
 	}
-	// And a live (non-deleted) device keeps its COALESCE-style merge.
+
 	if _, err := repo.Upsert(ctx, devices.RegisterInput{ID: id, Locale: sptr("vi-VN")}); err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +194,7 @@ func TestSubscriptionUpsertGuards(t *testing.T) {
 	if applied, err := repo.UpsertSubscription(ctx, mk("revoked", t0.Add(time.Minute))); err != nil || !applied {
 		t.Fatalf("newer revoke must apply: %v %v", applied, err)
 	}
-	// Refund is terminal: neither older nor newer non-revoked data revives it.
+
 	if applied, _ := repo.UpsertSubscription(ctx, mk("active", t0)); applied {
 		t.Error("old transaction reactivated a revoked subscription")
 	}
@@ -250,19 +244,19 @@ func TestLinkDeviceCapIsAtomic(t *testing.T) {
 	if ok.Load() != max || limited.Load() != devs-max {
 		t.Fatalf("linked=%d limited=%d, want %d/%d", ok.Load(), limited.Load(), max, devs-max)
 	}
-	// Re-linking an existing pair at the cap is idempotent.
+
 	var linked uuid.UUID
 	_ = pool.QueryRow(ctx, `SELECT device_id FROM t_device_subscriptions WHERE original_transaction_id=$1 LIMIT 1`, otid).Scan(&linked)
 	if err := repo.LinkDevice(ctx, linked.String(), otid, max); err != nil {
 		t.Fatalf("relink at cap: %v", err)
 	}
-	// A deleted device frees its slot.
+
 	if ok, err := persistence.NewDevicesRepo(persistence.New(pool), pool).Delete(ctx, linked); err != nil || !ok {
 		t.Fatal(err)
 	}
 	for _, id := range ids {
 		if err := repo.LinkDevice(ctx, id.String(), otid, max); err == nil {
-			return // one of the previously refused devices fit in the freed slot
+			return
 		}
 	}
 	t.Fatal("freed slot never reusable")
@@ -296,14 +290,14 @@ func TestFreePlanLimitIsAtomic(t *testing.T) {
 	if ok.Load() != 1 || limited.Load() != 9 {
 		t.Fatalf("created=%d limited=%d, want 1/9", ok.Load(), limited.Load())
 	}
-	// Unlimited plans are not capped; unknown device is reported.
+
 	if _, err := repo.InsertRuleLimited(ctx, dev, in, 8*time.Hour, 10*time.Hour, -1); err != nil {
 		t.Fatalf("unlimited: %v", err)
 	}
 	if _, err := repo.InsertRuleLimited(ctx, uuid.New(), in, 8*time.Hour, 10*time.Hour, -1); !errors.Is(err, alerts.ErrDeviceInvalid) {
 		t.Fatalf("unknown device: %v", err)
 	}
-	// A spot that vanished maps to ErrSpotNotFound, not a 500.
+
 	ghost := uuid.New()
 	in.SpotID = &ghost
 	if _, err := repo.InsertRuleLimited(ctx, dev, in, 8*time.Hour, 10*time.Hour, -1); !errors.Is(err, alerts.ErrSpotNotFound) {
@@ -317,8 +311,6 @@ func TestFreePlanLimitIsAtomic(t *testing.T) {
 	}
 }
 
-// Community crowd needs N DISTINCT devices; one device cannot unlock a slot
-// (however many days it reports) and each device counts once in the average.
 func TestCommunityCrowdNeedsDistinctDevices(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
@@ -352,19 +344,18 @@ func TestCommunityCrowdNeedsDistinctDevices(t *testing.T) {
 	if _, _, found := slot(5); found {
 		t.Fatal("a single device unlocked the slot with 10 reports")
 	}
-	for i := 0; i < 3; i++ { // 4 distinct devices in total: still below 5
+	for i := 0; i < 3; i++ {
 		insert(newDevice(t, pool), 1, 1)
 	}
 	if _, _, found := slot(5); found {
 		t.Fatal("4 distinct devices unlocked a 5-device slot")
 	}
-	insert(newDevice(t, pool), 1, 1) // 5th distinct device
+	insert(newDevice(t, pool), 1, 1)
 	n, avg, found := slot(5)
 	if !found || n != 5 {
 		t.Fatalf("n_reports = %d found=%v, want 5 distinct devices", n, found)
 	}
-	// Per-device averaging: spammer (level 3, once) + four quiet devices (1):
-	// (3+1+1+1+1)/5 = 1.4, not dominated by the spammer's 10 rows.
+
 	if avg < 1.39 || avg > 1.41 {
 		t.Fatalf("avg = %v, want 1.4", avg)
 	}

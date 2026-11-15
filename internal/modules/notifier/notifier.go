@@ -10,21 +10,14 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/modules/alerts"
 )
 
-// TokenProvider resolves a device's APNs token, environment and locale.
-// alerts.Repository satisfies this interface.
 type TokenProvider interface {
 	DeviceAPNsToken(ctx context.Context, deviceID uuid.UUID) (token, env, locale string, ok bool, err error)
 }
 
-// Unregisterer clears a device's push credentials. Implemented by
-// alerts.Repository; asserted optionally so test fakes keep working.
 type Unregisterer interface {
 	MarkDeviceUnregistered(ctx context.Context, deviceID uuid.UUID) error
 }
 
-// Sender delivers fired alerts via APNs. When client is nil (no APNS_*
-// credentials configured) it logs the exact payload it would have sent —
-// dev mode.
 type Sender struct {
 	logger *slog.Logger
 	tokens TokenProvider
@@ -60,9 +53,7 @@ func (s *Sender) Send(ctx context.Context, d alerts.Delivery) error {
 
 	status, err := s.client.Send(ctx, token, env, d.RuleID.String(), body)
 	if status == http.StatusGone {
-		// APNs 410: the token is permanently dead. Clear the device's push
-		// credentials so future evaluations skip it, and signal the caller
-		// to dead-letter the delivery instead of retrying.
+
 		if u, ok := s.tokens.(Unregisterer); ok {
 			if uerr := u.MarkDeviceUnregistered(ctx, d.DeviceID); uerr != nil {
 				s.logger.ErrorContext(ctx, "device unregister failed",

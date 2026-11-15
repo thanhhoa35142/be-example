@@ -2,34 +2,35 @@ package http
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"errors"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/thanhhoa35142/be-example/internal/modules/adminauth"
 	"github.com/thanhhoa35142/be-example/internal/platform/httpx"
 	"github.com/thanhhoa35142/be-example/internal/platform/ratelimit"
 )
 
-// RateLimits are the per-client-IP budgets by request class.
 type RateLimits struct {
-	Read   ratelimit.Rule // GET/HEAD/OPTIONS
-	Write  ratelimit.Rule // POST/PUT/PATCH/DELETE
-	Device ratelimit.Rule // POST /v1/devices (free identity minting)
+	Read   ratelimit.Rule
+	Write  ratelimit.Rule
+	Device ratelimit.Rule
 }
 
-// DefaultRateLimits are used when none are configured.
 func DefaultRateLimits() RateLimits {
 	return RateLimits{
 		Read:   ratelimit.PerMinute(600, 120),
 		Write:  ratelimit.PerMinute(60, 30),
-		Device: ratelimit.PerMinute(30.0/60, 10), // 30 per hour
+		Device: ratelimit.PerMinute(30.0/60, 10),
 	}
 }
 
@@ -49,11 +50,6 @@ func tooManyRequests(c *gin.Context, retryAfter time.Duration, detail string) {
 	c.Abort()
 }
 
-// RateLimit applies per-client-IP token buckets: reads get the widest budget,
-// writes a tighter one, and POST /v1/devices the tightest (device ids are free
-// to mint). /healthz and /readyz are exempt. The client IP is c.ClientIP(),
-// which only honours X-Forwarded-For from the engine's trusted proxies.
-// mk builds the checker per rule class; nil = in-memory limiters.
 func RateLimit(l RateLimits, mk ...func(ratelimit.Rule, string) ratelimit.Checker) gin.HandlerFunc {
 	newLim := func(r ratelimit.Rule, ns string) ratelimit.Checker {
 		if len(mk) > 0 && mk[0] != nil {
@@ -82,11 +78,6 @@ func RateLimit(l RateLimits, mk ...func(ratelimit.Rule, string) ratelimit.Checke
 	}
 }
 
-// BodyLimit caps request bodies with http.MaxBytesReader. overrides maps a
-// route pattern (gin FullPath, e.g. "/v1/events") to a larger/smaller cap.
-// The body is read eagerly (at most limit+1 bytes) so an oversize request
-// gets one uniform 413 problem response instead of every handler having to
-// translate a bind error.
 func BodyLimit(def int64, overrides map[string]int64) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c.Request.Body == nil || c.Request.Body == http.NoBody {
@@ -122,8 +113,6 @@ func BodyLimit(def int64, overrides map[string]int64) gin.HandlerFunc {
 	}
 }
 
-// AdminAudit writes one structured log line for every mutating admin request
-// (including rejected ones). Never logs the Authorization header or body.
 func AdminAudit() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Next()
@@ -135,19 +124,20 @@ func AdminAudit() gin.HandlerFunc {
 			"method", c.Request.Method,
 			"path", c.Request.URL.Path,
 			"client_ip", c.ClientIP(),
+			"admin_user_id", c.GetString("adminUserID"),
 			"status", c.Writer.Status(),
 		)
 	}
 }
 
-// AdminAuth guards staff endpoints with a bearer token. An empty token
-// disables the admin surface entirely (404). The comparison is constant time
-// and failed attempts are rate-limited per client IP (successful requests do
-// not consume the budget).
-func AdminAuth(token string, failed ratelimit.Checker) gin.HandlerFunc {
+type SessionAuthenticator interface {
+	Authenticate(ctx context.Context, token string) (*adminauth.Session, *adminauth.User, error)
+}
+
+func AdminAuth(token string, sessions SessionAuthenticator, failed ratelimit.Checker) gin.HandlerFunc {
 	want := sha256.Sum256([]byte(token))
 	return func(c *gin.Context) {
-		if token == "" {
+		if token == "" && sessions == nil {
 			httpx.WriteProblem(c, http.StatusNotFound, httpx.CodeNotFound, "Not found", "")
 			c.Abort()
 			return
@@ -157,12 +147,85 @@ func AdminAuth(token string, failed ratelimit.Checker) gin.HandlerFunc {
 			tooManyRequests(c, retry, "too many failed authentication attempts")
 			return
 		}
-		got, _ := strings.CutPrefix(c.GetHeader("Authorization"), "Bearer ")
-		sum := sha256.Sum256([]byte(got)) // fixed-length digests: no length leak
-		if got == "" || subtle.ConstantTimeCompare(sum[:], want[:]) != 1 {
-			failed.Hit(ip)
+		if h := c.GetHeader("Authorization"); h != "" {
+			got, found := strings.CutPrefix(h, "Bearer ")
+			sum := sha256.Sum256([]byte(got))
+			if !found || token == "" || got == "" || subtle.ConstantTimeCompare(sum[:], want[:]) != 1 {
+				failed.Hit(ip)
+				c.Header("WWW-Authenticate", `Bearer realm="pickhour-admin"`)
+				httpx.WriteProblem(c, http.StatusUnauthorized, httpx.CodeUnauthorized, "Unauthorized", "")
+				c.Abort()
+				return
+			}
+			c.Set("adminAuthMethod", "token")
+			c.Next()
+			return
+		}
+		if sessions == nil {
 			c.Header("WWW-Authenticate", `Bearer realm="pickhour-admin"`)
 			httpx.WriteProblem(c, http.StatusUnauthorized, httpx.CodeUnauthorized, "Unauthorized", "")
+			c.Abort()
+			return
+		}
+		cookie, err := c.Cookie(AdminSessionCookie)
+		if err != nil {
+			cookie = ""
+		}
+		sess, user, err := sessions.Authenticate(c.Request.Context(), cookie)
+		if err != nil {
+
+			clearSessionCookie(c)
+			httpx.WriteProblem(c, http.StatusUnauthorized, httpx.CodeUnauthorized, "Unauthorized", "")
+			c.Abort()
+			return
+		}
+		c.Set("adminAuthMethod", "session")
+		c.Set("adminUserID", user.ID.String())
+		c.Set("adminSessionID", sess.ID.String())
+		c.Next()
+	}
+}
+
+func originAllowed(c *gin.Context, origin string, allowedOrigins []string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	for _, allowed := range allowedOrigins {
+		allowed = strings.TrimSpace(allowed)
+		if allowed == "" {
+			continue
+		}
+		if strings.EqualFold(u.Host, allowed) || strings.EqualFold(origin, allowed) {
+			return true
+		}
+
+		if au, aerr := url.Parse(allowed); aerr == nil && au.Host != "" && strings.EqualFold(u.Host, au.Host) {
+			return true
+		}
+	}
+	if xfh := strings.TrimSpace(c.GetHeader("X-Forwarded-Host")); xfh != "" {
+		return strings.EqualFold(u.Host, xfh)
+	}
+	return strings.EqualFold(u.Host, c.Request.Host)
+}
+
+func AdminCSRF(allowedOrigins []string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if isSafeMethod(c.Request.Method) ||
+			strings.HasPrefix(c.GetHeader("Authorization"), "Bearer ") {
+			c.Next()
+			return
+		}
+		if c.GetHeader(AdminCSRFHeader) != "1" {
+			httpx.WriteProblem(c, http.StatusForbidden, httpx.CodeForbidden,
+				"Forbidden", "missing "+AdminCSRFHeader+" header")
+			c.Abort()
+			return
+		}
+		if origin := c.GetHeader("Origin"); origin != "" && !originAllowed(c, origin, allowedOrigins) {
+			httpx.WriteProblem(c, http.StatusForbidden, httpx.CodeForbidden,
+				"Forbidden", "origin not allowed")
 			c.Abort()
 			return
 		}

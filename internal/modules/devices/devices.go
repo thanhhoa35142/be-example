@@ -12,21 +12,19 @@ import (
 
 var (
 	ErrNotFound = errors.New("device not found")
-	// ErrConflict is now only a lost race between concurrent registrations of
-	// the same APNs token (a new device otherwise takes the token over).
+
 	ErrConflict = errors.New("conflict")
-	// ErrInvalidInput marks a registration payload that breaks a field limit.
+
 	ErrInvalidInput = errors.New("invalid device registration")
 )
 
-// Field limits for POST /v1/devices.
 const (
-	MaxPrefsBytes = 4096 // serialized JSON size of prefs
+	MaxPrefsBytes = 4096
 	MaxLocaleLen  = 35
 	MaxTZLen      = 64
 	MaxVersionLen = 32
-	MinTokenLen   = 32  // hex chars (16 bytes)
-	MaxTokenLen   = 200 // hex chars (100 bytes, APNs' documented maximum)
+	MinTokenLen   = 32
+	MaxTokenLen   = 200
 )
 
 var (
@@ -35,19 +33,16 @@ var (
 	tokenRe   = regexp.MustCompile(`^[0-9a-fA-F]+$`)
 )
 
-// RegisterInput is the payload for POST /v1/devices.
-// ID is generated client-side once and kept in the Keychain.
 type RegisterInput struct {
 	ID         uuid.UUID
 	APNsToken  *string
-	APNsEnv    *string // "sandbox" | "production"
+	APNsEnv    *string
 	Locale     *string
 	TZ         *string
 	AppVersion *string
 	Prefs      map[string]any
 }
 
-// Device is the stored record (no location fields by design).
 type Device struct {
 	ID         uuid.UUID
 	APNsToken  *string
@@ -58,10 +53,6 @@ type Device struct {
 	LastSeenAt time.Time
 }
 
-// Normalize trims empty optional strings to nil and enforces the field limits:
-// locale/appVersion short safe charsets, tz a real IANA zone, apnsToken hex of
-// bounded length, apnsEnv sandbox|production, prefs at most MaxPrefsBytes when
-// serialized. It returns the cleaned copy.
 func (in RegisterInput) Normalize() (RegisterInput, error) {
 	blank := func(p *string) *string {
 		if p == nil || *p == "" {

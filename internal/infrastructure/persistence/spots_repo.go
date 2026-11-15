@@ -215,8 +215,6 @@ func (r *SpotsRepository) ListForecast(ctx context.Context, spotID uuid.UUID, we
 	return out, nil
 }
 
-// hourWeather maps the LEFT JOINed weather columns; nil when the hour has no
-// weather row at all (every column NULL).
 func hourWeather(temp, feels pgtype.Float4, precip pgtype.Int2, wind, uv pgtype.Float4, cloud pgtype.Int2) *spots.HourWeather {
 	if !temp.Valid && !feels.Valid && !precip.Valid && !wind.Valid && !uv.Valid && !cloud.Valid {
 		return nil
@@ -266,8 +264,6 @@ func reasonsFromJSON(raw []byte) []spots.Reason {
 	return r
 }
 
-// round1Ptr converts a nullable real to float64 rounded to 0.1, so the JSON
-// carries 21.3 instead of float32 noise like 21.299999237060547.
 func round1Ptr(v pgtype.Float4) *float64 {
 	if !v.Valid {
 		return nil

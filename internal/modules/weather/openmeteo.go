@@ -11,8 +11,6 @@ import (
 	"time"
 )
 
-// OpenMeteo is a free forecast provider needing no API key — used for dev.
-// Docs: https://open-meteo.com/en/docs
 const openMeteoDefaultURL = "https://api.open-meteo.com/v1/forecast"
 
 type OpenMeteo struct {
@@ -32,7 +30,6 @@ func NewOpenMeteo(client *http.Client) *OpenMeteo {
 
 func (o *OpenMeteo) Name() string { return "open-meteo" }
 
-// Open-Meteo returns variable-length arrays with nulls; decode manually.
 type openMeteoRaw struct {
 	Hourly struct {
 		Time                     []string          `json:"time"`

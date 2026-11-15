@@ -17,19 +17,11 @@ type ctxKey string
 
 const authContextKey ctxKey = "apikey.auth"
 
-// authFrom returns the authenticated API key attached by apiKeyAuth.
 func authFrom(ctx context.Context) (*apikeys.Auth, bool) {
 	a, ok := ctx.Value(authContextKey).(*apikeys.Auth)
 	return a, ok && a != nil
 }
 
-// apiKeyAuth requires "Authorization: Bearer phk_..." and resolves it to
-// an apikeys.Auth (key + grants) stored in the request context. Enforces
-// the key's rate_limit_rps via an in-memory token bucket.
-//
-// Failed authentications are rate-limited per client IP (failed): once an IP
-// has burned its budget it is answered 429 before any database lookup, so
-// key-guessing cannot be used to hammer the DB.
 func apiKeyAuth(svc *apikeys.Service, limiter *keyLimiter, failed *ratelimit.Limiter) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := c.GetHeader("Authorization")
@@ -75,8 +67,6 @@ func writeAuthProblem(c *gin.Context, status int, detail string) {
 	})
 }
 
-// requireScope wraps a tool call: resolves auth from ctx and enforces the
-// (resource, action) grant before running fn.
 func requireScope(ctx context.Context, svc *apikeys.Service, resource, action string) error {
 	auth, ok := authFrom(ctx)
 	if !ok {

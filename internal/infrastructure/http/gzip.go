@@ -12,12 +12,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// minGzipBytes is the smallest body worth compressing: below it the gzip
-// header/trailer and CPU cost outweigh the saving (and a packet is a packet).
 const minGzipBytes = 1024
 
-// gzipPool recycles compressors: a gzip.Writer carries ~1 MB of state, so
-// allocating one per request dominates the cost of small responses.
 var gzipPool = sync.Pool{New: func() any { return gzip.NewWriter(io.Discard) }}
 
 func getGzip(w io.Writer) *gzip.Writer {
@@ -27,12 +23,10 @@ func getGzip(w io.Writer) *gzip.Writer {
 }
 
 func putGzip(zw *gzip.Writer) {
-	zw.Reset(io.Discard) // drop the reference to the response writer
+	zw.Reset(io.Discard)
 	gzipPool.Put(zw)
 }
 
-// gzipBytes compresses b with a pooled writer. ok is false when compression
-// would not shrink the body (or failed), in which case callers keep identity.
 func gzipBytes(b []byte) (out []byte, ok bool) {
 	var buf bytes.Buffer
 	buf.Grow(len(b) / 4)
@@ -50,8 +44,6 @@ func gzipBytes(b []byte) (out []byte, ok bool) {
 	return buf.Bytes(), true
 }
 
-// acceptsGzip reports whether the request's Accept-Encoding allows gzip
-// ("gzip;q=0" and absent headers do not).
 func acceptsGzip(h http.Header) bool {
 	for _, part := range strings.Split(strings.Join(h.Values("Accept-Encoding"), ","), ",") {
 		name, params, _ := strings.Cut(strings.TrimSpace(part), ";")
@@ -68,7 +60,6 @@ func acceptsGzip(h http.Header) bool {
 	return false
 }
 
-// addVary appends token to Vary unless it is already listed.
 func addVary(h http.Header, token string) {
 	for _, v := range h.Values("Vary") {
 		for _, t := range strings.Split(v, ",") {
@@ -80,20 +71,13 @@ func addVary(h http.Header, token string) {
 	h.Add("Vary", token)
 }
 
-// Gzip compresses JSON responses for clients that send
-// `Accept-Encoding: gzip`. It is registered before the per-route cache
-// middleware so the cache stores the identity body (plus its own
-// pre-compressed copy, which it sends with Content-Encoding already set so
-// this middleware leaves it alone) and each client gets its encoding on the
-// way out.
 func Gzip() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if !acceptsGzip(c.Request.Header) {
 			c.Next()
 			return
 		}
-		// Vary must be sent even when this particular response ends up
-		// uncompressed, so shared caches key on Accept-Encoding.
+
 		addVary(c.Writer.Header(), "Accept-Encoding")
 		w := &gzipResponseWriter{ResponseWriter: c.Writer, size: -1}
 		c.Writer = w
@@ -101,10 +85,6 @@ func Gzip() gin.HandlerFunc {
 	}
 }
 
-// run executes the rest of the chain. A panic must not flush the held
-// bytes (that would send a 200 before Recovery can answer 500), so the
-// writer is reset into pass-through mode before the panic continues
-// outwards.
 func (w *gzipResponseWriter) run(c *gin.Context) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -116,25 +96,16 @@ func (w *gzipResponseWriter) run(c *gin.Context) {
 	w.finalize()
 }
 
-// gzipResponseWriter delays both the status code and the gzip decision:
-// gin calls WriteHeader (via c.Status) before the renderer sets
-// Content-Type, so deciding at WriteHeader time would always see an empty
-// content type. JSON bodies are held back until minGzipBytes have
-// accumulated (or the response ends smaller), then either compressed or sent
-// as is. Everything gin's ResponseWriter exposes about the status/body
-// (Status, Written, Size, WriteString, WriteHeaderNow) reports the logical
-// state of that pending response rather than the untouched underlying writer.
 type gzipResponseWriter struct {
 	gin.ResponseWriter
 	zw       *gzip.Writer
-	pending  int    // status set by WriteHeader, not yet forwarded
-	held     []byte // JSON bytes awaiting the size decision
-	size     int    // identity bytes accepted so far, -1 = none
+	pending  int
+	held     []byte
+	size     int
 	decided  bool
 	compress bool
-	sent     bool // headers forwarded to the underlying writer
-	// passthrough: after a panic, forward everything untouched so the
-	// recovery handler's response is not stuck in the size-decision buffer.
+	sent     bool
+
 	passthrough bool
 }
 
@@ -180,14 +151,12 @@ func (w *gzipResponseWriter) Written() bool {
 	return w.size != -1
 }
 
-// compressible: JSON that nobody encoded yet.
 func (w *gzipResponseWriter) compressible() bool {
 	h := w.Header()
 	return strings.Contains(h.Get("Content-Type"), "application/json") &&
 		h.Get("Content-Encoding") == ""
 }
 
-// decide fixes the encoding and forwards the status + headers.
 func (w *gzipResponseWriter) decide(compress bool) {
 	if w.decided {
 		return
@@ -206,15 +175,13 @@ func (w *gzipResponseWriter) decide(compress bool) {
 	w.sent = true
 }
 
-// WriteHeaderNow is what gin's AbortWithStatus calls. It must forward the
-// pending status, not the underlying writer's default 200.
 func (w *gzipResponseWriter) WriteHeaderNow() {
 	if w.passthrough {
 		w.ResponseWriter.WriteHeaderNow()
 		return
 	}
 	if !w.decided {
-		// No body size to wait for: headers go out now.
+
 		w.decide(w.compressible())
 	}
 	if w.size == -1 {
@@ -268,8 +235,6 @@ func (w *gzipResponseWriter) flushHeld() error {
 	return err
 }
 
-// Flush pushes buffered data downstream; handlers that stream must not
-// have their output stuck in the compressor or the size-decision buffer.
 func (w *gzipResponseWriter) Flush() {
 	if w.passthrough {
 		w.ResponseWriter.Flush()
@@ -285,11 +250,9 @@ func (w *gzipResponseWriter) Flush() {
 	w.ResponseWriter.Flush()
 }
 
-// finalize settles a response that never reached the decision point (small
-// or bodiless) and closes the compressor when it engaged.
 func (w *gzipResponseWriter) finalize() {
 	if !w.decided {
-		w.decide(false) // below minGzipBytes (or no body): identity
+		w.decide(false)
 	}
 	_ = w.flushHeld()
 	if w.compress {

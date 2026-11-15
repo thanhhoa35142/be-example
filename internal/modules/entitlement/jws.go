@@ -7,28 +7,21 @@ import (
 	"time"
 )
 
-// transactionPayload is the decoded JWS payload of a StoreKit 2
-// signedTransactionInfo (JWSTransactionDecodedPayload). Only fields we use are
-// modeled.
 type transactionPayload struct {
 	OriginalTransactionID string `json:"originalTransactionId"`
 	ProductID             string `json:"productId"`
 	BundleID              string `json:"bundleId"`
-	ExpiresDate           *int64 `json:"expiresDate"` // ms since epoch
-	SignedDate            *int64 `json:"signedDate"`  // ms since epoch, Apple's clock
+	ExpiresDate           *int64 `json:"expiresDate"`
+	SignedDate            *int64 `json:"signedDate"`
 	Environment           string `json:"environment"`
 	OfferType             *int   `json:"offerType"`
 	RevocationDate        *int64 `json:"revocationDate"`
 	RevocationReason      *int   `json:"revocationReason"`
 	AppAccountToken       string `json:"appAccountToken"`
-	// OwnershipType is "PURCHASED" or "FAMILY_SHARED" for transactions the
-	// device received through Apple's Family Sharing.
+
 	OwnershipType string `json:"ownershipType"`
 }
 
-// notificationPayload is the decoded JWS payload of an App Store Server
-// Notification V2 (ResponseBodyV2DecodedPayload). environment and bundleId
-// live under data (or summary for SUMMARY notifications), not at top level.
 type notificationPayload struct {
 	NotificationType string `json:"notificationType"`
 	Subtype          string `json:"subtype"`
@@ -67,10 +60,6 @@ func msToTime(ms *int64) *time.Time {
 	return &t
 }
 
-// checkEnvironment normalises Apple's environment string ("Production",
-// "Sandbox") to the lowercase value stored in the DB. Xcode / LocalTesting
-// environments (and anything unknown) are rejected, as is Sandbox when the
-// operator disabled it.
 func (c Config) checkEnvironment(env string) (string, error) {
 	switch e := strings.ToLower(env); e {
 	case "production":
@@ -85,9 +74,6 @@ func (c Config) checkEnvironment(env string) (string, error) {
 	}
 }
 
-// decodeTransaction verifies a signedTransactionInfo JWS (signature + Apple
-// chain, bundle id, environment) and maps it to a Subscription. It also
-// returns the payload's appAccountToken for device binding.
 func (s *Service) decodeTransaction(jws string) (*Subscription, string, error) {
 	if s.verifier == nil || s.cfg.BundleID == "" {
 		return nil, "", ErrNotConfigured
@@ -133,19 +119,15 @@ func (s *Service) decodeTransaction(jws string) (*Subscription, string, error) {
 		Status:                status,
 		Environment:           env,
 		Ownership:             ownership,
-		IsTrial:               p.OfferType != nil && *p.OfferType == 1, // introductory offer
+		IsTrial:               p.OfferType != nil && *p.OfferType == 1,
 		AutoRenew:             p.ExpiresDate != nil,
 		ExpiresAt:             msToTime(p.ExpiresDate),
 		RevokedAt:             msToTime(p.RevocationDate),
-		// Apple's clock, so the out-of-order guard compares like with like.
+
 		LastSignedDate: time.UnixMilli(*p.SignedDate).UTC(),
 	}, p.AppAccountToken, nil
 }
 
-// decodeNotification verifies a signedPayload JWS (App Store Server
-// Notification V2) and, when present, the nested signedTransactionInfo. A
-// nested transaction that fails verification rejects the whole notification.
-// Returns the decoded JSON payload for audit storage.
 func (s *Service) decodeNotification(jws string) (*notificationPayload, *Subscription, []byte, error) {
 	if s.verifier == nil || s.cfg.BundleID == "" {
 		return nil, nil, nil, ErrNotConfigured

@@ -9,8 +9,8 @@ func TestBaseline(t *testing.T) {
 	if Baseline("unknown", 0) != 0.5 {
 		t.Fatal("unknown kind fallback")
 	}
-	big := Baseline("park", 2_000_000) // ~200ha
-	small := Baseline("park", 5_000)   // ~0.5ha
+	big := Baseline("park", 2_000_000)
+	small := Baseline("park", 5_000)
 	if big <= small {
 		t.Fatal("larger area should have higher baseline")
 	}

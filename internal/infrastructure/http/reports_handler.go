@@ -25,7 +25,6 @@ type spotReportRequest struct {
 	IssueCode *string `json:"issueCode"`
 }
 
-// POST /v1/spots/:id/reports — confirm / missing / closed / issue.
 func (h *ReportsHandler) SpotReport(c *gin.Context) {
 	spotID, ok := parseSpotID(c)
 	if !ok {
@@ -53,7 +52,6 @@ type crowdReportRequest struct {
 	Level    int    `json:"level"`
 }
 
-// POST /v1/spots/:id/crowd-reports — busy / moderate / quiet for the current slot.
 func (h *ReportsHandler) CrowdReport(c *gin.Context) {
 	spotID, ok := parseSpotID(c)
 	if !ok {
@@ -81,7 +79,6 @@ type scoreFeedbackRequest struct {
 	Verdict  int       `json:"verdict"`
 }
 
-// POST /v1/scores/feedback — "is this score right?"
 func (h *ReportsHandler) ScoreFeedback(c *gin.Context) {
 	var req scoreFeedbackRequest
 	if err := c.ShouldBindJSON(&req); err != nil {

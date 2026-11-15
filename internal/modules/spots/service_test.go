@@ -13,8 +13,8 @@ type listRepo struct {
 	Repository
 	tsHour, from, to time.Time
 	limit            int
-	total            int // reported match count
-	rows             int // rows returned (after the cap)
+	total            int
+	rows             int
 }
 
 func (r *listRepo) List(_ context.Context, _ ListQuery, ts, from, to time.Time, limit int) ([]SpotWithScore, int, error) {
@@ -30,7 +30,7 @@ func TestSpotCap(t *testing.T) {
 	if got := SpotCap(box(0.14), 24, true); got == 0 {
 		t.Fatal("span above threshold must be capped")
 	}
-	// Heavier payload shapes get a smaller N, all inside the byte budget.
+
 	plain, h12, heavy := SpotCap(box(0.3), 0, false), SpotCap(box(0.3), 12, false), SpotCap(box(0.3), 24, true)
 	if !(plain > h12 && h12 > heavy) {
 		t.Fatalf("cap must shrink with payload weight: %d %d %d", plain, h12, heavy)
@@ -38,7 +38,7 @@ func TestSpotCap(t *testing.T) {
 	if heavy*(featureBaseBytes+featureHourBytes*24+featureAreaBytes) > ResponseBudgetBytes {
 		t.Fatalf("heavy cap %d exceeds budget", heavy)
 	}
-	// A tall viewport counts too.
+
 	if SpotCap(BBox{West: 0, South: 0, East: 0.05, North: 0.3}, 0, false) == 0 {
 		t.Fatal("height must count towards the span")
 	}
@@ -55,12 +55,12 @@ func TestListPageTruncation(t *testing.T) {
 	if repo.limit == 0 || !res.Truncated || res.Total != 1358 || len(res.Items) != 270 {
 		t.Fatalf("limit=%d res=%+v", repo.limit, res)
 	}
-	// Under the cap: nothing truncated even though a limit was passed.
+
 	repo.total, repo.rows = 100, 100
 	if res, _ = svc.ListPage(context.Background(), ListQuery{BBox: &wide}); res.Truncated {
 		t.Fatal("100 spots under a cap must not report truncation")
 	}
-	// Narrow viewport and the ids path never carry a limit; List never caps.
+
 	narrow := BBox{West: 151, South: -34, East: 151.1, North: -33.9}
 	_, _ = svc.ListPage(context.Background(), ListQuery{BBox: &narrow, Hours: 24})
 	if repo.limit != 0 {
@@ -104,7 +104,7 @@ func TestListHourWindow(t *testing.T) {
 	repo := &listRepo{}
 	svc := NewService(repo)
 	bbox := BBox{West: 4.8, South: 52.3, East: 4.9, North: 52.4}
-	from := time.Date(2026, 11, 13, 10, 45, 0, 0, time.FixedZone("x", 3600)) // 09:45Z
+	from := time.Date(2026, 11, 13, 10, 45, 0, 0, time.FixedZone("x", 3600))
 	if _, err := svc.List(context.Background(), ListQuery{BBox: &bbox, From: &from, Hours: 12}); err != nil {
 		t.Fatal(err)
 	}

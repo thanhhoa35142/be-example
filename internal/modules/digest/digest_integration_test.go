@@ -21,9 +21,6 @@ func (c *capture) Send(_ context.Context, d digest.Delivery) error {
 	return nil
 }
 
-// TestRunWeeklyDB runs the job against a real DB (DATABASE_URL, migrated, with
-// scores for the coming weekend). It fabricates a Plus device (entitlement
-// rows inserted directly — never in production code) and cleans up after.
 func TestRunWeeklyDB(t *testing.T) {
 	dsn := testdb.DSN(t)
 	ctx := context.Background()
@@ -31,10 +28,9 @@ func TestRunWeeklyDB(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(pool.Close) // registered first => runs last, after fixture cleanup
+	t.Cleanup(pool.Close)
 	q := persistence.New(pool)
 
-	// Pick the Thursday 18:10 (Amsterdam) preceding the coming Saturday.
 	ams, _ := time.LoadLocation("Europe/Amsterdam")
 	n := time.Now().In(ams)
 	days := (int(time.Saturday) - int(n.Weekday()) + 7) % 7
@@ -42,7 +38,7 @@ func TestRunWeeklyDB(t *testing.T) {
 	thu := time.Date(sat.Year(), sat.Month(), sat.Day()-2, 18, 10, 0, 0, ams)
 
 	var spotID uuid.UUID
-	// A spot with two adjacent daytime hours >= 60 on the weekend (any tz).
+
 	err = pool.QueryRow(ctx, `SELECT s.id FROM t_spots s
 		JOIN t_spot_scores a ON a.spot_id = s.id
 		JOIN t_spot_scores b ON b.spot_id = s.id AND b.ts_hour = a.ts_hour + interval '1 hour'
@@ -90,7 +86,6 @@ func TestRunWeeklyDB(t *testing.T) {
 	d := snd.got[0]
 	t.Logf("delivery=%+v", d)
 
-	// Same local day again: nothing is sent.
 	st, _ = svc.RunWeekly(ctx, thu.Add(30*time.Minute))
 	if len(snd.got) != 1 || st.Due != 0 {
 		t.Fatalf("resent: %+v %+v", st, snd.got)
@@ -100,7 +95,6 @@ func TestRunWeeklyDB(t *testing.T) {
 		t.Fatalf("last_sent_on: %+v %v", got, err)
 	}
 
-	// Soft delete ("delete my data") removes the digest.
 	if ok, err := persistence.NewDevicesRepo(q, pool).Delete(ctx, dev); err != nil || !ok {
 		t.Fatal(ok, err)
 	}

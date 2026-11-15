@@ -1,14 +1,3 @@
-// Package httpx provides an http.RoundTripper that adds per-provider rate
-// limiting and retry-with-backoff for outbound calls to third-party APIs.
-//
-// Design notes:
-//   - One limiter per provider (per httpx.Client), shared by all goroutines —
-//     correct while workers run a single replica; shard or move to Redis if
-//     that ever changes.
-//   - Retry-After pauses the whole provider, not just the failing request:
-//     when a provider says "slow down", everyone waits.
-//   - Only idempotent requests (or requests with a replayable body) are
-//     retried on 5xx/network errors; 429 is always safe to retry.
 package httpx
 
 import (
@@ -24,20 +13,17 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// Policy configures rate limiting and retry behavior for one provider.
 type Policy struct {
-	// Name identifies the provider in logs (e.g. "open-meteo").
 	Name string
-	// RatePerSec is the sustained request rate; Burst is the bucket size.
+
 	RatePerSec float64
 	Burst      int
-	// MaxRetries is the number of retries after the first attempt (default 3).
+
 	MaxRetries int
-	// BaseDelay/MaxDelay bound the full-jitter backoff when no Retry-After
-	// header is present (defaults 500ms / 30s).
+
 	BaseDelay time.Duration
 	MaxDelay  time.Duration
-	// Timeout for the returned http.Client (default 30s).
+
 	Timeout time.Duration
 }
 
@@ -63,7 +49,6 @@ func (p Policy) withDefaults() Policy {
 	return p
 }
 
-// NewClient returns an *http.Client whose transport enforces p.
 func NewClient(p Policy) *http.Client {
 	p = p.withDefaults()
 	return &http.Client{
@@ -81,8 +66,7 @@ type transport struct {
 	base    http.RoundTripper
 	policy  Policy
 	limiter *rate.Limiter
-	// pauseUntil is a unix-nano timestamp; all requests wait it out after a
-	// Retry-After response so the whole provider backs off together.
+
 	pauseUntil *atomic.Int64
 }
 
@@ -91,7 +75,7 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if err := t.waitTurn(req.Context()); err != nil {
 			return nil, err
 		}
-		// Clone so retries get a fresh Body via GetBody.
+
 		r := req.Clone(req.Context())
 		if req.GetBody != nil {
 			body, err := req.GetBody()
@@ -126,8 +110,6 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 }
 
-// waitTurn blocks until the provider pause (if any) has elapsed and the
-// rate limiter grants a token.
 func (t *transport) waitTurn(ctx context.Context) error {
 	if until := t.pauseUntil.Load(); until > 0 {
 		if d := time.Until(time.Unix(0, until)); d > 0 {
@@ -149,13 +131,12 @@ func (t *transport) pauseProvider(d time.Duration) {
 	}
 }
 
-// classify decides whether to retry. Returns the delay to wait.
 func (t *transport) classify(req *http.Request, resp *http.Response, err error, attempt int) (time.Duration, bool) {
 	if attempt >= t.policy.MaxRetries {
 		return 0, false
 	}
 	if err != nil {
-		// Network error — only retry when the request can be replayed.
+
 		if !canReplay(req) {
 			return 0, false
 		}
@@ -163,7 +144,7 @@ func (t *transport) classify(req *http.Request, resp *http.Response, err error, 
 	}
 	switch resp.StatusCode {
 	case http.StatusTooManyRequests:
-		// Rate limited — the request was not processed; always safe to retry.
+
 		return jitter(t.policy.BaseDelay, t.policy.MaxDelay, attempt), true
 	case http.StatusServiceUnavailable, http.StatusBadGateway, http.StatusGatewayTimeout:
 		if !canReplay(req) {
@@ -185,7 +166,6 @@ func canReplay(req *http.Request) bool {
 	return false
 }
 
-// jitter returns a full-jitter delay in [0, min(max, base<<attempt)].
 func jitter(base, max time.Duration, attempt int) time.Duration {
 	cap := base << attempt
 	if cap > max || cap <= 0 {
@@ -194,7 +174,6 @@ func jitter(base, max time.Duration, attempt int) time.Duration {
 	return time.Duration(rand.Int64N(int64(cap)))
 }
 
-// retryAfterDelay parses the Retry-After header (delta-seconds or HTTP-date).
 func retryAfterDelay(resp *http.Response) time.Duration {
 	if resp == nil {
 		return 0

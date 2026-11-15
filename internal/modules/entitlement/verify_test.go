@@ -31,13 +31,12 @@ func TestVerifyPayloadRejects(t *testing.T) {
 
 	otherPKI := newTestPKI(t, pkiOpts{})
 
-	// ASN.1 DER signature instead of raw R||S.
 	derJWS := func() string {
 		d := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
 		sig, _ := ecdsa.SignASN1(rand.Reader, pki.leafKey, d[:])
 		return parts[0] + "." + parts[1] + "." + enc(sig)
 	}()
-	// Signature by a different key than the leaf's.
+
 	wrongKey := func() string {
 		d := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
 		r, s, _ := ecdsa.Sign(rand.Reader, otherPKI.leafKey, d[:])
@@ -46,7 +45,7 @@ func TestVerifyPayloadRejects(t *testing.T) {
 		s.FillBytes(sig[32:])
 		return parts[0] + "." + parts[1] + "." + enc(sig)
 	}()
-	// Valid signature but signature scalar replaced by r = s = 0.
+
 	zero := parts[0] + "." + parts[1] + "." + enc(make([]byte, 64))
 
 	hdr := func(mut func(map[string]any)) string {
@@ -83,8 +82,7 @@ func TestVerifyPayloadRejects(t *testing.T) {
 }
 
 func TestVerifyPayloadChainPolicy(t *testing.T) {
-	// Missing Apple marker OIDs: a certificate chained to a trusted root but
-	// not an App Store signing certificate must be refused.
+
 	for name, o := range map[string]pkiOpts{
 		"no leaf OID":         {skipLeafOID: true},
 		"no intermediate OID": {skipInterOID: true},
@@ -95,7 +93,6 @@ func TestVerifyPayloadChainPolicy(t *testing.T) {
 		}
 	}
 
-	// Expired leaf.
 	pki := newTestPKI(t, pkiOpts{})
 	v := pki.verifier(t)
 	v.now = func() time.Time { return time.Now().Add(48 * time.Hour) }
@@ -103,8 +100,6 @@ func TestVerifyPayloadChainPolicy(t *testing.T) {
 		t.Errorf("expired chain accepted: %v", err)
 	}
 
-	// A root shipped inside x5c is never trusted: with only the leaf's
-	// self-made chain and an empty trust pool, verification fails.
 	empty, _ := NewAppleVerifier(newTestPKI(t, pkiOpts{}).pool)
 	if _, err := empty.VerifyPayload(pki.sign(t, `{}`)); !errors.Is(err, ErrInvalidJWS) {
 		t.Errorf("x5c-supplied root was trusted: %v", err)
@@ -120,7 +115,7 @@ func TestEmbeddedAppleRoot(t *testing.T) {
 	if got := hexString(sum[:]); got != want {
 		t.Fatalf("embedded root fingerprint %s, want %s", got, want)
 	}
-	// The real root must reject a chain from our test PKI.
+
 	prod, err := NewProductionVerifier()
 	if err != nil {
 		t.Fatal(err)

@@ -22,7 +22,7 @@ func TestParseListQuery(t *testing.T) {
 	cases := []struct {
 		name     string
 		query    string
-		wantCode string // "" = ok
+		wantCode string
 	}{
 		{"bbox only", "bbox=" + bbox, ""},
 		{"ids only", "ids=" + id1 + "," + id2, ""},
@@ -71,7 +71,7 @@ func TestParseListQueryFields(t *testing.T) {
 	if q.BBox == nil || q.Hours != 12 || !q.IncludeArea || q.From == nil || q.When != nil {
 		t.Fatalf("bad parse: %+v", q)
 	}
-	// when defaults to from, truncated to the hour.
+
 	if got := scoreHour(q, time.Now()); !got.Equal(time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)) {
 		t.Fatalf("scoreHour = %v", got)
 	}

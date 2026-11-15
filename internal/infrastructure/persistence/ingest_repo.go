@@ -15,8 +15,6 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/modules/ingest/osm"
 )
 
-// IngestRepo is the pool-level entry point: it lists packs and opens the
-// per-pack transaction the ingest.Service planner writes through.
 type IngestRepo struct {
 	pool *pgxpool.Pool
 }
@@ -51,7 +49,6 @@ func (r *IngestRepo) ListIngestPacks(ctx context.Context) ([]osm.Pack, error) {
 	return out, nil
 }
 
-// DistinctExtracts lists osm_extract values used by any pack.
 func (r *IngestRepo) DistinctExtracts(ctx context.Context) ([]string, error) {
 	rows, err := New(r.pool).ListDistinctExtracts(ctx)
 	if err != nil {
@@ -66,7 +63,6 @@ func (r *IngestRepo) DistinctExtracts(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
-// MarkExtractFetched stamps extract_fetched_at on all packs using extract.
 func (r *IngestRepo) MarkExtractFetched(ctx context.Context, extract string, at time.Time) error {
 	return New(r.pool).MarkExtractFetched(ctx, MarkExtractFetchedParams{
 		OsmExtract:       pgtype.Text{String: extract, Valid: true},
@@ -74,7 +70,6 @@ func (r *IngestRepo) MarkExtractFetched(ctx context.Context, extract string, at 
 	})
 }
 
-// PackBounds returns the pack boundary bbox for bbox-based sources.
 func (r *IngestRepo) PackBounds(ctx context.Context, id uuid.UUID) (osm.Bounds, error) {
 	row, err := New(r.pool).PackBBox(ctx, id)
 	if err != nil {
@@ -88,13 +83,12 @@ func (r *IngestRepo) PackBounds(ctx context.Context, id uuid.UUID) (osm.Bounds, 
 	}, nil
 }
 
-// WithTx implements ingest.Runner.
 func (r *IngestRepo) WithTx(ctx context.Context, packID uuid.UUID, dryRun bool, fn func(ingest.Store) error) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx) // no-op after Commit
+	defer tx.Rollback(ctx)
 
 	store := &ingestStore{q: New(tx), packID: packID}
 	if err := fn(store); err != nil {
@@ -106,13 +100,11 @@ func (r *IngestRepo) WithTx(ctx context.Context, packID uuid.UUID, dryRun bool, 
 	return tx.Commit(ctx)
 }
 
-// ingestStore is the tx-scoped Store for one pack.
 type ingestStore struct {
 	q      *Queries
 	packID uuid.UUID
 }
 
-// NewIngestStoreTx is used by tests that already hold a tx.
 func NewIngestStoreTx(tx pgx.Tx, packID uuid.UUID) ingest.Store {
 	return &ingestStore{q: New(tx), packID: packID}
 }
@@ -124,7 +116,6 @@ func (s *ingestStore) ClearRaw(ctx context.Context) error {
 	return s.q.ClearIngestFeatures(ctx, s.packID)
 }
 
-// CopyRaw COPYs one batch of raw rows into t_ingest_staging.
 func (s *ingestStore) CopyRaw(ctx context.Context, rows []ingest.RawRow) error {
 	params := make([]CopyIngestStagingParams, len(rows))
 	for i, r := range rows {
@@ -148,8 +139,6 @@ func (s *ingestStore) CopyRaw(ctx context.Context, rows []ingest.RawRow) error {
 	return err
 }
 
-// MergeRaw moves staged rows into the raw layer (one row per source id,
-// highest-dimension geometry wins) and empties the staging slice.
 func (s *ingestStore) MergeRaw(ctx context.Context) (int64, error) {
 	n, err := s.q.MergeIngestStaging(ctx, s.packID)
 	if err != nil {
@@ -207,7 +196,7 @@ func (s *ingestStore) OrphanTableClusters(ctx context.Context, epsMerc float64, 
 	if err != nil {
 		return nil, err
 	}
-	// Rows arrive ordered by cluster_id — group consecutive runs.
+
 	var out []ingest.TableCluster
 	for _, r := range rows {
 		cid := int64(f64(r.ClusterID))
@@ -285,8 +274,6 @@ func (s *ingestStore) Spots(ctx context.Context) ([]ingest.SpotRow, error) {
 	return out, nil
 }
 
-// SpotsNear returns pending/active spots of the pack within radiusM meters
-// of (lon, lat), nearest first — the spatial fallback for OSM remaps.
 func (s *ingestStore) SpotsNear(ctx context.Context, lon, lat, radiusM float64) ([]ingest.SpotRow, error) {
 	rows, err := s.q.ListSpotsNearPoint(ctx, ListSpotsNearPointParams{
 		CityPackID:    s.packID,
@@ -321,7 +308,6 @@ func (s *ingestStore) SpotsNear(ctx context.Context, lon, lat, radiusM float64) 
 	return out, nil
 }
 
-// SourceLinks preloads provenance for the planner in one query.
 func (s *ingestStore) SourceLinks(ctx context.Context) (map[[2]string]ingest.SourceLink, error) {
 	rows, err := s.q.ListPackSourceLinks(ctx, s.packID)
 	if err != nil {
@@ -402,7 +388,6 @@ func (s *ingestStore) SetStatus(ctx context.Context, id uuid.UUID, status, reaso
 	})
 }
 
-// UpsertSources writes all queued provenance links in one statement.
 func (s *ingestStore) UpsertSources(ctx context.Context, ups []ingest.SourceUpsert) error {
 	if len(ups) == 0 {
 		return nil
@@ -469,7 +454,6 @@ func (s *ingestStore) ClearAmenities(ctx context.Context) error {
 	return s.q.ClearPackAmenities(ctx, s.packID)
 }
 
-// AssignAmenities attaches all of the pack's amenity features set-based.
 func (s *ingestStore) AssignAmenities(ctx context.Context, radiusDeg, radiusM float64) (int64, error) {
 	return s.q.AssignPackAmenities(ctx, AssignPackAmenitiesParams{
 		PackID:    s.packID,
@@ -486,7 +470,6 @@ func (s *ingestStore) NotifyIngestDone(ctx context.Context) error {
 	return s.q.NotifyIngestDone(ctx)
 }
 
-// pgtype helpers — sqlc generates nullable columns as pgtype.*.
 func textOrNull(s string) pgtype.Text {
 	return pgtype.Text{String: s, Valid: s != ""}
 }
@@ -512,8 +495,6 @@ func int8OrNull(v int64) pgtype.Int8 {
 	return pgtype.Int8{Int64: v, Valid: true}
 }
 
-// f64/strOf/strPtr convert interface{} columns (ST_X/ST_Y/ST_AsGeoJSON and
-// CASE expressions sqlc can't type) into concrete Go values.
 func f64(v interface{}) float64 {
 	switch t := v.(type) {
 	case float64:
@@ -554,4 +535,4 @@ func strPtr(v interface{}) *string {
 	return &s
 }
 
-var _ = fmt.Sprintf // keep fmt import if unused
+var _ = fmt.Sprintf

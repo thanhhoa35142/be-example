@@ -18,8 +18,6 @@ type AlertsRepo struct {
 	pool *pgxpool.Pool
 }
 
-// NewAlertsRepo needs the pool to run the plan-limit check + insert in one
-// transaction.
 func NewAlertsRepo(q *Queries, pool *pgxpool.Pool) *AlertsRepo {
 	return &AlertsRepo{q: q, pool: pool}
 }
@@ -90,10 +88,6 @@ func (r *AlertsRepo) GetRule(ctx context.Context, id uuid.UUID) (*alerts.Rule, e
 	return &rule, nil
 }
 
-// InsertRuleLimited inserts a rule unless the device already has maxRules
-// (maxRules < 0 = unlimited). The device row is locked FOR UPDATE inside the
-// transaction, so concurrent creates for one device are serialised and the
-// count-then-insert cannot be raced past the plan limit.
 func (r *AlertsRepo) InsertRuleLimited(ctx context.Context, deviceID uuid.UUID, in alerts.RuleInput, start, end time.Duration, maxRules int) (uuid.UUID, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -126,8 +120,6 @@ func (r *AlertsRepo) InsertRuleLimited(ctx context.Context, deviceID uuid.UUID, 
 	return id, nil
 }
 
-// mapRuleFKError turns a spot FK violation (spot deleted between the
-// pre-check and the write) into a client error instead of a 500.
 func mapRuleFKError(err error) error {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23503" {
@@ -257,7 +249,7 @@ func (r *AlertsRepo) ClaimDelivery(ctx context.Context, d alerts.Delivery, windo
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return false, err
 	}
-	// Slot exists — only a 'failed' row with attempts left can be re-claimed.
+
 	_, err = r.q.ReclaimFailedDelivery(ctx, ReclaimFailedDeliveryParams{
 		RuleID:      d.RuleID,
 		WindowStart: windowStart,
@@ -305,7 +297,6 @@ func (r *AlertsRepo) DeviceExists(ctx context.Context, deviceID uuid.UUID) (bool
 	return r.q.DeviceExistsForAlert(ctx, deviceID)
 }
 
-// small param helpers local to this file
 func uuidParam(u *uuid.UUID) pgtype.UUID {
 	if u == nil {
 		return pgtype.UUID{}

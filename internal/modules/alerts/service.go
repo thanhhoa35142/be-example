@@ -32,13 +32,10 @@ func NewService(repo Repository, plans PlanResolver, sender Sender) *Service {
 	}
 }
 
-// List returns the device's rules.
 func (s *Service) List(ctx context.Context, deviceID uuid.UUID) ([]Rule, error) {
 	return s.repo.ListRules(ctx, deviceID)
 }
 
-// Create validates the rule and enforces the plan limit (Free = 1 area). The
-// limit check and insert run atomically in the repository.
 func (s *Service) Create(ctx context.Context, deviceID uuid.UUID, in RuleInput) (*Rule, error) {
 	exists, err := s.repo.DeviceExists(ctx, deviceID)
 	if err != nil {
@@ -69,7 +66,6 @@ func (s *Service) Create(ctx context.Context, deviceID uuid.UUID, in RuleInput) 
 	return s.repo.GetRule(ctx, id)
 }
 
-// checkSpot requires a spot-targeted rule to reference an existing active spot.
 func (s *Service) checkSpot(ctx context.Context, spotID *uuid.UUID) error {
 	if spotID == nil {
 		return nil
@@ -84,7 +80,6 @@ func (s *Service) checkSpot(ctx context.Context, spotID *uuid.UUID) error {
 	return nil
 }
 
-// Update replaces a rule owned by the device.
 func (s *Service) Update(ctx context.Context, id, deviceID uuid.UUID, in RuleInput) (*Rule, error) {
 	p, err := validate(in)
 	if err != nil {
@@ -103,7 +98,6 @@ func (s *Service) Update(ctx context.Context, id, deviceID uuid.UUID, in RuleInp
 	return s.repo.GetRule(ctx, id)
 }
 
-// Delete removes a rule owned by the device.
 func (s *Service) Delete(ctx context.Context, id, deviceID uuid.UUID) error {
 	ok, err := s.repo.DeleteRule(ctx, id, deviceID)
 	if err != nil {
@@ -115,12 +109,9 @@ func (s *Service) Delete(ctx context.Context, id, deviceID uuid.UUID) error {
 	return nil
 }
 
-// Evaluate scans enabled rules and fires deliveries for windows where the
-// best matching spot score meets min_score. Each (rule, window) fires at most
-// once thanks to the alert_delivery primary key.
 func (s *Service) Evaluate(ctx context.Context, now time.Time) (Stats, error) {
 	var st Stats
-	// Hygiene: stale claims become failed, exhausted failures become dead.
+
 	if err := s.repo.SweepDeliveries(ctx); err != nil {
 		slog.WarnContext(ctx, "alert delivery sweep failed", "error", err)
 	}
@@ -137,8 +128,7 @@ func (s *Service) Evaluate(ctx context.Context, now time.Time) (Stats, error) {
 		if !ok {
 			continue
 		}
-		// Skip devices without a live push token before claiming the slot —
-		// a claim for an unreachable device would just churn retries.
+
 		_, _, _, hasToken, err := s.repo.DeviceAPNsToken(ctx, r.DeviceID)
 		if err != nil {
 			st.Failed++
@@ -155,7 +145,7 @@ func (s *Service) Evaluate(ctx context.Context, now time.Time) (Stats, error) {
 			continue
 		}
 		if !claimed {
-			continue // already sent/dead for this window, or retries exhausted
+			continue
 		}
 		st.Fired++
 		if s.sender == nil {
@@ -168,11 +158,10 @@ func (s *Service) Evaluate(ctx context.Context, now time.Time) (Stats, error) {
 				slog.ErrorContext(ctx, "alert delivery sent-mark failed", "rule", r.ID, "error", merr)
 			}
 		case errors.Is(err, ErrNoPushToken):
-			// Token vanished between the pre-check and the send.
+
 			_ = s.repo.MarkDeliveryFailed(ctx, r.ID, windowStart, -1, err.Error())
 		case errors.Is(err, ErrPushTokenDead):
-			// APNs 410: clear device credentials and dead-letter — retrying
-			// a dead token can never succeed.
+
 			st.Failed++
 			if uerr := s.repo.MarkDeviceUnregistered(ctx, r.DeviceID); uerr != nil {
 				slog.ErrorContext(ctx, "device unregister failed", "device", r.DeviceID, "error", uerr)
@@ -191,8 +180,6 @@ func (s *Service) Evaluate(ctx context.Context, now time.Time) (Stats, error) {
 	return st, nil
 }
 
-// match returns the delivery for a rule if the current local time is inside an
-// enabled window and the best spot score meets min_score.
 func (s *Service) match(ctx context.Context, r Rule, now, tsHour time.Time) (*Delivery, time.Time, bool) {
 	loc, err := time.LoadLocation(r.TZ)
 	if err != nil {
@@ -204,7 +191,6 @@ func (s *Service) match(ctx context.Context, r Rule, now, tsHour time.Time) (*De
 		return nil, time.Time{}, false
 	}
 
-	// Local time-of-day and window bookkeeping (windows may cross midnight).
 	tod := time.Duration(local.Hour())*time.Hour + time.Duration(local.Minute())*time.Minute +
 		time.Duration(local.Second())*time.Second
 	dayStart := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc)
@@ -213,12 +199,12 @@ func (s *Service) match(ctx context.Context, r Rule, now, tsHour time.Time) (*De
 	var windowStart time.Time
 	inWindow := false
 	switch {
-	case startTOD < endTOD: // same-day window
+	case startTOD < endTOD:
 		if tod >= startTOD && tod < endTOD {
 			inWindow = true
 			windowStart = dayStart.Add(startTOD)
 		}
-	case startTOD > endTOD: // overnight window
+	case startTOD > endTOD:
 		if tod >= startTOD {
 			inWindow = true
 			windowStart = dayStart.Add(startTOD)
@@ -227,13 +213,12 @@ func (s *Service) match(ctx context.Context, r Rule, now, tsHour time.Time) (*De
 			windowStart = dayStart.Add(-24 * time.Hour).Add(startTOD)
 		}
 	default:
-		return nil, time.Time{}, false // zero-length window
+		return nil, time.Time{}, false
 	}
 	if !inWindow {
 		return nil, time.Time{}, false
 	}
 
-	// Find best spot score for this rule's area.
 	var d *Delivery
 	if r.SpotID != nil {
 		spot, err := s.repo.SpotScoreAt(ctx, *r.SpotID, tsHour)

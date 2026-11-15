@@ -18,7 +18,6 @@ func NewEntitlementHandler(svc *entitlement.Service) *EntitlementHandler {
 	return &EntitlementHandler{svc: svc}
 }
 
-// GET /v1/devices/:id/entitlement — resolved plan for a device.
 func (h *EntitlementHandler) Get(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -48,7 +47,6 @@ type linkTransactionRequest struct {
 	SignedTransaction string `json:"signedTransaction"`
 }
 
-// POST /v1/entitlement/link — attach a StoreKit signed transaction to a device.
 func (h *EntitlementHandler) Link(c *gin.Context) {
 	var req linkTransactionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -75,10 +73,6 @@ type appStoreNotificationRequest struct {
 	SignedPayload string `json:"signedPayload"`
 }
 
-// POST /v1/appstore/notifications — App Store Server Notifications V2 webhook.
-// Apple does not authenticate the outer request; trust comes entirely from
-// verifying the signedPayload JWS (x5c chain to Apple Root CA G3, signature,
-// bundle id, environment) and its nested signedTransactionInfo.
 func (h *EntitlementHandler) AppStoreNotification(c *gin.Context) {
 	var req appStoreNotificationRequest
 	if err := c.ShouldBindJSON(&req); err != nil {

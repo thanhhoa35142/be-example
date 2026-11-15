@@ -19,8 +19,6 @@ func NewAdminRepo(q *Queries) *AdminRepo {
 	return &AdminRepo{q: q}
 }
 
-// ---- job_run ----
-
 func (r *AdminRepo) StartJobRun(ctx context.Context, job string) (int64, error) {
 	return r.q.StartJobRun(ctx, job)
 }
@@ -43,12 +41,16 @@ func (r *AdminRepo) FinishJobRun(ctx context.Context, id int64, status string, r
 	})
 }
 
-func (r *AdminRepo) ListJobRuns(ctx context.Context, limit int, beforeID *int64) ([]admin.JobRun, error) {
+func (r *AdminRepo) ListJobRuns(ctx context.Context, limit int, beforeID *int64, status string) ([]admin.JobRun, error) {
 	var before pgtype.Int8
 	if beforeID != nil {
 		before = pgtype.Int8{Int64: *beforeID, Valid: true}
 	}
-	rows, err := r.q.ListJobRuns(ctx, ListJobRunsParams{Limit: int32(limit), BeforeID: before})
+	var st pgtype.Text
+	if status != "" {
+		st = pgtype.Text{String: status, Valid: true}
+	}
+	rows, err := r.q.ListJobRuns(ctx, ListJobRunsParams{Limit: int32(limit), BeforeID: before, Status: st})
 	if err != nil {
 		return nil, err
 	}
@@ -111,10 +113,9 @@ func jobScheduleFromRow(row TWorkerJobSchedule) admin.JobSchedule {
 		Enabled:         row.Enabled,
 		OffsetSeconds:   int64(row.OffsetSeconds),
 		UpdatedAt:       row.UpdatedAt.UTC(),
+		RunRequestedAt:  timePtr(row.RunRequestedAt),
 	}
 }
-
-// ---- dashboard ----
 
 func (r *AdminRepo) Overview(ctx context.Context) (admin.Overview, error) {
 	var o admin.Overview
@@ -347,15 +348,12 @@ func (r *AdminRepo) EventBreakdown(ctx context.Context, in admin.EventBreakdownI
 	return out, nil
 }
 
-// ---- scoring config ----
-
 func (r *AdminRepo) ListScoringConfigs(ctx context.Context) ([]admin.ScoringConfigVersion, error) {
 	rows, err := r.q.ListScoringConfigs(ctx)
 	if err != nil {
 		return nil, err
 	}
-	// The effective config is the one the scorer picks: latest
-	// (active_from, version) among rows already active.
+
 	var bestFrom time.Time
 	var bestVersion int16 = -1
 	now := time.Now()

@@ -41,12 +41,12 @@ func TestJitterBounds(t *testing.T) {
 	base := 100 * time.Millisecond
 	max := 30 * time.Second
 	for i := 0; i < 100; i++ {
-		d := jitter(base, max, 2) // cap = 400ms
+		d := jitter(base, max, 2)
 		if d < 0 || d > 400*time.Millisecond {
 			t.Fatalf("attempt 2 out of bounds: %v", d)
 		}
 	}
-	// Overflow attempt → capped at max.
+
 	d := jitter(base, max, 20)
 	if d < 0 || d > max {
 		t.Fatalf("overflow attempt out of bounds: %v", d)
@@ -127,7 +127,7 @@ func TestTransportRateLimits(t *testing.T) {
 		}
 		resp.Body.Close()
 	}
-	// 3 requests at 50rps with burst 1: first instant, then ~20ms each.
+
 	if elapsed := time.Since(start); elapsed < 30*time.Millisecond {
 		t.Fatalf("requests not rate limited, took %v", elapsed)
 	}

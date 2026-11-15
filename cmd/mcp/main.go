@@ -1,6 +1,3 @@
-// Command mcp serves the Pickhour MCP server over Streamable HTTP.
-// Agents authenticate with "Authorization: Bearer phk_..." API keys whose
-// grants (resource:action pairs, deny-wins) gate each tool.
 package main
 
 import (
@@ -65,11 +62,9 @@ func main() {
 		nil,
 	)
 
-	// Gin reads its mode when the engine is built: set it first.
 	cfg.ConfigureGinMode(gin.SetMode)
 	router := gin.New()
-	// Trust no proxy by default so X-Forwarded-For cannot spoof the client IP
-	// used for the failed-auth throttle.
+
 	if err := router.SetTrustedProxies(cfg.TrustedProxies); err != nil {
 		log.Fatalf("trusted proxies: %v", err)
 	}
@@ -83,11 +78,7 @@ func main() {
 		Handler:           router,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		// No WriteTimeout on purpose: Streamable HTTP answers long-lived
-		// responses (SSE streams) and net/http's WriteTimeout is an absolute
-		// deadline on the whole response, so any non-zero value would cut
-		// streams off mid-flight. Slow-reader abuse is bounded by IdleTimeout
-		// and the per-key rate limiter instead.
+
 		WriteTimeout:   0,
 		IdleTimeout:    120 * time.Second,
 		MaxHeaderBytes: 16 << 10,

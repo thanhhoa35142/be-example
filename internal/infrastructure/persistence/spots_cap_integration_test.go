@@ -1,9 +1,5 @@
 package persistence_test
 
-// Integration test for the viewport cap in ListSpotsInBBox: the top-N by
-// score at the requested hour, deterministic tie-break, uncapped total.
-// Requires TEST_DATABASE_URL (scratch DB); skipped otherwise.
-
 import (
 	"context"
 	"fmt"
@@ -29,8 +25,6 @@ func TestListSpotsInBBoxCapsToTopScores(t *testing.T) {
 	}
 	hour := time.Now().UTC().Truncate(time.Hour)
 
-	// 8 spots in a private 0.1 deg box far from other tests' data. Scores:
-	// 90, 90, 80, 70, 70, 70, none, none (ties exercise the id tie-break).
 	scores := []*int{p(90), p(90), p(80), p(70), p(70), p(70), nil, nil}
 	ids := make([]uuid.UUID, len(scores))
 	for i, sc := range scores {
@@ -67,7 +61,7 @@ func TestListSpotsInBBoxCapsToTopScores(t *testing.T) {
 	if err != nil || len(top) != 4 || total != 8 {
 		t.Fatalf("capped: n=%d total=%d err=%v", len(top), total, err)
 	}
-	// 90, 90 (id order), 80, then the lowest-id 70.
+
 	wantTies := func(a, b uuid.UUID) (uuid.UUID, uuid.UUID) {
 		if a.String() < b.String() {
 			return a, b
@@ -89,13 +83,12 @@ func TestListSpotsInBBoxCapsToTopScores(t *testing.T) {
 		}
 	}
 
-	// Unscored spots rank last; the filter shrinks the total, not just the page.
 	q.Filter = spots.Filter{MinScore: p(75)}
 	got, total, err := repo.List(ctx, q, hour, time.Time{}, time.Time{}, 2)
 	if err != nil || len(got) != 2 || total != 3 {
 		t.Fatalf("minScore: n=%d total=%d err=%v", len(got), total, err)
 	}
-	// Same limit twice is stable.
+
 	again, _, _ := repo.List(ctx, q, hour, time.Time{}, time.Time{}, 2)
 	for i := range got {
 		if got[i].ID != again[i].ID {

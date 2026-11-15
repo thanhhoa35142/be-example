@@ -35,8 +35,6 @@ type alertRuleRequest struct {
 	Enabled    *bool      `json:"enabled"`
 }
 
-// areaPoint is a coarse client point; both fields are required (pointers so
-// a missing one is distinguishable from 0).
 type areaPoint struct {
 	Lat *float64 `json:"lat"`
 	Lon *float64 `json:"lon"`
@@ -55,8 +53,7 @@ func hhmm(d time.Duration) string {
 }
 
 func ruleDTO(r alerts.Rule) gin.H {
-	// areaCenter: cell center rounded to 3 decimals for area rules, null for
-	// spot rules.
+
 	var center gin.H
 	if lat, lon, ok := r.AreaCenter(); ok {
 		center = gin.H{"lat": round3(lat), "lon": round3(lon)}
@@ -93,13 +90,8 @@ func (h *AlertsHandler) input(req alertRuleRequest) (alerts.RuleInput, bool) {
 	}, true
 }
 
-// deviceIDHeader carries the device id for requests without a body. Preferred
-// over the legacy ?deviceId= query parameter, which ends up in proxy/access
-// logs and browser-style history.
 const deviceIDHeader = "X-Device-ID"
 
-// requestDeviceID reads the device id from X-Device-ID (preferred), falling
-// back to the legacy deviceId query parameter for older app builds.
 func requestDeviceID(c *gin.Context) (uuid.UUID, bool) {
 	raw := c.GetHeader(deviceIDHeader)
 	if raw == "" {
@@ -114,8 +106,6 @@ func requestDeviceID(c *gin.Context) (uuid.UUID, bool) {
 	return id, true
 }
 
-// GET /v1/alerts — list rules for a device (X-Device-ID header, or legacy
-// ?deviceId=).
 func (h *AlertsHandler) List(c *gin.Context) {
 	deviceID, ok := requestDeviceID(c)
 	if !ok {
@@ -133,7 +123,6 @@ func (h *AlertsHandler) List(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"items": items}})
 }
 
-// POST /v1/alerts — create a rule (plan-limited).
 func (h *AlertsHandler) Create(c *gin.Context) {
 	var req alertRuleRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -158,7 +147,6 @@ func (h *AlertsHandler) Create(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"data": ruleDTO(*rule)})
 }
 
-// PUT /v1/alerts/:id — replace a rule.
 func (h *AlertsHandler) Update(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -188,8 +176,6 @@ func (h *AlertsHandler) Update(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": ruleDTO(*rule)})
 }
 
-// DELETE /v1/alerts/:id — remove a rule (X-Device-ID header, or legacy
-// ?deviceId=).
 func (h *AlertsHandler) Delete(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {

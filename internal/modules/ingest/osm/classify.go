@@ -2,16 +2,14 @@ package osm
 
 import "strings"
 
-// Role is what a raw feature becomes in the canonical layer.
 type Role string
 
 const (
-	RoleCandidate Role = "candidate" // may become a t_spots row
-	RoleAmenity   Role = "amenity"   // attaches to a containing spot
-	RoleExcluded  Role = "excluded"  // kept in raw layer for audit only
+	RoleCandidate Role = "candidate"
+	RoleAmenity   Role = "amenity"
+	RoleExcluded  Role = "excluded"
 )
 
-// AmenityType mirrors t_spot_amenities.type values (INGEST_STRATEGY §1).
 type AmenityType string
 
 const (
@@ -25,52 +23,37 @@ const (
 	AmenityBicycleParking AmenityType = "bicycle_parking"
 )
 
-// Classified is the pure output of Classify: everything the planner needs,
-// nothing it doesn't.
 type Classified struct {
 	Role    Role
-	Kind    string            // spot kind when Role == RoleCandidate
-	Amenity AmenityType       // when Role == RoleAmenity
-	Name    string            // default name ("name" tag)
-	Names   map[string]string // "name:xx" tags
-	Attrs   map[string]string // access, fee, reservation, nudism, ...
-	Quality int               // 0-100 from tags alone
-	Exclude string            // non-empty = reason; row kept for audit
+	Kind    string
+	Amenity AmenityType
+	Name    string
+	Names   map[string]string
+	Attrs   map[string]string
+	Quality int
+	Exclude string
 }
 
-// Classifier maps OSM tags to roles/qualities. Pure — table-tested, no I/O.
 type Classifier struct {
 	Policy QualityPolicy
 }
 
-// QualityPolicy tunes the 0-100 quality score (INGEST_STRATEGY §4).
-// Tag-only components are applied by Classify; geometry/neighbourhood
-// components (size, amenities, child tables) by the planner via Bonus.
 type QualityPolicy struct {
-	Named         int // has a name
-	HasArea       int // polygon/multipolygon
-	TableEvidence int // picnic_table=yes or child tables (planner)
-	// PublicAccess: explicit access=yes/permissive. Kept small — mappers
-	// almost never tag access on public parks (AU: 0.3% of parks), so a
-	// large weight only rewards regional tagging habits.
+	Named         int
+	HasArea       int
+	TableEvidence int
+
 	PublicAccess int
-	Wikidata     int // wikidata=* — notability signal
-	// Size tiers (planner, polygon area in hectares).
+	Wikidata     int
+
 	AreaLargeHa, AreaLarge   float64
 	AreaMediumHa, AreaMedium float64
-	// Pocket parks below AreaTinyHa lose AreaTinyPenalty points.
+
 	AreaTinyHa, AreaTinyPenalty float64
-	// AmenityPerType per distinct picnic amenity type (toilet, water, bbq,
-	// playground, shelter) inside/next to the spot, up to AmenityMaxTypes.
+
 	AmenityPerType, AmenityMaxTypes int
 }
 
-// DefaultQualityPolicy — calibrated 2026-11-13 on 39 packs (EU + AU):
-// a named park polygon scores 50; it activates (>= 60) when it is either
-// large (>= 5 ha), or >= 1 ha with one picnic amenity, or has tables or a
-// wikidata entry. Every park on the known-places list (Vondelpark,
-// Centennial Park, Kings Park, Stadtpark Wien, …) activates; pocket parks
-// stay pending unless they carry real picnic evidence.
 var DefaultQualityPolicy = QualityPolicy{
 	Named:           30,
 	HasArea:         20,
@@ -87,9 +70,6 @@ var DefaultQualityPolicy = QualityPolicy{
 	AmenityMaxTypes: 2,
 }
 
-// Bonus is the planner-side quality delta for a candidate: polygon size
-// tier (areaHa <= 0 means point geometry → no size term) and distinct
-// picnic amenity types nearby. Pure; added on top of Classify's score.
 func (qp QualityPolicy) Bonus(areaHa float64, amenityTypes int) int {
 	b := 0
 	switch {
@@ -117,7 +97,6 @@ var amenityTags = map[string]AmenityType{
 	"amenity=bicycle_parking": AmenityBicycleParking,
 }
 
-// hardExcluded reports whether a feature can never become a spot.
 func hardExcluded(tags map[string]string) string {
 	switch tags["access"] {
 	case "private", "no":
@@ -129,7 +108,6 @@ func hardExcluded(tags map[string]string) string {
 	return ""
 }
 
-// spotKind maps candidate tags to a spot kind; "" = not a candidate.
 func spotKind(tags map[string]string) string {
 	switch {
 	case tags["leisure"] == "park":
@@ -144,7 +122,6 @@ func spotKind(tags map[string]string) string {
 	return ""
 }
 
-// amenityType maps amenity-bearing tags; "" = not an amenity.
 func amenityType(tags map[string]string) AmenityType {
 	for k, v := range amenityTags {
 		parts := strings.SplitN(k, "=", 2)
@@ -185,14 +162,11 @@ func collectAttrs(tags map[string]string) map[string]string {
 	return attrs
 }
 
-// isArea reports whether the GeoJSON payload is a polygon type — used for
-// the HasArea quality component. Cheap sniff on the first bytes.
 func isArea(geojson []byte) bool {
 	prefix := string(geojson)
 	return strings.Contains(prefix, `"Polygon"`) || strings.Contains(prefix, `"MultiPolygon"`)
 }
 
-// Classify implements the tag→role mapping of INGEST_STRATEGY §1.
 func (c Classifier) Classify(f RawFeature) Classified {
 	qp := c.Policy
 	if qp == (QualityPolicy{}) {
@@ -202,27 +176,23 @@ func (c Classifier) Classify(f RawFeature) Classified {
 	if reason := hardExcluded(f.Tags); reason != "" {
 		return Classified{Role: RoleExcluded, Exclude: reason}
 	}
-	// leisure=garden is explicitly out of scope for parks.
+
 	if f.Tags["leisure"] == "garden" {
 		return Classified{Role: RoleExcluded, Exclude: "garden"}
 	}
-	// Nudist beaches are excluded by default (product decision, attrs keep it).
+
 	if f.Tags["natural"] == "beach" &&
 		(f.Tags["nudism"] == "yes" || f.Tags["nudism"] == "designated") {
 		return Classified{Role: RoleExcluded, Exclude: "nudist_beach"}
 	}
 
-	// Amenities attach to whatever contains them — classified before
-	// candidates so a feature that is both (e.g. firepit inside a park
-	// mapped on the park itself) resolves deterministically: candidate wins
-	// only when it has a spot-kind tag.
 	if a := amenityType(f.Tags); a != "" {
 		return Classified{Role: RoleAmenity, Amenity: a}
 	}
 
 	kind := spotKind(f.Tags)
 	if kind == "" {
-		// Not a spot, not an amenity — still recorded as excluded for audit.
+
 		return Classified{Role: RoleExcluded, Exclude: "unmapped_tags"}
 	}
 
@@ -240,8 +210,7 @@ func (c Classifier) Classify(f RawFeature) Classified {
 	if f.Tags["wikidata"] != "" {
 		quality += qp.Wikidata
 	}
-	// picnic_table=yes is evidence for the parent spot (planner adds the
-	// TableEvidence component when it counts child tables).
+
 	if f.Tags["picnic_table"] == "yes" {
 		quality += qp.TableEvidence
 	}

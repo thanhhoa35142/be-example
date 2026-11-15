@@ -11,9 +11,6 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/platform/httpx"
 )
 
-// API-key management for the admin surface. The raw secret is returned
-// exactly once, in the create response — it is never retrievable again.
-
 type apiKeyCreateRequest struct {
 	Name         string              `json:"name" binding:"required"`
 	Description  string              `json:"description"`
@@ -49,7 +46,6 @@ func parseKeyID(c *gin.Context) (uuid.UUID, bool) {
 	return id, true
 }
 
-// GET /v1/admin/api-keys — all keys with their grants.
 func (h *AdminHandler) APIKeys(c *gin.Context) {
 	items, err := h.keys.ListWithGrants(c.Request.Context())
 	if err != nil {
@@ -59,7 +55,6 @@ func (h *AdminHandler) APIKeys(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"items": items}})
 }
 
-// POST /v1/admin/api-keys — create a key; response includes the secret once.
 func (h *AdminHandler) CreateAPIKey(c *gin.Context) {
 	var req apiKeyCreateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -75,7 +70,6 @@ func (h *AdminHandler) CreateAPIKey(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"data": issued})
 }
 
-// POST /v1/admin/api-keys/:id/revoke — immediately invalidate a key.
 func (h *AdminHandler) RevokeAPIKey(c *gin.Context) {
 	id, ok := parseKeyID(c)
 	if !ok {
@@ -88,7 +82,6 @@ func (h *AdminHandler) RevokeAPIKey(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"status": "revoked"}})
 }
 
-// POST /v1/admin/api-keys/:id/grants — add an allow/deny grant.
 func (h *AdminHandler) AddAPIKeyGrant(c *gin.Context) {
 	id, ok := parseKeyID(c)
 	if !ok {
@@ -109,7 +102,6 @@ func (h *AdminHandler) AddAPIKeyGrant(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"data": gin.H{"status": "added"}})
 }
 
-// DELETE /v1/admin/api-keys/:id/grants — remove a grant (body = grant triple).
 func (h *AdminHandler) RemoveAPIKeyGrant(c *gin.Context) {
 	id, ok := parseKeyID(c)
 	if !ok {

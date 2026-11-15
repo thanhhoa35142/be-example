@@ -14,7 +14,7 @@ import (
 )
 
 type memDigestRepo struct {
-	known map[uuid.UUID]uuid.UUID // requested -> resolved
+	known map[uuid.UUID]uuid.UUID
 	rows  map[uuid.UUID]*digest.Digest
 }
 
@@ -90,10 +90,10 @@ func TestDigestHandler(t *testing.T) {
 	check(do("GET", p, ""), 200, `"sendHour":18`)
 	check(do("PUT", "/v1/devices/"+free.String()+"/digest", `{"spotIds":["`+a.String()+`"],"enabled":true}`), 403, `"code":"plan_limit"`)
 	gone := uuid.NewString()
-	// Unknown ids are skipped, not fatal.
+
 	check(do("PUT", p, `{"spotIds":["`+b.String()+`","`+gone+`"],"enabled":true}`), 200,
 		`"skippedIds":["`+gone+`"],"spotIds":["`+b.String()+`"]`)
-	// Nothing left while enabled stays a 400; disabled is fine.
+
 	check(do("PUT", p, `{"spotIds":["`+gone+`"],"enabled":true}`), 400, `"code":"invalid_body"`)
 	check(do("PUT", p, `{"spotIds":["`+gone+`"],"enabled":false}`), 200, `"skippedIds":["`+gone+`"],"spotIds":[]`)
 	check(do("PUT", p, `{"spotIds":["nope"],"enabled":true}`), 400, `"code":"invalid_body"`)

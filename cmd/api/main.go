@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"log/slog"
@@ -16,6 +17,7 @@ import (
 	infrahttp "github.com/thanhhoa35142/be-example/internal/infrastructure/http"
 	"github.com/thanhhoa35142/be-example/internal/infrastructure/persistence"
 	"github.com/thanhhoa35142/be-example/internal/modules/admin"
+	"github.com/thanhhoa35142/be-example/internal/modules/adminauth"
 	"github.com/thanhhoa35142/be-example/internal/modules/alerts"
 	"github.com/thanhhoa35142/be-example/internal/modules/apikeys"
 	"github.com/thanhhoa35142/be-example/internal/modules/devices"
@@ -82,7 +84,6 @@ func main() {
 	eventsSvc := events.NewService(persistence.NewEventsRepo(queries))
 	digestSvc := digest.NewService(persistence.NewDigestRepo(queries), entitlementSvc, nil, logger)
 
-	// Gin reads its mode when the engine is built: set it first.
 	cfg.ConfigureGinMode(gin.SetMode)
 
 	limits := infrahttp.RateLimits{
@@ -92,10 +93,8 @@ func main() {
 	}
 	authFail := ratelimit.PerMinute(float64(cfg.RateAuthFailPerMin), cfg.RateAuthFailPerMin)
 
-	// Shared rate-limit buckets + GET response cache when REDIS_URL is set;
-	// nil = per-process in-memory limiters, no cache. Both fail open.
 	var rdb *redis.Client
-	var limiterFor func(ratelimit.Rule, string) ratelimit.Checker
+	limiterFor := func(r ratelimit.Rule, _ string) ratelimit.Checker { return ratelimit.New(r) }
 	if cfg.RedisURL != "" {
 		opts, err := redis.ParseURL(cfg.RedisURL)
 		if err != nil {
@@ -104,9 +103,7 @@ func main() {
 		rdb = redis.NewClient(opts)
 		pctx, pcancel := context.WithTimeout(context.Background(), 3*time.Second)
 		if err := rdb.Ping(pctx).Err(); err != nil {
-			// Keep the client: go-redis reconnects on its own, the rate
-			// limiter falls back to in-memory buckets while Redis is down,
-			// and the cache breaker bypasses it — all without a restart.
+
 			log.Printf("redis unreachable at boot (%v) — using in-memory rate limits, cache bypassed until it recovers", err)
 		} else {
 			log.Printf("redis enabled (%s): shared rate limits + response cache", opts.Addr)
@@ -117,6 +114,27 @@ func main() {
 		}
 	}
 
+	var adminAuthHandler *infrahttp.AdminAuthHandler
+	if cfg.MFASecretKeys != "" {
+		key, err := hex.DecodeString(cfg.MFASecretKeys)
+		if err != nil || len(key) != 32 {
+			log.Fatalf("MFA_SECRET_KEYS must be 64 hex chars (32 bytes)")
+		}
+		authSvc, err := adminauth.NewService(persistence.NewAdminAuthRepo(queries), key, adminauth.Config{
+			ChallengeTTL: cfg.MFAChallengeTTL,
+			SessionTTL:   cfg.MFASessionTTL,
+			IdleTTL:      cfg.MFASessionIdleTTL,
+			MaxFailures:  cfg.MFAMaxFailures,
+			Lockout:      cfg.MFALockoutTTL,
+		})
+		if err != nil {
+			log.Fatalf("admin auth: %v", err)
+		}
+		adminAuthHandler = infrahttp.NewAdminAuthHandler(authSvc, limiterFor(authFail, "authfail"))
+	} else {
+		logger.Warn("MFA_SECRET_KEYS unset: admin account login disabled, MFA_SECRET_KEYS_CLI bearer only")
+	}
+
 	router, err := infrahttp.NewRouter(pool, infrahttp.Handlers{
 		Spots:           infrahttp.NewSpotsHandler(spotsSvc),
 		Recommendations: infrahttp.NewRecommendationsHandler(recSvc),
@@ -125,6 +143,7 @@ func main() {
 		Alerts:          infrahttp.NewAlertsHandler(alertsSvc),
 		Entitlement:     infrahttp.NewEntitlementHandler(entitlementSvc),
 		Admin:           infrahttp.NewAdminHandler(adminSvc, keysSvc),
+		AdminAuth:       adminAuthHandler,
 		Events:          infrahttp.NewEventsHandler(eventsSvc),
 		Digest:          infrahttp.NewDigestHandler(digestSvc),
 		Share: infrahttp.NewShareHandler(spotsSvc, infrahttp.ShareOptions{
@@ -132,13 +151,14 @@ func main() {
 			AppStoreAppID: cfg.AppStoreAppID,
 		}),
 	}, infrahttp.Options{
-		TrustedProxies: cfg.TrustedProxies,
-		MaxBodyBytes:   cfg.MaxBodyBytes,
-		Limits:         &limits,
-		AdminToken:     os.Getenv("ADMIN_TOKEN"),
-		AdminFailed:    &authFail,
-		LimiterFor:     limiterFor,
-		Cache:          rdb,
+		TrustedProxies:      cfg.TrustedProxies,
+		MaxBodyBytes:        cfg.MaxBodyBytes,
+		Limits:              &limits,
+		AdminToken:          cfg.MFASecretKeysCLI,
+		AdminAllowedOrigins: cfg.AdminAllowedOrigins,
+		AdminFailed:         &authFail,
+		LimiterFor:          limiterFor,
+		Cache:               rdb,
 	})
 	if err != nil {
 		log.Fatalf("router: %v", err)
@@ -148,8 +168,8 @@ func main() {
 		Addr:              ":" + cfg.Port,
 		Handler:           router,
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second, // whole request incl. body (largest body is 512 KiB)
-		WriteTimeout:      60 * time.Second, // covers the slowest admin aggregate query
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    16 << 10,
 	}
@@ -173,10 +193,6 @@ func main() {
 	log.Println("server stopped")
 }
 
-// appStoreVerifier wires the App Store JWS verifier. Without
-// APPSTORE_BUNDLE_ID the entitlement service stays fail-closed: POST
-// /v1/entitlement/link and /v1/appstore/notifications answer 503 and no
-// subscription can be created. There is no bypass.
 func appStoreVerifier(cfg config.Config, logger *slog.Logger) entitlement.Option {
 	if cfg.AppStoreBundleID == "" {
 		logger.Error("APPSTORE_BUNDLE_ID is not set: subscription linking and App Store notifications are DISABLED (fail closed)")

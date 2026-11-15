@@ -17,7 +17,7 @@ func TestNormalizeLimits(t *testing.T) {
 	if _, err := good.Normalize(); err != nil {
 		t.Fatalf("good input rejected: %v", err)
 	}
-	// Empty optional strings are treated as absent.
+
 	out, err := RegisterInput{TZ: sp(""), Locale: sp(""), APNsToken: sp("")}.Normalize()
 	if err != nil || out.TZ != nil || out.Locale != nil || out.APNsToken != nil {
 		t.Fatalf("empties: %+v %v", out, err)

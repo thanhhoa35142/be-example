@@ -76,32 +76,30 @@ func TestClassifyQuality(t *testing.T) {
 	poly := `{"type":"Polygon","coordinates":[]}`
 	point := `{"type":"Point","coordinates":[0,0]}`
 
-	// Named polygon park with public access: 30+20+5 = 55 from tags alone;
-	// size/amenity terms are added by the planner (QualityPolicy.Bonus).
 	got := c.Classify(feat(map[string]string{
 		"leisure": "park", "name": "X", "access": "yes",
 	}, poly))
 	if got.Quality != 55 {
 		t.Fatalf("quality = %d, want 55", got.Quality)
 	}
-	// wikidata is a notability signal: +10.
+
 	got = c.Classify(feat(map[string]string{
 		"leisure": "park", "name": "X", "wikidata": "Q1",
 	}, poly))
 	if got.Quality != 60 {
 		t.Fatalf("wikidata quality = %d, want 60", got.Quality)
 	}
-	// Unnamed point park: 0 → below floor.
+
 	got = c.Classify(feat(map[string]string{"leisure": "park"}, point))
 	if got.Quality != 0 {
 		t.Fatalf("quality = %d, want 0", got.Quality)
 	}
-	// picnic_table=yes adds table evidence.
+
 	got = c.Classify(feat(map[string]string{"leisure": "park", "picnic_table": "yes"}, point))
 	if got.Quality != DefaultQualityPolicy.TableEvidence {
 		t.Fatalf("quality = %d, want %d", got.Quality, DefaultQualityPolicy.TableEvidence)
 	}
-	// Names map collects name:xx.
+
 	got = c.Classify(feat(map[string]string{
 		"leisure": "park", "name": "X", "name:en": "X park", "name:nl": "X park nl",
 	}, point))
@@ -130,8 +128,7 @@ func TestQualityBonus(t *testing.T) {
 			t.Errorf("%s: Bonus(%v,%d)=%d want %d", c.name, c.ha, c.amen, got, c.want)
 		}
 	}
-	// Calibration anchors: named polygon (50) activates (>=60) when large,
-	// or medium with one picnic amenity; a bare medium park stays pending.
+
 	named := qp.Named + qp.HasArea
 	if named+qp.Bonus(12, 0) < DefaultPolicy.AutoActivate ||
 		named+qp.Bonus(2, 1) < DefaultPolicy.AutoActivate ||

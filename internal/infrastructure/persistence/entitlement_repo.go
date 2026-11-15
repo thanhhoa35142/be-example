@@ -18,8 +18,6 @@ type EntitlementRepo struct {
 	pool *pgxpool.Pool
 }
 
-// NewEntitlementRepo needs the pool to run the device-link cap in a
-// transaction.
 func NewEntitlementRepo(q *Queries, pool *pgxpool.Pool) *EntitlementRepo {
 	return &EntitlementRepo{q: q, pool: pool}
 }
@@ -56,9 +54,6 @@ func (r *EntitlementRepo) UpsertSubscription(ctx context.Context, s entitlement.
 	return n > 0, err
 }
 
-// LinkDevice links the pair inside a transaction that first locks the
-// subscription row, so concurrent links of one transaction to different
-// devices are serialised and the active-device cap cannot be raced.
 func (r *EntitlementRepo) LinkDevice(ctx context.Context, deviceID, originalTransactionID string, maxDevices int) error {
 	id, err := uuid.Parse(deviceID)
 	if err != nil {
@@ -179,7 +174,7 @@ func (r *EntitlementRepo) MarkNotificationFailed(ctx context.Context, uuidStr, l
 func (r *EntitlementRepo) markNotification(ctx context.Context, uuidStr string, fn func(uuid.UUID) error) error {
 	id, err := uuid.Parse(uuidStr)
 	if err != nil {
-		return nil // unparseable uuid can't be in the table anyway
+		return nil
 	}
 	return fn(id)
 }

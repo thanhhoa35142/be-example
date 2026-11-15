@@ -1,13 +1,3 @@
-// Command keyctl is the staff CLI for managing scoped API keys used by
-// MCP/agent clients. The raw secret is printed exactly once on create.
-//
-// Usage:
-//
-//	keyctl create --name "ops-agent" --grant spots:read --grant recommendations:read [--expires 720h] [--desc "..."]
-//	keyctl list
-//	keyctl revoke <key-id>
-//	keyctl grant add <key-id> spots:read
-//	keyctl grant rm <key-id> spots:read
 package main
 
 import (
@@ -34,8 +24,6 @@ func (s *stringList) Set(v string) error {
 	return nil
 }
 
-// parseGrant converts "resource:action" ("*" allowed) into a Grant.
-// A bare "resource" is treated as resource:read? No — require explicit action.
 func parseGrant(spec string) (apikeys.Grant, error) {
 	resource, action, ok := strings.Cut(spec, ":")
 	if !ok || resource == "" || action == "" {
@@ -158,7 +146,7 @@ func main() {
 			usage()
 			os.Exit(2)
 		}
-		verb := os.Args[2] // add | rm
+		verb := os.Args[2]
 		id, err := uuid.Parse(os.Args[3])
 		if err != nil {
 			log.Fatalf("invalid key id: %v", err)

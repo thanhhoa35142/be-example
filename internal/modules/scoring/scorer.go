@@ -2,35 +2,30 @@ package scoring
 
 import "math"
 
-// WeatherInput is one hour of forecast for a spot's H3 cell.
 type WeatherInput struct {
 	TempC      *float64
 	FeelsLikeC *float64
-	PrecipProb *int // percent 0-100
+	PrecipProb *int
 	WindKmh    *float64
 	UV         *float64
-	Cloud      *int // percent 0-100
+	Cloud      *int
 }
 
-// CrowdInput is the estimated busyness (0 = empty, 100 = packed) with its source.
 type CrowdInput struct {
 	Level  int
-	Source string // model | community | provider
+	Source string
 }
 
-// Inputs are everything the scorer needs for one spot at one hour.
 type Inputs struct {
 	Weather          *WeatherInput
 	Crowd            *CrowdInput
-	AmenityScore     *int // 0-100, precomputed from spot_amenity
-	ShadeScore       *int // 0-100, reserved (sun/shade model not built yet)
-	DaysSinceUpdated int  // days since last_verified_at; large when unknown
-	// SunElevationDeg is the solar elevation at the middle of the hour at the
-	// spot; nil skips the daylight caps.
+	AmenityScore     *int
+	ShadeScore       *int
+	DaysSinceUpdated int
+
 	SunElevationDeg *float64
 }
 
-// Components holds the per-component sub-scores; nil means missing data.
 type Components struct {
 	Weather *int `json:"weather,omitempty"`
 	Crowd   *int `json:"crowd,omitempty"`
@@ -39,25 +34,20 @@ type Components struct {
 	Fresh   *int `json:"fresh,omitempty"`
 }
 
-// Reason is a score explanation code with parameters; the app translates it.
 type Reason struct {
 	Code   string         `json:"code"`
 	Params map[string]any `json:"params,omitempty"`
 }
 
-// Result is the outcome of scoring one spot-hour.
 type Result struct {
 	Score      int
 	Components Components
 	CapReason  *string
 	Reasons    []Reason
-	Confidence int  // 1-3
-	HasData    bool // false when every component was missing
+	Confidence int
+	HasData    bool
 }
 
-// Score computes the 0-100 score per spec §8: weighted sum over present
-// components, hard caps for rain/extreme temperatures, confidence downgrade
-// for missing or model-only data.
 func Score(in Inputs, cfg Config) Result {
 	comps := Components{
 		Weather: weatherScore(in.Weather),
@@ -69,8 +59,6 @@ func Score(in Inputs, cfg Config) Result {
 
 	res := Result{Components: comps}
 
-	// Freshness alone is not enough to score a spot-hour: at least one real
-	// component (weather, crowd, amenity or shade) must be present.
 	hasReal := comps.Weather != nil || comps.Crowd != nil || comps.Amenity != nil || comps.Shade != nil
 	if !hasReal {
 		res.Confidence = 1
@@ -93,7 +81,6 @@ func Score(in Inputs, cfg Config) Result {
 	res.HasData = true
 	res.Score = int(math.Round(total / wsum))
 
-	// Hard caps: the lowest applicable cap wins and supplies the reason.
 	if r, capVal := hardCap(in, cfg); r != nil {
 		res.CapReason = r
 		if res.Score > capVal {
@@ -106,7 +93,6 @@ func Score(in Inputs, cfg Config) Result {
 	return res
 }
 
-// Cap reasons.
 const (
 	CapRain     = "rain"
 	CapHeat     = "heat"
@@ -115,9 +101,6 @@ const (
 	CapTwilight = "twilight"
 )
 
-// hardCap returns the reason and value of the lowest applicable hard cap
-// (rain | heat | cold | dark | twilight), or nil when none applies. Ties go to
-// the weather cap, which is evaluated first (rain, then heat, then cold).
 func hardCap(in Inputs, cfg Config) (*string, int) {
 	var reason *string
 	capVal := 0
@@ -142,8 +125,6 @@ func hardCap(in Inputs, cfg Config) (*string, int) {
 	return reason, capVal
 }
 
-// daylightCap maps the sun elevation to a cap: below DarkElevationDeg it is
-// dark, below TwilightElevationDeg it is twilight. Returns "" when no cap.
 func daylightCap(elev *float64, th Thresholds) (string, int) {
 	if elev == nil {
 		return "", 0
@@ -157,7 +138,6 @@ func daylightCap(elev *float64, th Thresholds) (string, int) {
 	return "", 0
 }
 
-// weatherCapReason returns "rain" | "heat" | "cold" when a weather cap applies.
 func weatherCapReason(in Inputs, cfg Config) *string {
 	if in.Weather == nil {
 		return nil
@@ -189,7 +169,7 @@ func confidence(in Inputs, c Components) int {
 	if c.Crowd == nil {
 		conf--
 	} else if in.Crowd != nil && in.Crowd.Source == "model" {
-		// Model-only crowd never exceeds medium confidence (spec §16).
+
 		conf = min(conf, 2)
 	}
 	if c.Amenity == nil {
@@ -198,8 +178,6 @@ func confidence(in Inputs, c Components) int {
 	return max(1, min(3, conf))
 }
 
-// weatherScore: comfort peaks near 22°C feels-like, penalized by rain
-// probability, strong wind and high UV. Nil input → nil component.
 func weatherScore(w *WeatherInput) *int {
 	if w == nil {
 		return nil
@@ -228,7 +206,6 @@ func weatherScore(w *WeatherInput) *int {
 	return intPtr(clampRound(s))
 }
 
-// crowdScore inverts busyness: quieter is better for a picnic.
 func crowdScore(c *CrowdInput) *int {
 	if c == nil {
 		return nil
@@ -236,7 +213,6 @@ func crowdScore(c *CrowdInput) *int {
 	return intPtr(clampRound(100 - float64(c.Level)))
 }
 
-// freshScore rewards recently verified spot data.
 func freshScore(days int) *int {
 	var s int
 	switch {
@@ -254,7 +230,6 @@ func freshScore(days int) *int {
 	return intPtr(s)
 }
 
-// topReasons picks up to 3 explanation codes, cap reason first.
 func topReasons(in Inputs, c Components, capReason *string, cfg Config) []Reason {
 	var out []Reason
 	if capReason != nil {
