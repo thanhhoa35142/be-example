@@ -37,6 +37,7 @@ var jobScheduleLimits = map[string]jobScheduleLimit{
 	"scoring.recompute":      {min: 5 * 60, max: 6 * 60 * 60, desc: "Recompute spot scores for the forecast window"},
 	"alerts.evaluate":        {min: 60, max: 60 * 60, desc: "Evaluate alert rules and queue notifications"},
 	"digest.weekly":          {min: 15 * 60, max: 60 * 60, desc: "Send scheduled digest notifications"},
+	"plans.evaluate":         {min: 5 * 60, max: 60 * 60, desc: "Re-check picnic plans and push changes"},
 	"holidays.refresh":       {min: 24 * 60 * 60, max: 30 * 24 * 60 * 60, desc: "Refresh the public-holiday calendar"},
 	"retention.purge":        {min: 60 * 60, max: 30 * 24 * 60 * 60, desc: "Delete expired job runs, events and reports"},
 	"ingest.osm":             {min: 60 * 60, max: 7 * 24 * 60 * 60, desc: "Import OSM city packs"},

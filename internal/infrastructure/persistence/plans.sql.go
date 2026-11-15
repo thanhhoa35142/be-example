@@ -77,6 +77,113 @@ func (q *Queries) CancelPlan(ctx context.Context, arg CancelPlanParams) (int64, 
 	return result.RowsAffected(), nil
 }
 
+const claimPlanChange = `-- name: ClaimPlanChange :one
+UPDATE t_plans SET
+    notified_state   = $2,
+    last_notified_on = $3,
+    last_notified_at = now()
+WHERE id = $1 AND state = $2
+  AND notified_state IS NOT NULL AND notified_state <> $2
+  AND last_notified_on IS DISTINCT FROM $3
+  AND canceled_at IS NULL AND start_ts > now()
+RETURNING id
+`
+
+type ClaimPlanChangeParams struct {
+	ID        uuid.UUID   `json:"id"`
+	State     pgtype.Text `json:"state"`
+	LocalDate pgtype.Date `json:"local_date"`
+}
+
+// Guarded transition for plan.changed: only one worker, only while the
+// stored state still differs from the last notified one, at most once per
+// local day, never for a canceled or started plan.
+func (q *Queries) ClaimPlanChange(ctx context.Context, arg ClaimPlanChangeParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, claimPlanChange, arg.ID, arg.State, arg.LocalDate)
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
+const claimPlanConfirm = `-- name: ClaimPlanConfirm :one
+UPDATE t_plans SET
+    confirmed_at     = now(),
+    last_notified_on = $2,
+    last_notified_at = now()
+WHERE id = $1 AND state = 'ok' AND notified_state = 'ok' AND confirmed_at IS NULL
+  AND last_notified_on IS DISTINCT FROM $2
+  AND canceled_at IS NULL AND start_ts > now()
+RETURNING id
+`
+
+type ClaimPlanConfirmParams struct {
+	ID        uuid.UUID   `json:"id"`
+	LocalDate pgtype.Date `json:"local_date"`
+}
+
+// Guarded transition for plan.confirmed: once per plan, only while ok and
+// nothing else was pushed for it that local day.
+func (q *Queries) ClaimPlanConfirm(ctx context.Context, arg ClaimPlanConfirmParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, claimPlanConfirm, arg.ID, arg.LocalDate)
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
+const claimPlanDeliveries = `-- name: ClaimPlanDeliveries :many
+WITH c AS (
+    SELECT plan_id, device_id, local_date FROM t_plan_deliveries
+    WHERE status IN ('pending', 'failed') AND attempts < $1::int
+    ORDER BY created_at
+    LIMIT $2::int
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE t_plan_deliveries d
+SET status = 'claimed', attempts = d.attempts + 1, claimed_at = now()
+FROM c
+WHERE d.plan_id = c.plan_id AND d.device_id = c.device_id AND d.local_date = c.local_date
+RETURNING d.plan_id, d.device_id, d.local_date, d.kind, d.payload
+`
+
+type ClaimPlanDeliveriesParams struct {
+	MaxAttempts int32 `json:"max_attempts"`
+	Batch       int32 `json:"batch"`
+}
+
+type ClaimPlanDeliveriesRow struct {
+	PlanID    uuid.UUID   `json:"plan_id"`
+	DeviceID  uuid.UUID   `json:"device_id"`
+	LocalDate pgtype.Date `json:"local_date"`
+	Kind      string      `json:"kind"`
+	Payload   []byte      `json:"payload"`
+}
+
+func (q *Queries) ClaimPlanDeliveries(ctx context.Context, arg ClaimPlanDeliveriesParams) ([]ClaimPlanDeliveriesRow, error) {
+	rows, err := q.db.Query(ctx, claimPlanDeliveries, arg.MaxAttempts, arg.Batch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ClaimPlanDeliveriesRow{}
+	for rows.Next() {
+		var i ClaimPlanDeliveriesRow
+		if err := rows.Scan(
+			&i.PlanID,
+			&i.DeviceID,
+			&i.LocalDate,
+			&i.Kind,
+			&i.Payload,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const countActiveFollows = `-- name: CountActiveFollows :one
 SELECT count(*) FROM t_plan_followers f
 JOIN t_plans p ON p.id = f.plan_id
@@ -129,6 +236,124 @@ type DeletePlanFollowByTokenParams struct {
 // Any plan state: a follower can always leave, even a canceled/ended plan.
 func (q *Queries) DeletePlanFollowByToken(ctx context.Context, arg DeletePlanFollowByTokenParams) error {
 	_, err := q.db.Exec(ctx, deletePlanFollowByToken, arg.ShareToken, arg.DeviceID)
+	return err
+}
+
+const enqueuePlanDeliveries = `-- name: EnqueuePlanDeliveries :execrows
+INSERT INTO t_plan_deliveries (plan_id, device_id, local_date, kind, payload)
+SELECT p.id, d.id, $2::date, $3::text, $4::jsonb
+FROM t_plans p
+JOIN LATERAL (
+    SELECT p.device_id AS device_id
+    UNION
+    SELECT f.device_id FROM t_plan_followers f WHERE f.plan_id = p.id
+) r ON true
+JOIN t_devices d ON d.id = r.device_id AND d.deleted_at IS NULL AND d.push_status = 'active'
+WHERE p.id = $1
+ON CONFLICT (plan_id, device_id, local_date) DO NOTHING
+`
+
+type EnqueuePlanDeliveriesParams struct {
+	ID        uuid.UUID   `json:"id"`
+	LocalDate pgtype.Date `json:"local_date"`
+	Kind      string      `json:"kind"`
+	Payload   []byte      `json:"payload"`
+}
+
+// One outbox row for the owner and each follower whose push is active.
+func (q *Queries) EnqueuePlanDeliveries(ctx context.Context, arg EnqueuePlanDeliveriesParams) (int64, error) {
+	result, err := q.db.Exec(ctx, enqueuePlanDeliveries,
+		arg.ID,
+		arg.LocalDate,
+		arg.Kind,
+		arg.Payload,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const evaluablePlans = `-- name: EvaluablePlans :many
+SELECT p.id, p.share_token, p.spot_id, s.name AS spot_name, s.kind AS spot_kind,
+       p.start_ts, p.end_ts, p.tz, p.baseline_score, p.state, p.notified_state,
+       p.last_notified_on, p.confirmed_at
+FROM t_plans p
+JOIN t_spots s ON s.id = p.spot_id
+WHERE p.canceled_at IS NULL AND p.start_ts > now()
+  AND p.start_ts < $1::timestamptz
+ORDER BY p.start_ts, p.id
+`
+
+type EvaluablePlansRow struct {
+	ID             uuid.UUID          `json:"id"`
+	ShareToken     string             `json:"share_token"`
+	SpotID         uuid.UUID          `json:"spot_id"`
+	SpotName       pgtype.Text        `json:"spot_name"`
+	SpotKind       string             `json:"spot_kind"`
+	StartTs        time.Time          `json:"start_ts"`
+	EndTs          time.Time          `json:"end_ts"`
+	Tz             string             `json:"tz"`
+	BaselineScore  pgtype.Int2        `json:"baseline_score"`
+	State          pgtype.Text        `json:"state"`
+	NotifiedState  pgtype.Text        `json:"notified_state"`
+	LastNotifiedOn pgtype.Date        `json:"last_notified_on"`
+	ConfirmedAt    pgtype.Timestamptz `json:"confirmed_at"`
+}
+
+// plans.evaluate: every plan that is not canceled and has not started, within
+// the forecast range (scores exist at most 7 days ahead).
+func (q *Queries) EvaluablePlans(ctx context.Context, until time.Time) ([]EvaluablePlansRow, error) {
+	rows, err := q.db.Query(ctx, evaluablePlans, until)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []EvaluablePlansRow{}
+	for rows.Next() {
+		var i EvaluablePlansRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ShareToken,
+			&i.SpotID,
+			&i.SpotName,
+			&i.SpotKind,
+			&i.StartTs,
+			&i.EndTs,
+			&i.Tz,
+			&i.BaselineScore,
+			&i.State,
+			&i.NotifiedState,
+			&i.LastNotifiedOn,
+			&i.ConfirmedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const expirePlanDeliveries = `-- name: ExpirePlanDeliveries :exec
+UPDATE t_plan_deliveries d SET
+    status = 'dead',
+    last_error = CASE WHEN d.attempts >= $1::int
+                      THEN COALESCE(d.last_error, 'attempts exhausted') ELSE 'stale' END
+FROM t_plans p
+WHERE d.plan_id = p.id AND d.status IN ('pending', 'failed')
+  AND (p.canceled_at IS NOT NULL OR p.start_ts <= now()
+       OR d.local_date < (now() AT TIME ZONE p.tz)::date
+       OR d.attempts >= $1::int)
+`
+
+// Open rows that may no longer be sent become dead: the plan was canceled
+// or has started, the local day they were meant for is over, or attempts
+// are exhausted.
+func (q *Queries) ExpirePlanDeliveries(ctx context.Context, maxAttempts int32) error {
+	_, err := q.db.Exec(ctx, expirePlanDeliveries, maxAttempts)
 	return err
 }
 
@@ -308,6 +533,106 @@ func (q *Queries) LockDeviceForPlans(ctx context.Context, id uuid.UUID) (uuid.UU
 	return id_2, err
 }
 
+const markPlanDeliveryFailed = `-- name: MarkPlanDeliveryFailed :exec
+UPDATE t_plan_deliveries
+SET status = $4, apns_status = $5, last_error = $6
+WHERE plan_id = $1 AND device_id = $2 AND local_date = $3 AND status = 'claimed'
+`
+
+type MarkPlanDeliveryFailedParams struct {
+	PlanID     uuid.UUID   `json:"plan_id"`
+	DeviceID   uuid.UUID   `json:"device_id"`
+	LocalDate  pgtype.Date `json:"local_date"`
+	Status     string      `json:"status"`
+	ApnsStatus pgtype.Int2 `json:"apns_status"`
+	LastError  pgtype.Text `json:"last_error"`
+}
+
+func (q *Queries) MarkPlanDeliveryFailed(ctx context.Context, arg MarkPlanDeliveryFailedParams) error {
+	_, err := q.db.Exec(ctx, markPlanDeliveryFailed,
+		arg.PlanID,
+		arg.DeviceID,
+		arg.LocalDate,
+		arg.Status,
+		arg.ApnsStatus,
+		arg.LastError,
+	)
+	return err
+}
+
+const markPlanDeliverySent = `-- name: MarkPlanDeliverySent :exec
+UPDATE t_plan_deliveries
+SET status = 'sent', sent_at = now(), apns_status = 200, last_error = NULL
+WHERE plan_id = $1 AND device_id = $2 AND local_date = $3 AND status = 'claimed'
+`
+
+type MarkPlanDeliverySentParams struct {
+	PlanID    uuid.UUID   `json:"plan_id"`
+	DeviceID  uuid.UUID   `json:"device_id"`
+	LocalDate pgtype.Date `json:"local_date"`
+}
+
+func (q *Queries) MarkPlanDeliverySent(ctx context.Context, arg MarkPlanDeliverySentParams) error {
+	_, err := q.db.Exec(ctx, markPlanDeliverySent, arg.PlanID, arg.DeviceID, arg.LocalDate)
+	return err
+}
+
+const nearbyPlanAlternative = `-- name: NearbyPlanAlternative :one
+SELECT s.id, s.name, s.kind,
+       round(avg(sc.score))::int AS mean
+FROM t_spots c
+JOIN t_spots s ON s.status = 'active' AND s.id <> c.id
+             AND ST_DWithin(s.geom, c.geom, $2::float8)
+JOIN t_spot_scores sc ON sc.spot_id = s.id
+             AND sc.ts_hour >= $3 AND sc.ts_hour < $4
+WHERE c.id = $1
+GROUP BY s.id, s.name, s.kind
+HAVING count(*) = $5::int
+   AND NOT COALESCE(bool_or(sc.cap_reason = ANY($6::text[])), false)
+   AND round(avg(sc.score)) >= $7::int
+ORDER BY mean DESC, min(ST_Distance(s.geom, c.geom)), s.id
+LIMIT 1
+`
+
+type NearbyPlanAlternativeParams struct {
+	ID       uuid.UUID `json:"id"`
+	RadiusM  float64   `json:"radius_m"`
+	FromHour time.Time `json:"from_hour"`
+	ToTs     time.Time `json:"to_ts"`
+	Hours    int32     `json:"hours"`
+	BadCaps  []string  `json:"bad_caps"`
+	MinMean  int32     `json:"min_mean"`
+}
+
+type NearbyPlanAlternativeRow struct {
+	ID   uuid.UUID   `json:"id"`
+	Name pgtype.Text `json:"name"`
+	Kind string      `json:"kind"`
+	Mean int32       `json:"mean"`
+}
+
+// Best other active spot within radius_m for the same window: every hour
+// scored, no bad cap, mean at least min_mean; nearest first on ties.
+func (q *Queries) NearbyPlanAlternative(ctx context.Context, arg NearbyPlanAlternativeParams) (NearbyPlanAlternativeRow, error) {
+	row := q.db.QueryRow(ctx, nearbyPlanAlternative,
+		arg.ID,
+		arg.RadiusM,
+		arg.FromHour,
+		arg.ToTs,
+		arg.Hours,
+		arg.BadCaps,
+		arg.MinMean,
+	)
+	var i NearbyPlanAlternativeRow
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Kind,
+		&i.Mean,
+	)
+	return i, err
+}
+
 const planFollowerExists = `-- name: PlanFollowerExists :one
 SELECT EXISTS(SELECT 1 FROM t_plan_followers WHERE plan_id = $1 AND device_id = $2)
 `
@@ -392,4 +717,50 @@ func (q *Queries) PlanWindowScores(ctx context.Context, arg PlanWindowScoresPara
 		return nil, err
 	}
 	return items, nil
+}
+
+const savePlanEvaluation = `-- name: SavePlanEvaluation :exec
+UPDATE t_plans SET
+    state          = $2,
+    score          = $3,
+    cap_reason     = $4,
+    alternative    = $5,
+    evaluated_at   = now(),
+    baseline_score = COALESCE(baseline_score, $3),
+    notified_state = COALESCE(notified_state, $2)
+WHERE id = $1 AND canceled_at IS NULL
+`
+
+type SavePlanEvaluationParams struct {
+	ID          uuid.UUID   `json:"id"`
+	State       pgtype.Text `json:"state"`
+	Score       pgtype.Int2 `json:"score"`
+	CapReason   pgtype.Text `json:"cap_reason"`
+	Alternative []byte      `json:"alternative"`
+}
+
+// Stores the latest evaluation. The first evaluation with scores (plan
+// created before scores existed) also sets the baseline and the notified
+// state, silently: it is the starting point, not a change.
+func (q *Queries) SavePlanEvaluation(ctx context.Context, arg SavePlanEvaluationParams) error {
+	_, err := q.db.Exec(ctx, savePlanEvaluation,
+		arg.ID,
+		arg.State,
+		arg.Score,
+		arg.CapReason,
+		arg.Alternative,
+	)
+	return err
+}
+
+const sweepStalePlanDeliveries = `-- name: SweepStalePlanDeliveries :exec
+UPDATE t_plan_deliveries
+SET status = 'failed', last_error = 'claim timeout'
+WHERE status = 'claimed' AND claimed_at < now() - interval '5 minutes'
+`
+
+// Claims older than 5 minutes are presumed crashed mid-send.
+func (q *Queries) SweepStalePlanDeliveries(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, sweepStalePlanDeliveries)
+	return err
 }

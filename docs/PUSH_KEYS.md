@@ -117,3 +117,92 @@ Sunday, so two day variants suffice. collapse-id = `digest-<deviceId>`.
   "score": 88
 }
 ```
+
+## `plan.changed` / `plan.confirmed`
+
+Sent by `plans.evaluate` to the plan's owner and followers (rules in
+API.md, "Plan pushes"). The title is the plan's spot (title keys above).
+collapse-id and `thread-id` = `plan-<planId>`: one Notification Center thread
+per plan, and a newer plan push replaces an undelivered older one. All times
+are in the plan's `tz`.
+
+### Subtitle: the planned day
+
+Picked by comparing the plan's start date with today, both as calendar dates
+in the plan's `tz` (a push only goes out within 72 h of the start, so 0–3
+days).
+
+| Key | English | Args |
+|---|---|---|
+| `WHEN_TODAY` | `Today %1$@–%2$@` | 1: plan start `"10:00"`, 2: plan end `"13:00"` |
+| `WHEN_TOMORROW` | `Tomorrow %1$@–%2$@` | same |
+| `WHEN_IN_2_DAYS` | `In 2 days, %1$@–%2$@` | same |
+| `WHEN_IN_3_DAYS` | `In 3 days, %1$@–%2$@` | same |
+
+### Body: `plan.changed`
+
+`worse` = the score fell at least 15 below what it was when the plan was
+made; `bad` = rain/heat/cold expected, or the score below 60. Arg 1 is always
+the plan window's score now.
+
+| Key | English | Args |
+|---|---|---|
+| `PLAN_WORSE_ALT_TIME` | `Now %1$@. %2$@–%3$@ looks better (%4$@).` | 1: score, 2: alt start `"14:00"`, 3: alt end `"17:00"`, 4: alt score |
+| `PLAN_WORSE_ALT_SPOT` | `Now %1$@. %2$@ nearby looks better (%3$@).` | 1: score, 2: alt spot name `"Oosterpark"`, 3: alt score |
+| `PLAN_WORSE_ALT_NEARBY` | `Now %1$@. A spot nearby looks better (%2$@).` | 1: score, 2: alt score (unnamed alternative spot) |
+| `PLAN_WORSE_NO_ALT` | `The forecast got worse (%@).` | 1: score |
+| `PLAN_BAD_ALT_TIME` | `Not looking good (%1$@). Try %2$@–%3$@ instead (%4$@).` | as `PLAN_WORSE_ALT_TIME` |
+| `PLAN_BAD_ALT_SPOT` | `Not looking good (%1$@). Try %2$@ instead (%3$@).` | as `PLAN_WORSE_ALT_SPOT` |
+| `PLAN_BAD_ALT_NEARBY` | `Not looking good (%1$@). A spot nearby looks better (%2$@).` | as `PLAN_WORSE_ALT_NEARBY` |
+| `PLAN_BAD_NO_ALT` | `Not looking good (%@). No better time or spot nearby.` | 1: score |
+| `PLAN_OK` | `Good news: back on track (%@).` | 1: score (state returned to `ok`) |
+
+The alternative's time is the same local day as the plan. `capReason`
+(`rain` / `heat` / `cold`) is in the custom fields; the app may pick a more
+specific wording from it when it renders the plan.
+
+### Body: `plan.confirmed`
+
+The evening before (18:00–22:00 in the plan's `tz`), once, when the plan
+stayed `ok`.
+
+| Key | English | Args |
+|---|---|---|
+| `PLAN_CONFIRMED` | `Still looking good (%@). Enjoy your picnic!` | 1: score |
+
+```json
+{
+  "aps": {
+    "alert": {
+      "title-loc-key": "SPOT_NAMED",
+      "title-loc-args": ["Vondelpark"],
+      "subtitle-loc-key": "WHEN_TOMORROW",
+      "subtitle-loc-args": ["10:00", "13:00"],
+      "loc-key": "PLAN_BAD_ALT_TIME",
+      "loc-args": ["41", "14:00", "17:00", "80"]
+    },
+    "sound": "default",
+    "thread-id": "plan-44444444-4444-4444-4444-444444444444"
+  },
+  "kind": "plan.changed",
+  "planId": "44444444-4444-4444-4444-444444444444",
+  "shareToken": "q3Zr7l0bVQpX2b9kz8w1Hg",
+  "spotId": "33333333-3333-3333-3333-333333333333",
+  "start": "2026-11-21T09:00:00Z",
+  "end": "2026-11-21T12:00:00Z",
+  "tz": "Europe/Amsterdam",
+  "state": "bad",
+  "score": 41,
+  "capReason": "rain",
+  "alternative": {
+    "type": "time",
+    "start": "2026-11-21T13:00:00Z",
+    "end": "2026-11-21T16:00:00Z",
+    "score": 80
+  }
+}
+```
+
+Opening: the owner opens by `planId`; a follower by `shareToken` (same
+target as `pickhour://plan/<shareToken>`). `alternative` has the shape of
+the plan object's `alternative` (`type` `time` | `spot` | `none`).

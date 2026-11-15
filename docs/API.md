@@ -397,7 +397,7 @@ Re-registering an `id` that was deleted via `DELETE /v1/devices/{id}` works but 
 
 ### `DELETE /v1/devices/{id}`
 
-Soft-delete (GDPR/CCPA unlink). In the same statement it hard-deletes the device's alert rules (their delivery log cascades), weekend digest, plans it owns (their followers cascade), its follows of other plans, analytics events (`t_events`) and subscription links (so Plus is lost until the purchase is restored on a device), and clears the stored push token, attestation key, locale, tz, app version and prefs. Crowd reports, spot reports and score feedback are kept on purpose (they only feed anonymous aggregates; the device row no longer holds personal data). `204` on success, `404` if unknown/already deleted.
+Soft-delete (GDPR/CCPA unlink). In the same statement it hard-deletes the device's alert rules (their delivery log cascades), weekend digest, plans it owns (their followers and pushes cascade), its follows of other plans and its plan pushes, analytics events (`t_events`) and subscription links (so Plus is lost until the purchase is restored on a device), and clears the stored push token, attestation key, locale, tz, app version and prefs. Crowd reports, spot reports and score feedback are kept on purpose (they only feed anonymous aggregates; the device row no longer holds personal data). `204` on success, `404` if unknown/already deleted.
 Requires `X-Device-Token` for that device id.
 
 ---
@@ -601,7 +601,7 @@ Sent by worker job `digest.weekly` through the same APNs client as alerts (colla
 
 ## Plans (C2)
 
-A device plans one time window at one spot. The server keeps the plan, re-evaluates it after every scoring run (`plans.evaluate`) and pushes the owner and its followers when the window turns `worse` or `bad`, or confirms it the evening before. Others join with the plan's `shareToken` (128 random bits, 22 base64url chars) — the token is the only capability, there is no listing or search of plans.
+A device plans one time window at one spot. The server keeps the plan, re-evaluates it every 15 minutes (worker job `plans.evaluate`, see "Plan pushes") and pushes the owner and its followers when the window turns `worse` or `bad`, or confirms it the evening before. Others join with the plan's `shareToken` (128 random bits, 22 base64url chars) — the token is the only capability, there is no listing or search of plans.
 
 Device auth (`X-Device-ID` + `X-Device-Token`) on every route except the anonymous `GET /v1/shared-plans/{token}`.
 
@@ -680,6 +680,18 @@ No device auth. One window only, nothing about devices: no plan id, owner, follo
 
 `score` is the live window mean, `reasons` at most 3 reason codes of the window's lowest hour (translate client-side, see Reason codes). `state`/`score` are `null` before the window has scores. Unknown, malformed, canceled and ended tokens all return the same `404 not_found`. Headers: `Cache-Control: private, max-age=60`, `X-Robots-Tag: noindex, nofollow`, `Referrer-Policy: no-referrer`.
 
+### Plan pushes (`plans.evaluate`)
+
+Every run (default 900 s) re-scores each plan that is not canceled and has not started: stores `state`/`score`/`capReason`/`alternative` (what `GET /v1/plans` shows), then decides per plan, all times in the plan's `tz`:
+
+- **`plan.changed`** when `state` differs from the last state pushed (`ok`→`worse`/`bad`, `worse`↔`bad`, back to `ok`). Sent only if the start is at most **72 h** away, the local time is outside **quiet hours 22:00–07:00**, and nothing was pushed for this plan earlier that local day. Otherwise it waits; the next run decides again (a change made at night goes out at 07:00; if the state returns to the pushed one meanwhile, nothing is sent).
+- **`plan.confirmed`** once, on the local day before the start, 18:00–22:00, when the plan is and was `ok` and nothing else was pushed that day.
+- At most **one plan push per plan per local day** per device. Nothing after the start. Canceling sends nothing.
+- The first evaluation with scores of a plan created before scores existed only sets the baseline and the starting state; it never pushes (even if that state is `bad`).
+- Alternative order: best same-length window the same local day at the same spot (on the hour, later than now, every hour scored, no rain/heat/cold cap, mean ≥ 60 and above the plan's); else the best active spot within 5 km for the plan window under the same rules (ties: nearest); else `none`.
+
+Recipients: the owner and every follower whose push is active (one outbox row per device and local day; up to 3 attempts; rows for canceled/started plans or a past local day are dropped). collapse-id and `thread-id` are `plan-<planId>`. The alert text is only localization keys, see [PUSH_KEYS.md](PUSH_KEYS.md#planchanged--planconfirmed). Custom fields: `kind`, `planId`, `shareToken`, `spotId`, `start`, `end` (RFC 3339 UTC), `tz` (the plan's IANA zone, for re-rendering times), `state`, `score`, `capReason`, `alternative` (the plan object's shape). Open the plan in the app by `planId` (owner) or `shareToken` (follower; same as `pickhour://plan/<token>`).
+
 ## Entitlement (Free / Plus)
 
 ### `GET /v1/devices/{id}/entitlement`
@@ -753,7 +765,7 @@ Accounts are provisioned by the staff CLI (`cmd/admin create-user|reset-2fa|disa
 | `POST /v1/admin/scoring-config/{version}/activate` | Make a stored version effective |
 
 Workers write `job_run` automatically (start → ok/failed/skipped).
-Job schedules are stored in the database; running workers reload changes within 30 seconds. Jobs still run once at worker startup. Allowed interval ranges: `weather.refresh` 900–3600s, `crowd.refresh` 3600–2592000s, `crowd.aggregate` 60–86400s, `scoring.recompute` 300–21600s, `alerts.evaluate` 60–3600s, `digest.weekly` 900–3600s (default hourly; must tick at least hourly to hit each local send hour — sends the Plus weekend digest), and `holidays.refresh` 86400–2592000s (default weekly; offline national public holidays for every pack country, current + next year, into `t_holidays`).
+Job schedules are stored in the database; running workers reload changes within 30 seconds. Jobs still run once at worker startup. Allowed interval ranges: `weather.refresh` 900–3600s, `crowd.refresh` 3600–2592000s, `crowd.aggregate` 60–86400s, `scoring.recompute` 300–21600s, `alerts.evaluate` 60–3600s, `digest.weekly` 900–3600s (default hourly; must tick at least hourly to hit each local send hour — sends the Plus weekend digest), `plans.evaluate` 300–3600s (default 900s; re-checks plans and pushes plan changes, see Plans), and `holidays.refresh` 86400–2592000s (default weekly; offline national public holidays for every pack country, current + next year, into `t_holidays`).
 
 ### `GET /v1/admin/events/breakdown?name=paywall_feedback&prop=choice[&by=reason][&since=RFC3339]`
 

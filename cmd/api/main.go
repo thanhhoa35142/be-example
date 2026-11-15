@@ -86,7 +86,7 @@ func main() {
 	keysSvc := apikeys.NewService(persistence.NewAPIKeysRepo(queries, pool))
 	eventsSvc := events.NewService(persistence.NewEventsRepo(queries))
 	digestSvc := digest.NewService(persistence.NewDigestRepo(queries), entitlementSvc, nil, logger)
-	plansSvc := plans.NewService(persistence.NewPlansRepo(queries, pool), entitlementSvc, plansConfig(cfg))
+	plansSvc := plans.NewService(persistence.NewPlansRepo(queries, pool), entitlementSvc, plans.ConfigFrom(cfg))
 
 	cfg.ConfigureGinMode(gin.SetMode)
 

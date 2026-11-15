@@ -28,7 +28,7 @@ const (
 	KeyDigestBody         = "DIGEST_BODY"
 
 	// plan.changed / plan.confirmed subtitle: the planned day (relative to
-	// the plan's own timezone) and start time.
+	// the plan's own timezone); args: start and end "HH:MM".
 	KeyWhenToday    = "WHEN_TODAY"
 	KeyWhenTomorrow = "WHEN_TOMORROW"
 	KeyWhenIn2Days  = "WHEN_IN_2_DAYS"

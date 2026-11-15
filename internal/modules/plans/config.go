@@ -1,14 +1,14 @@
-package main
+package plans
 
 import (
 	"time"
 
-	"github.com/thanhhoa35142/be-example/internal/modules/plans"
 	"github.com/thanhhoa35142/be-example/internal/platform/config"
 )
 
-func plansConfig(cfg config.Config) plans.Config {
-	return plans.Config{
+// ConfigFrom maps the PLAN_* settings (API and worker share them).
+func ConfigFrom(cfg config.Config) Config {
+	return Config{
 		BadBelow:      cfg.PlanBadBelow,
 		WorseDrop:     cfg.PlanWorseDrop,
 		BadCaps:       cfg.PlanBadCaps,

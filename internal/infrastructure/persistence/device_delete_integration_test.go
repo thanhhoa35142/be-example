@@ -78,6 +78,12 @@ func TestDeleteDeviceRemovesPersonalData(t *testing.T) {
 		otherPlan, dev, ownPlan, other); err != nil {
 		t.Fatal(err)
 	}
+	// Plan pushes: dev's push for the plan it follows, other's for dev's plan.
+	if _, err := pool.Exec(ctx, `INSERT INTO t_plan_deliveries (plan_id, device_id, local_date, kind, payload)
+		VALUES ($1, $2, current_date, 'plan.changed', '{}'), ($3, $4, current_date, 'plan.changed', '{}')`,
+		otherPlan, dev, ownPlan, other); err != nil {
+		t.Fatal(err)
+	}
 
 	ok, err := persistence.NewDevicesRepo(persistence.New(pool), pool).Delete(ctx, dev)
 	if err != nil || !ok {
@@ -108,6 +114,9 @@ func TestDeleteDeviceRemovesPersonalData(t *testing.T) {
 	}
 	if n := count(`SELECT count(*) FROM t_plan_followers WHERE device_id=$1 OR plan_id=$2`, dev, ownPlan); n != 0 {
 		t.Errorf("plan follows left: %d", n)
+	}
+	if n := count(`SELECT count(*) FROM t_plan_deliveries WHERE device_id=$1 OR plan_id=$2`, dev, ownPlan); n != 0 {
+		t.Errorf("plan pushes left: %d", n)
 	}
 	if n := count(`SELECT count(*) FROM t_plans WHERE id=$1`, otherPlan); n != 1 {
 		t.Errorf("another device's plan must remain: %d", n)

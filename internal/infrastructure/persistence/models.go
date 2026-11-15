@@ -284,6 +284,21 @@ type TPlan struct {
 	CreatedAt      time.Time          `json:"created_at"`
 }
 
+type TPlanDelivery struct {
+	PlanID     uuid.UUID          `json:"plan_id"`
+	DeviceID   uuid.UUID          `json:"device_id"`
+	LocalDate  pgtype.Date        `json:"local_date"`
+	Kind       string             `json:"kind"`
+	Payload    []byte             `json:"payload"`
+	Status     string             `json:"status"`
+	Attempts   int16              `json:"attempts"`
+	CreatedAt  time.Time          `json:"created_at"`
+	ClaimedAt  pgtype.Timestamptz `json:"claimed_at"`
+	SentAt     pgtype.Timestamptz `json:"sent_at"`
+	ApnsStatus pgtype.Int2        `json:"apns_status"`
+	LastError  pgtype.Text        `json:"last_error"`
+}
+
 type TPlanFollower struct {
 	PlanID    uuid.UUID `json:"plan_id"`
 	DeviceID  uuid.UUID `json:"device_id"`

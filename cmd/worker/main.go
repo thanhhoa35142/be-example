@@ -31,6 +31,7 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/modules/ingest"
 	"github.com/thanhhoa35142/be-example/internal/modules/ingest/osm"
 	"github.com/thanhhoa35142/be-example/internal/modules/notifier"
+	"github.com/thanhhoa35142/be-example/internal/modules/plans"
 	"github.com/thanhhoa35142/be-example/internal/modules/scoring"
 	"github.com/thanhhoa35142/be-example/internal/modules/traffic"
 	"github.com/thanhhoa35142/be-example/internal/modules/weather"
@@ -256,6 +257,13 @@ func main() {
 		persistence.NewDigestRepo(queries),
 		entitlementSvc,
 		notifier.NewDigestSender(notifier.NewSender(logger, alertsRepo, apnsClient)),
+		logger,
+	)
+
+	planEvaluator := plans.NewEvaluator(
+		persistence.NewPlansRepo(queries, pool),
+		notifier.NewPlanSender(notifier.NewSender(logger, alertsRepo, apnsClient)),
+		plans.ConfigFrom(cfg),
 		logger,
 	)
 
@@ -487,6 +495,29 @@ func main() {
 				}
 				logger.Info("alerts done", "rules", stats.Rules, "evaluated", stats.Evaluated,
 					"fired", stats.Fired, "sent", stats.Sent, "failed", stats.Failed)
+				return nil
+			},
+		},
+		{
+			name:         "plans.evaluate",
+			initialDelay: 6 * time.Minute,
+			fn: func(ctx context.Context) error {
+				stats, err := planEvaluator.Evaluate(ctx)
+				if bag, ok := ctx.Value(jobStatsKey{}).(*jobStatsBag); ok {
+					bag.set("plans", stats.Plans)
+					bag.set("changed", stats.Changed)
+					bag.set("confirmed", stats.Confirmed)
+					bag.set("deferred", stats.Deferred)
+					bag.set("sent", stats.Sent)
+					bag.set("failed", stats.Failed)
+					bag.set("dead", stats.Dead)
+				}
+				if err != nil {
+					return err
+				}
+				logger.Info("plans done", "plans", stats.Plans, "no_scores", stats.NoScores,
+					"changed", stats.Changed, "confirmed", stats.Confirmed, "deferred", stats.Deferred,
+					"queued", stats.Queued, "sent", stats.Sent, "failed", stats.Failed, "dead", stats.Dead)
 				return nil
 			},
 		},
