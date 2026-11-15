@@ -227,10 +227,19 @@ Merged spot → `301` with `Location: /v1/spots/{newId}` — follow it.
 
 | route | notes |
 |---|---|
-| `GET /s/{spotId}` | Public HTML page for a shared spot: name, current score, "Open in Pickhour" (`pickhour://spot/{id}`), optional "Get the App", Apple Maps directions. `301` to the new id for a merged spot, `404` page for an unknown one. The app shares `https://<share host>/s/{spotId}`; the host must route `/s/*` and `/.well-known/*` to this API |
+| `GET /s/{spotId}` | Public HTML page for a shared spot: name, current score, "Open in Pickhour" (`pickhour://spot/{id}`), optional "Get the App", Apple Maps directions. `301` to the new id for a merged spot, `404` page for an unknown one. The app shares `https://<share host>/s/{spotId}`; the host must route `/s/*` and `/.well-known/*` to this API. Optional `?at=<RFC3339>` (a planned picnic, see below) |
 | `GET /.well-known/apple-app-site-association` | JSON claiming `/s/*` for the app ids in `APPLE_APP_IDS` (`<TeamID>.<bundle id>`, comma-separated). `404` while that variable is empty. Must be served over HTTPS without redirects |
 
 `APPSTORE_APP_ID` (numeric) adds the "Get the App" link and the Safari smart banner.
+
+**Planned time: `GET /s/{spotId}?at=<RFC3339>`.** The page then shows one hour of one spot: the planned date and time in the spot's timezone, the score for that hour and up to 3 reasons (plus "Open Pickhour to see better times" when the score is below 60 or capped). No hourly chart, other days or alternatives. Open Graph title becomes `Picnic on <Weekday D Mon, HH:MM> · <spot>`.
+
+- **Canonical form** is the UTC hour: `at=2026-11-21T15:00:00Z`. Clients should build exactly this. A valid but non-canonical value (minutes, seconds, fraction, offset) gets a `302` (`Cache-Control: private`) to the canonical URL. Do not use an offset such as `+01:00`: an unencoded `+` in a query decodes as a space and the value is then ignored.
+- **Valid range:** from the current UTC hour up to (not including) now + 7 days. A value that is unparsable, longer than 40 bytes, in the past or beyond that range is ignored: the plain spot page renders with `200` (never `4xx`/`5xx`) and `Cache-Control: private`.
+- Any request carrying `at` gets `<meta name="robots" content="noindex">` and `X-Robots-Tag: noindex`. Valid `at` pages are `Cache-Control: public, max-age=300` with `<link rel="canonical">`.
+- "Open in Pickhour" becomes `pickhour://spot/{id}?at=2026-11-21T15%3A00%3A00Z` (query-encoded; decode with `URLComponents.queryItems`).
+- Merged spot: `301` to `/s/{newId}?at=<canonical>` (an invalid `at` is dropped).
+- If no score exists for that hour (e.g. scoring has not run), the page shows place and time without a score.
 
 ### `GET /v1/spots/{id}/forecast`
 
