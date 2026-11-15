@@ -615,7 +615,7 @@ func main() {
 
 func runJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, adminSvc *admin.Service, j job) {
 	run := func() {
-		executeJob(ctx, pool, logger, adminSvc, j)
+		_, _ = executeJob(ctx, pool, logger, adminSvc, j)
 	}
 
 	// Fallback interval when the schedule row is missing — without it the job
