@@ -1,0 +1,125 @@
+name: weather-refresh
+
+# Self-hosted Open-Meteo weather refresh (docs/WEATHER_SELFHOST_PROPOSAL.md).
+# Each run: sync GFS/GEFS + DEM from the open-data bucket, serve the
+# forecast API locally, then run `worker -job weather.refresh` against
+# the target DB over Tailscale.
+#
+# Phase 2 status: workflow_dispatch ONLY — no schedule yet. Enable the
+# cron below after measuring real GFS publication lag on the bucket.
+# GFS runs at 00/06/12/18 UTC; candidate cron (delay ~3-4h):
+#   schedule:
+#     - cron: "30 3,9,15,21 * * *"
+#
+# Required GitHub secrets:
+#   TS_AUTHKEY                    - Tailscale ephemeral auth key, tag:ci
+#   WEATHER_TEST_DATABASE_URL     - postgres://weather_job:...@<win-ts-ip>:5434/picnic_test
+#                                   (through Windows portproxy -> WSL forwarder)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_db:
+        description: "Database to refresh (test only for now)"
+        type: choice
+        options: [picnic_test]
+        default: picnic_test
+      models:
+        description: "Sync model domains"
+        type: string
+        default: "ncep_gfs013,ncep_gefs025,ncep_gefs05"
+      api_models:
+        description: "models= value for the forecast API"
+        type: string
+        default: "gfs_global"
+      past_days:
+        description: "Sync --past-days"
+        type: string
+        default: "2"
+
+concurrency:
+  group: weather-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    env:
+      MODELS: ${{ inputs.models }}
+      API_MODELS: ${{ inputs.api_models }}
+      PAST_DAYS: ${{ inputs.past_days }}
+      VARS: "temperature_2m,relative_humidity_2m,dew_point_2m,wind_u_component_10m,wind_v_component_10m,precipitation,precipitation_probability,cloud_cover,uv_index,shortwave_radiation"
+      IMAGE: ghcr.io/open-meteo/open-meteo:latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build worker
+        run: go build -o /tmp/worker ./cmd/worker
+
+      - name: Join tailnet
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+          tags: tag:ci
+
+      - name: Create data volume
+        run: docker volume create open-meteo-data
+
+      - name: Sync DEM
+        run: |
+          docker run --rm -v open-meteo-data:/app/data $IMAGE \
+            sync copernicus_dem90 static
+
+      - name: Sync model data
+        run: |
+          echo "models=$MODELS past_days=$PAST_DAYS"
+          time docker run --rm -v open-meteo-data:/app/data $IMAGE \
+            sync "$MODELS" "$VARS" --past-days "$PAST_DAYS" --concurrent 8
+
+      - name: Start forecast API
+        run: |
+          docker run -d --name open-meteo -v open-meteo-data:/app/data \
+            -p 8080:8080 $IMAGE serve --env production --hostname 0.0.0.0 --port 8080
+          for i in $(seq 1 60); do
+            curl -sf "http://localhost:8080/v1/forecast?latitude=52.37&longitude=4.90&hourly=temperature_2m&forecast_days=1&models=gfs013" >/dev/null && break
+            sleep 2
+          done
+
+      - name: DB connectivity check
+        env:
+          DATABASE_URL: ${{ secrets.WEATHER_TEST_DATABASE_URL }}
+        run: |
+          docker run --rm -e PGPASSWORD="$(echo "$DATABASE_URL" | sed -E 's#.*://[^:]+:([^@]+)@.*#\1#')" \
+            postgres:16-alpine pg_isready -h "$(echo "$DATABASE_URL" | sed -E 's#.*@([^:/]+).*#\1#')" \
+            -p "$(echo "$DATABASE_URL" | sed -E 's#.*:([0-9]+)/.*#\1#')" -U weather_job || true
+
+      - name: Run weather.refresh
+        env:
+          DATABASE_URL: ${{ secrets.WEATHER_TEST_DATABASE_URL }}
+          OPEN_METEO_URL: http://localhost:8080/v1/forecast
+          OPEN_METEO_MODELS: ${{ inputs.api_models }}
+          WEATHER_DAILY_LIMIT: "0"
+          RUN_MIGRATIONS: "false"
+          APP_ENV: production
+        run: |
+          # Rewrite the path to the chosen test database.
+          export DATABASE_URL="$(echo "$DATABASE_URL" | sed -E 's#/[^?]+\?#/${{ inputs.target_db }}?#')"
+          echo "target: $(echo "$DATABASE_URL" | sed -E 's#://[^:]+:[^@]+@#://***@#')"
+          /tmp/worker -job weather.refresh
+
+      - name: Job outcome
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.WEATHER_TEST_DATABASE_URL }}
+        run: |
+          docker run --rm -e PGPASSWORD="$(echo "$DATABASE_URL" | sed -E 's#.*://[^:]+:([^@]+)@.*#\1#')" \
+            postgres:16-alpine psql "$DATABASE_URL" -c \
+            "SELECT job, status, started_at, finished_at, rows_affected FROM t_job_runs WHERE job='weather.refresh' ORDER BY id DESC LIMIT 3" || true
