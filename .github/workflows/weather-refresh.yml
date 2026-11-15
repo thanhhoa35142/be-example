@@ -1,7 +1,7 @@
 name: weather-refresh
 
 # Self-hosted Open-Meteo weather refresh (docs/WEATHER_SELFHOST_PROPOSAL.md).
-# Each run: spin up an ephemeral Postgres, restore the picnic_test dump
+# Each run: spin up an ephemeral Postgres, restore the picnic dump
 # from the `weather-test-db` release, sync GFS/GEFS + DEM from the
 # open-data bucket, serve the forecast API locally, then run
 # `worker -job weather.refresh` against the ephemeral DB.
@@ -52,7 +52,7 @@ jobs:
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: test
-          POSTGRES_DB: picnic_test
+          POSTGRES_DB: picnic
         ports:
           - 5432:5432
         options: >-
@@ -67,7 +67,7 @@ jobs:
       PAST_DAYS: ${{ inputs.past_days }}
       VARS: "temperature_2m,relative_humidity_2m,dew_point_2m,wind_u_component_10m,wind_v_component_10m,precipitation,precipitation_probability,cloud_cover,uv_index,shortwave_radiation"
       IMAGE: ghcr.io/open-meteo/open-meteo:latest
-      DATABASE_URL: postgres://postgres:test@localhost:5432/picnic_test?sslmode=disable
+      DATABASE_URL: postgres://postgres:test@localhost:5432/picnic?sslmode=disable
 
     steps:
       - uses: actions/checkout@v4
@@ -83,12 +83,12 @@ jobs:
       - name: Download test DB dump
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release download weather-test-db -p picnic_test.dump -R ${{ github.repository }} --clobber --dir /tmp
+        run: gh release download weather-test-db -p picnic.dump -R ${{ github.repository }} --clobber --dir /tmp
 
       - name: Restore dump
         run: |
           docker run --rm --network host -e PGPASSWORD=test -v /tmp:/w postgis/postgis:18-3.6 \
-            pg_restore -h localhost -U postgres -d picnic_test --no-owner --no-privileges /w/picnic_test.dump
+            pg_restore -h localhost -U postgres -d picnic --no-owner --no-privileges /w/picnic.dump
 
       - name: Sanity check cells
         run: |
