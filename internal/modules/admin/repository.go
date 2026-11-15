@@ -23,11 +23,10 @@ type Repository interface {
 	Overview(ctx context.Context) (Overview, error)
 	Freshness(ctx context.Context) (Freshness, error)
 	ListPendingReports(ctx context.Context, limit int, after *ReportCursor) ([]PendingReport, error)
-	UpdateReportStatus(ctx context.Context, id uuid.UUID, status string) (bool, error)
-
-	SpotReportTarget(ctx context.Context, id uuid.UUID) (spotID uuid.UUID, typ string, err error)
-
-	CloseSpotForReport(ctx context.Context, spotID uuid.UUID) error
+	// ModerateReport transitions a pending report and, for accepted "closed"
+	// reports, closes the spot — atomically. Returns the outcome so the
+	// service can map missing vs already-moderated reports to 404/409.
+	ModerateReport(ctx context.Context, id uuid.UUID, status string) (ModReportOutcome, error)
 
 	Metrics(ctx context.Context, f MetricsFilter) (Metrics, error)
 	EventSummary(ctx context.Context, f MetricsFilter) (EventSummary, error)

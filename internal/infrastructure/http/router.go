@@ -2,12 +2,15 @@ package http
 
 import (
 	"fmt"
+	"net/http"
 	"net/url"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
+	"github.com/thanhhoa35142/be-example/internal/modules/devices"
+	"github.com/thanhhoa35142/be-example/internal/platform/cache"
 	"github.com/thanhhoa35142/be-example/internal/platform/ratelimit"
 )
 
@@ -33,6 +36,7 @@ type Handlers struct {
 	Spots           *SpotsHandler
 	Recommendations *RecommendationsHandler
 	Devices         *DevicesHandler
+	DeviceSvc       *devices.Service
 	Reports         *ReportsHandler
 	Alerts          *AlertsHandler
 	Entitlement     *EntitlementHandler
@@ -103,6 +107,17 @@ func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error
 		return Cache(opts.Cache, CacheOptions{TTL: ttl, Versioned: true, WeatherVersioned: true, Normalize: normalize})
 	}
 
+	// Admin aggregate reads are global (not per-user), so they can share a
+	// cached response. Versioned by AdminAggVersionKey: POST /cache/refresh
+	// bumps it without touching the public caches. Bearer-token requests
+	// (scripts/CI) carry Authorization and bypass the cache entirely.
+	adminCacheGet := func(ttl time.Duration) gin.HandlerFunc {
+		return Cache(opts.Cache, CacheOptions{
+			TTL: ttl, Versioned: true, VersionKey: cache.AdminAggVersionKey,
+			BypassOnAuth: true,
+		})
+	}
+
 	v1 := r.Group("/v1")
 	{
 		if h.Spots != nil {
@@ -117,30 +132,65 @@ func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error
 		}
 		if h.Devices != nil {
 			v1.POST("/devices", h.Devices.Register)
-			v1.DELETE("/devices/:id", h.Devices.Delete)
+			if h.DeviceSvc != nil {
+				v1.DELETE("/devices/:id", deviceAuthParam(h.DeviceSvc), h.Devices.Delete)
+			} else {
+				v1.DELETE("/devices/:id", h.Devices.Delete)
+			}
 		}
 		if h.Reports != nil {
-			v1.POST("/spots/:id/reports", h.Reports.SpotReport)
-			v1.POST("/spots/:id/crowd-reports", h.Reports.CrowdReport)
-			v1.POST("/scores/feedback", h.Reports.ScoreFeedback)
+			devAuth := deviceAuthHeader
+			if h.DeviceSvc != nil {
+				v1.POST("/spots/:id/reports", devAuth(h.DeviceSvc), h.Reports.SpotReport)
+				v1.POST("/spots/:id/crowd-reports", devAuth(h.DeviceSvc), h.Reports.CrowdReport)
+				v1.POST("/scores/feedback", devAuth(h.DeviceSvc), h.Reports.ScoreFeedback)
+			} else {
+				v1.POST("/spots/:id/reports", h.Reports.SpotReport)
+				v1.POST("/spots/:id/crowd-reports", h.Reports.CrowdReport)
+				v1.POST("/scores/feedback", h.Reports.ScoreFeedback)
+			}
 		}
 		if h.Alerts != nil {
-			v1.GET("/alerts", h.Alerts.List)
-			v1.POST("/alerts", h.Alerts.Create)
-			v1.PUT("/alerts/:id", h.Alerts.Update)
-			v1.DELETE("/alerts/:id", h.Alerts.Delete)
+			if h.DeviceSvc != nil {
+				auth := deviceAuthHeader(h.DeviceSvc)
+				v1.GET("/alerts", auth, h.Alerts.List)
+				v1.POST("/alerts", auth, h.Alerts.Create)
+				v1.PUT("/alerts/:id", auth, h.Alerts.Update)
+				v1.DELETE("/alerts/:id", auth, h.Alerts.Delete)
+			} else {
+				v1.GET("/alerts", h.Alerts.List)
+				v1.POST("/alerts", h.Alerts.Create)
+				v1.PUT("/alerts/:id", h.Alerts.Update)
+				v1.DELETE("/alerts/:id", h.Alerts.Delete)
+			}
 		}
 		if h.Digest != nil {
-			v1.PUT("/devices/:id/digest", h.Digest.Put)
-			v1.GET("/devices/:id/digest", h.Digest.Get)
-			v1.DELETE("/devices/:id/digest", h.Digest.Delete)
+			if h.DeviceSvc != nil {
+				auth := deviceAuthParam(h.DeviceSvc)
+				v1.PUT("/devices/:id/digest", auth, h.Digest.Put)
+				v1.GET("/devices/:id/digest", auth, h.Digest.Get)
+				v1.DELETE("/devices/:id/digest", auth, h.Digest.Delete)
+			} else {
+				v1.PUT("/devices/:id/digest", h.Digest.Put)
+				v1.GET("/devices/:id/digest", h.Digest.Get)
+				v1.DELETE("/devices/:id/digest", h.Digest.Delete)
+			}
 		}
 		if h.Events != nil {
-			v1.POST("/events", h.Events.Track)
+			if h.DeviceSvc != nil {
+				v1.POST("/events", deviceAuthHeader(h.DeviceSvc), h.Events.Track)
+			} else {
+				v1.POST("/events", h.Events.Track)
+			}
 		}
 		if h.Entitlement != nil {
-			v1.GET("/devices/:id/entitlement", h.Entitlement.Get)
-			v1.POST("/entitlement/link", h.Entitlement.Link)
+			if h.DeviceSvc != nil {
+				v1.GET("/devices/:id/entitlement", deviceAuthParam(h.DeviceSvc), h.Entitlement.Get)
+				v1.POST("/entitlement/link", deviceAuthHeader(h.DeviceSvc), h.Entitlement.Link)
+			} else {
+				v1.GET("/devices/:id/entitlement", h.Entitlement.Get)
+				v1.POST("/entitlement/link", h.Entitlement.Link)
+			}
 			v1.POST("/appstore/notifications", h.Entitlement.AppStoreNotification)
 		}
 
@@ -151,12 +201,21 @@ func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error
 		if h.Admin != nil {
 			auditRec = h.Admin
 		}
-		admin := v1.Group("/admin", AdminAudit(auditRec), AdminCSRF(opts.AdminAllowedOrigins))
+		admin := v1.Group("/admin", AdminAudit(auditRec), AdminCSRF(opts.AdminAllowedOrigins, opts.TrustedProxies))
 		var sessions SessionAuthenticator
 		if h.AdminAuth != nil {
 			sessions = h.AdminAuth.Service()
 		}
-		authed := admin.Group("", AdminAuth(opts.AdminToken, sessions, limiterFor(adminFail, "authfail")))
+		// Any successful admin mutation invalidates the aggregate cache so
+		// overview/metrics/events don't serve stale numbers until TTL.
+		adminMutate := func(c *gin.Context) {
+			c.Next()
+			if opts.Cache == nil || c.Request.Method == http.MethodGet || c.Writer.Status() >= 400 {
+				return
+			}
+			_ = cache.BumpAdminAgg(c.Request.Context(), opts.Cache)
+		}
+		authed := admin.Group("", AdminAuth(opts.AdminToken, sessions, limiterFor(adminFail, "authfail")), adminMutate)
 		if h.AdminAuth != nil {
 
 			admin.POST("/auth/login", h.AdminAuth.Login)
@@ -183,12 +242,13 @@ func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error
 			authed.GET("/traffic/ga4", h.Traffic.Ga4)
 		}
 		if h.Admin != nil {
-			authed.GET("/overview", h.Admin.Overview)
+			authed.GET("/overview", adminCacheGet(5*time.Minute), h.Admin.Overview)
 			authed.GET("/freshness", h.Admin.Freshness)
-			authed.GET("/metrics", h.Admin.Metrics)
-			authed.GET("/events", h.Admin.Events)
-			authed.GET("/events/breakdown", h.Admin.EventBreakdown)
+			authed.GET("/metrics", adminCacheGet(5*time.Minute), h.Admin.Metrics)
+			authed.GET("/events", adminCacheGet(5*time.Minute), h.Admin.Events)
+			authed.GET("/events/breakdown", adminCacheGet(5*time.Minute), h.Admin.EventBreakdown)
 			authed.GET("/cache", h.Admin.CacheStats)
+			authed.POST("/cache/refresh", h.Admin.RefreshCache)
 			authed.GET("/audit", h.Admin.AuditEvents)
 			authed.GET("/jobs", h.Admin.Jobs)
 			authed.GET("/jobs/runs/:id", h.Admin.JobRun)

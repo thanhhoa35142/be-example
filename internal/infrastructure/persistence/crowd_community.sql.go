@@ -7,6 +7,7 @@ package persistence
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -64,14 +65,18 @@ func (q *Queries) AggregateCommunityCrowd(ctx context.Context, dollar_1 interfac
 	return items, nil
 }
 
-const deleteStaleCommunityEstimates = `-- name: DeleteStaleCommunityEstimates :execrows
+const deleteUnrefreshedCommunityEstimates = `-- name: DeleteUnrefreshedCommunityEstimates :execrows
 DELETE FROM t_crowd_estimates
 WHERE source = 'community'
-  AND updated_at < now() - interval '35 days'
+  AND updated_at < $1::timestamptz
 `
 
-func (q *Queries) DeleteStaleCommunityEstimates(ctx context.Context) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteStaleCommunityEstimates)
+// Community estimates not rewritten by the current aggregate run are stale:
+// their slot dropped below MinCommunityReports or aged out of the 30-day
+// report window. The caller passes the run start; upserted rows carry
+// updated_at = now() > run start and survive.
+func (q *Queries) DeleteUnrefreshedCommunityEstimates(ctx context.Context, runStart time.Time) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteUnrefreshedCommunityEstimates, runStart)
 	if err != nil {
 		return 0, err
 	}

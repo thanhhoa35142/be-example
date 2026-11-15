@@ -1,6 +1,11 @@
 package devices
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +21,10 @@ var (
 	ErrConflict = errors.New("conflict")
 
 	ErrInvalidInput = errors.New("invalid device registration")
+
+	// ErrUnauthorized means the device exists and holds a credential but the
+	// request did not prove it (missing/invalid X-Device-Token).
+	ErrUnauthorized = errors.New("device authentication required")
 )
 
 const (
@@ -41,6 +50,37 @@ type RegisterInput struct {
 	TZ         *string
 	AppVersion *string
 	Prefs      map[string]any
+
+	// SecretHash is the SHA-256 hex of a freshly generated device secret,
+	// set only when the row has no credential yet. TokenHash is the SHA-256
+	// hex of the X-Device-Token the caller presented, used to authorize
+	// re-registration of a device that already holds a credential.
+	SecretHash string
+	TokenHash  string
+}
+
+// NewSecret returns a fresh device secret and the SHA-256 hex used for
+// storage/comparison. The raw secret is shown to the app exactly once.
+func NewSecret() (raw, hashHex string, err error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", "", err
+	}
+	raw = base64.RawURLEncoding.EncodeToString(buf)
+	return raw, HashSecret(raw), nil
+}
+
+// HashSecret is the storage form of a device secret: SHA-256 hex.
+func HashSecret(secret string) string {
+	sum := sha256.Sum256([]byte(secret))
+	return hex.EncodeToString(sum[:])
+}
+
+// SecretMatches compares a presented secret against the stored hash in
+// constant time.
+func SecretMatches(secret, hashHex string) bool {
+	return subtle.ConstantTimeCompare(
+		[]byte(HashSecret(secret)), []byte(hashHex)) == 1
 }
 
 type Device struct {

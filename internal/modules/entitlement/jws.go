@@ -11,6 +11,7 @@ type transactionPayload struct {
 	OriginalTransactionID string `json:"originalTransactionId"`
 	ProductID             string `json:"productId"`
 	BundleID              string `json:"bundleId"`
+	Type                  string `json:"type"`
 	ExpiresDate           *int64 `json:"expiresDate"`
 	SignedDate            *int64 `json:"signedDate"`
 	Environment           string `json:"environment"`
@@ -94,6 +95,14 @@ func (s *Service) decodeTransaction(jws string) (*Subscription, string, error) {
 	}
 	if p.BundleID != s.cfg.BundleID {
 		return nil, "", fmt.Errorf("%w: bundle id mismatch", ErrInvalidJWS)
+	}
+	if len(s.cfg.ProductIDs) > 0 && !s.cfg.ProductIDs[p.ProductID] {
+		return nil, "", fmt.Errorf("%w: product not allowed", ErrInvalidJWS)
+	}
+	// A subscription transaction must carry expiresDate — without it the row
+	// would be stored with expires_at NULL and read as active forever.
+	if strings.Contains(p.Type, "Subscription") && p.ExpiresDate == nil {
+		return nil, "", fmt.Errorf("%w: subscription without expiresDate", ErrInvalidJWS)
 	}
 	env, err := s.cfg.checkEnvironment(p.Environment)
 	if err != nil {

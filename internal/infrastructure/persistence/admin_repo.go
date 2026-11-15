@@ -10,15 +10,17 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/thanhhoa35142/be-example/internal/modules/admin"
 )
 
 type AdminRepo struct {
-	q *Queries
+	q    *Queries
+	pool *pgxpool.Pool
 }
 
-func NewAdminRepo(q *Queries) *AdminRepo {
-	return &AdminRepo{q: q}
+func NewAdminRepo(q *Queries, pool *pgxpool.Pool) *AdminRepo {
+	return &AdminRepo{q: q, pool: pool}
 }
 
 func (r *AdminRepo) StartJobRun(ctx context.Context, job string) (int64, error) {
@@ -299,22 +301,43 @@ func (r *AdminRepo) ListPendingReports(ctx context.Context, limit int, after *ad
 	return out, nil
 }
 
-func (r *AdminRepo) UpdateReportStatus(ctx context.Context, id uuid.UUID, status string) (bool, error) {
-	n, err := r.q.UpdateSpotReportStatus(ctx, UpdateSpotReportStatusParams{ID: id, Status: status})
-	return n > 0, err
-}
-
-func (r *AdminRepo) SpotReportTarget(ctx context.Context, id uuid.UUID) (uuid.UUID, string, error) {
-	row, err := r.q.GetSpotReportTarget(ctx, id)
+func (r *AdminRepo) ModerateReport(ctx context.Context, id uuid.UUID, status string) (admin.ModReportOutcome, error) {
+	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return uuid.Nil, "", err
+		return admin.ModReportDone, err
 	}
-	return row.SpotID, row.Type, nil
-}
+	defer func() { _ = tx.Rollback(ctx) }()
+	q := r.q.WithTx(tx)
 
-func (r *AdminRepo) CloseSpotForReport(ctx context.Context, spotID uuid.UUID) error {
-	_, err := r.q.CloseSpotForReport(ctx, spotID)
-	return err
+	n, err := q.UpdateSpotReportStatus(ctx, UpdateSpotReportStatusParams{ID: id, Status: status})
+	if err != nil {
+		return admin.ModReportDone, err
+	}
+	if n == 0 {
+		// Zero rows means the report is missing or already moderated — check
+		// which so the caller can answer 404 vs 409.
+		if _, err := q.GetSpotReportTarget(ctx, id); errors.Is(err, pgx.ErrNoRows) {
+			return admin.ModReportNotFound, nil
+		} else if err != nil {
+			return admin.ModReportDone, err
+		}
+		return admin.ModReportConflict, nil
+	}
+	if status == "accepted" {
+		target, err := q.GetSpotReportTarget(ctx, id)
+		if err != nil {
+			return admin.ModReportDone, err
+		}
+		if target.Type == "closed" {
+			if _, err := q.CloseSpotForReport(ctx, target.SpotID); err != nil {
+				return admin.ModReportDone, err
+			}
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return admin.ModReportDone, err
+	}
+	return admin.ModReportDone, nil
 }
 
 func uuidParamOpt(u *uuid.UUID) pgtype.UUID {

@@ -15,15 +15,24 @@ const openMeteoDefaultURL = "https://api.open-meteo.com/v1/forecast"
 
 type OpenMeteo struct {
 	baseURL string
+	models  string
 	client  *http.Client
 }
 
-func NewOpenMeteo(client *http.Client) *OpenMeteo {
+// NewOpenMeteo builds a provider. baseURL defaults to the public API;
+// models is appended as the `models=` query parameter when non-empty
+// (required for self-hosted instances — `best_match` needs the full
+// domain set, e.g. "gfs_global" needs only ncep_gfs013+ncep_gefs*).
+func NewOpenMeteo(client *http.Client, baseURL, models string) *OpenMeteo {
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
+	if baseURL == "" {
+		baseURL = openMeteoDefaultURL
+	}
 	return &OpenMeteo{
-		baseURL: openMeteoDefaultURL,
+		baseURL: baseURL,
+		models:  models,
 		client:  client,
 	}
 }
@@ -52,6 +61,9 @@ func (o *OpenMeteo) Forecast(ctx context.Context, lat, lng float64, from, to tim
 		"end_date":           {to.UTC().Format("2006-01-02")},
 		"wind_speed_unit":    {"kmh"},
 		"precipitation_unit": {"mm"},
+	}
+	if o.models != "" {
+		q.Set("models", o.models)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, o.baseURL+"?"+q.Encode(), nil)
 	if err != nil {

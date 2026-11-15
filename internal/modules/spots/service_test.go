@@ -104,11 +104,12 @@ func TestListHourWindow(t *testing.T) {
 	repo := &listRepo{}
 	svc := NewService(repo)
 	bbox := BBox{West: 4.8, South: 52.3, East: 4.9, North: 52.4}
-	from := time.Date(2026, 11, 13, 10, 45, 0, 0, time.FixedZone("x", 3600))
+	// From must sit inside the score horizon (~now-24h .. now+8d).
+	from := time.Now().UTC().Add(2 * time.Hour).Truncate(time.Hour).Add(45 * time.Minute)
 	if _, err := svc.List(context.Background(), ListQuery{BBox: &bbox, From: &from, Hours: 12}); err != nil {
 		t.Fatal(err)
 	}
-	h9 := time.Date(2026, 11, 13, 9, 0, 0, 0, time.UTC)
+	h9 := from.UTC().Truncate(time.Hour)
 	if !repo.tsHour.Equal(h9) || !repo.from.Equal(h9) || !repo.to.Equal(h9.Add(12*time.Hour)) {
 		t.Fatalf("window: ts=%v from=%v to=%v", repo.tsHour, repo.from, repo.to)
 	}

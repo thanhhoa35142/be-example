@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,6 +30,17 @@ type CacheOptions struct {
 	TTL time.Duration
 
 	Versioned bool
+
+	// VersionKey overrides the version counter read for cache keys. Empty
+	// uses the global data version; admin aggregates pass their own so a
+	// manual refresh does not invalidate the public caches.
+	VersionKey string
+
+	// BypassOnAuth skips the cache for requests carrying an Authorization
+	// header. Only meaningful for admin routes (bearer-token scripts want
+	// fresh data); public endpoints have no bearer auth, so honoring it
+	// there would let anyone bypass the cache with a junk header.
+	BypassOnAuth bool
 
 	WeatherVersioned bool
 
@@ -86,7 +98,8 @@ func Cache(rdb *redis.Client, opts CacheOptions) gin.HandlerFunc {
 			rs.bypassed(bypassDisabled)
 			c.Next()
 			return
-		case c.Request.Method != http.MethodGet || c.GetHeader("Authorization") != "":
+		case c.Request.Method != http.MethodGet ||
+			(opts.BypassOnAuth && c.GetHeader("Authorization") != ""):
 			rs.bypassed(bypassRequest)
 			c.Next()
 			return
@@ -111,7 +124,7 @@ func Cache(rdb *redis.Client, opts CacheOptions) gin.HandlerFunc {
 		ctx, cancel := context.WithTimeout(reqCtx, cacheTimeout)
 		defer cancel()
 
-		version, err := readVersion(ctx, rdb, versioned, opts.WeatherVersioned)
+		version, err := readVersion(ctx, rdb, versioned, opts.WeatherVersioned, opts.VersionKey)
 		if err != nil {
 			failOpen(err)
 			return
@@ -166,9 +179,16 @@ func Cache(rdb *redis.Client, opts CacheOptions) gin.HandlerFunc {
 
 var errNotShareable = errors.New("response not cacheable")
 
-func readVersion(ctx context.Context, rdb *redis.Client, versioned, weather bool) (string, error) {
+func readVersion(ctx context.Context, rdb *redis.Client, versioned, weather bool, customKey string) (string, error) {
 	if !versioned {
 		return "", nil
+	}
+	if customKey != "" {
+		v, err := rdb.Get(ctx, customKey).Result()
+		if err != nil && !errors.Is(err, redis.Nil) {
+			return "", err
+		}
+		return v, nil
 	}
 	if !weather {
 		v, err := rdb.Get(ctx, cache.VersionKey).Result()
@@ -315,9 +335,15 @@ func cacheKey(c *gin.Context, opts CacheOptions, version string) string {
 		vals := append([]string(nil), q[k]...)
 		sort.Strings(vals)
 		for _, v := range vals {
+			// Length-prefix k/v so a value containing '\n' or '=' can't forge
+			// key material identical to a different parameter set.
 			sb.WriteByte('\n')
+			sb.WriteString(strconv.Itoa(len(k)))
+			sb.WriteByte(':')
 			sb.WriteString(k)
 			sb.WriteByte('=')
+			sb.WriteString(strconv.Itoa(len(v)))
+			sb.WriteByte(':')
 			sb.WriteString(v)
 		}
 	}
@@ -390,6 +416,7 @@ var cacheSkipHeaders = map[string]bool{
 	"Content-Length":   true,
 	"Content-Encoding": true,
 	"Vary":             true,
+	"Set-Cookie":       true,
 }
 
 func exportHeaders(h http.Header) map[string][]string {
@@ -505,6 +532,9 @@ func canonIDs(raw string) (string, bool) {
 		ids = append(ids, id.String())
 	}
 	sort.Strings(ids)
+	// Dedupe — the service treats ids as a set, so permutations/duplicates
+	// must not mint distinct cache keys.
+	ids = slices.Compact(ids)
 	return strings.Join(ids, ","), true
 }
 
@@ -548,20 +578,42 @@ func SpotsNormalize(v url.Values) {
 	canonicalizeFilterParams(v)
 }
 
+// canonGeo validates the coordinate range for the cache key but must NOT
+// round it: the service computes distance_m from the raw value, so two
+// nearby-but-distinct coordinates sharing a key would serve wrong distances.
 func canonGeo(limit float64) func(float64) float64 {
 	return func(f float64) float64 {
 		if math.IsNaN(f) || math.IsInf(f, 0) || math.Abs(f) > limit {
 			return f
 		}
-		return round3(f)
+		return f
 	}
 }
 
+// canonRadiusM validates for the key without rounding — ST_DWithin uses the
+// raw radius, so rounding the key would include/exclude borderline spots.
 func canonRadiusM(f float64) float64 {
 	if math.IsNaN(f) || math.IsInf(f, 0) || f <= 0 || f > recommendations.MaxRadiusM {
 		return f
 	}
-	return math.Round(f/100) * 100
+	return f
+}
+
+// canonRecLimit maps limit to the value the service will actually use, so
+// limit=1 and limit=2147483647 (both clamped) can't mint distinct keys.
+func canonRecLimit(raw string) (string, bool) {
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return "", false
+	}
+	switch {
+	case n <= 0:
+		return strconv.Itoa(recommendations.DefaultLimit), true
+	case n > recommendations.MaxLimit:
+		return strconv.Itoa(recommendations.MaxLimit), true
+	default:
+		return strconv.Itoa(n), true
+	}
 }
 
 func RecNormalize(v url.Values) {
@@ -571,7 +623,7 @@ func RecNormalize(v url.Values) {
 	canon1(v, "lon", canonFloat(canonGeo(180)))
 	canon1(v, "radius", canonFloat(canonRadiusM))
 	canon1(v, "when", canonTimeHour)
-	canon1(v, "limit", canonInt)
+	canon1(v, "limit", canonRecLimit)
 	canonicalizeFilterParams(v)
 }
 

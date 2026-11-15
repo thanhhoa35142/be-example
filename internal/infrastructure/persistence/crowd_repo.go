@@ -144,8 +144,8 @@ func (r *CrowdRepo) UpsertCommunity(ctx context.Context, spotID uuid.UUID, dow, 
 	})
 }
 
-func (r *CrowdRepo) DeleteStaleCommunity(ctx context.Context) (int64, error) {
-	return r.q.DeleteStaleCommunityEstimates(ctx)
+func (r *CrowdRepo) DeleteStaleCommunity(ctx context.Context, runStart time.Time) (int64, error) {
+	return r.q.DeleteUnrefreshedCommunityEstimates(ctx, runStart)
 }
 
 type HolidaysRepo struct{ q *Queries }

@@ -57,9 +57,10 @@ func TestAlertsHandlerArea(t *testing.T) {
 	r.GET("/v1/alerts", h.List)
 
 	post := func(extra string) *httptest.ResponseRecorder {
-		body := `{"deviceId":"` + dev.String() + `","minScore":50,"daysMask":127,"startLocal":"08:00","endLocal":"10:00","tz":"Europe/Amsterdam",` + extra + `}`
+		body := `{"minScore":50,"daysMask":127,"startLocal":"08:00","endLocal":"10:00","tz":"Europe/Amsterdam",` + extra + `}`
 		req := httptest.NewRequest("POST", "/v1/alerts", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Device-ID", dev.String())
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, req)
 		return w
@@ -106,9 +107,10 @@ func TestAlertsHandlerArea(t *testing.T) {
 	h2 := NewAlertsHandler(alerts.NewService(&memAlertsRepo{rules: map[uuid.UUID]alerts.Rule{uuid.New(): {}}}, planMap{free: "free"}, nil))
 	r2 := gin.New()
 	r2.POST("/v1/alerts", h2.Create)
-	body := `{"deviceId":"` + free.String() + `","area":{"lat":52.36,"lon":4.88},"radiusM":3000,"minScore":50,"daysMask":127,"startLocal":"08:00","endLocal":"10:00","tz":"UTC"}`
+	body := `{"area":{"lat":52.36,"lon":4.88},"radiusM":3000,"minScore":50,"daysMask":127,"startLocal":"08:00","endLocal":"10:00","tz":"UTC"}`
 	req := httptest.NewRequest("POST", "/v1/alerts", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Device-ID", free.String())
 	w = httptest.NewRecorder()
 	r2.ServeHTTP(w, req)
 	if w.Code != 403 || !strings.Contains(w.Body.String(), "plan_limit") {
@@ -128,8 +130,9 @@ func TestAlertsHandlerValidation(t *testing.T) {
 	r.DELETE("/v1/alerts/:id", h.Delete)
 
 	post := func(start, end, tz, spot string) *httptest.ResponseRecorder {
-		body := `{"deviceId":"` + dev.String() + `","spotId":"` + spot + `","minScore":50,"daysMask":127,"startLocal":"` + start + `","endLocal":"` + end + `","tz":"` + tz + `"}`
+		body := `{"spotId":"` + spot + `","minScore":50,"daysMask":127,"startLocal":"` + start + `","endLocal":"` + end + `","tz":"` + tz + `"}`
 		req := httptest.NewRequest("POST", "/v1/alerts", strings.NewReader(body))
+		req.Header.Set("X-Device-ID", dev.String())
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, req)
 		return w
@@ -166,13 +169,13 @@ func TestAlertsHandlerValidation(t *testing.T) {
 	if c := get(dev.String(), ""); c != 200 {
 		t.Errorf("header: %d", c)
 	}
-	if c := get("", "?deviceId="+dev.String()); c != 200 {
-		t.Errorf("legacy query: %d", c)
+	if c := get("", "?deviceId="+dev.String()); c != 401 {
+		t.Errorf("legacy query fallback must be gone: %d", c)
 	}
-	if c := get("not-a-uuid", "?deviceId="+dev.String()); c != 400 {
+	if c := get("not-a-uuid", "?deviceId="+dev.String()); c != 401 {
 		t.Errorf("bad header must not fall back to query: %d", c)
 	}
-	if c := get("", ""); c != 400 {
+	if c := get("", ""); c != 401 {
 		t.Errorf("missing id: %d", c)
 	}
 }

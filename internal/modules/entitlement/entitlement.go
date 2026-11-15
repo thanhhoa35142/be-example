@@ -23,6 +23,11 @@ type Config struct {
 	BundleID string
 
 	AllowSandbox bool
+
+	// ProductIDs is the APPSTORE_PLUS_PRODUCT_IDS allowlist. Empty means
+	// "not configured" — every product in the bundle is accepted (the app is
+	// not launched yet; set it before go-live).
+	ProductIDs map[string]bool
 }
 
 type Plan string

@@ -7,11 +7,11 @@
 -- Callers must first release the APNs token from any other holder
 -- (ReleaseAPNsToken) in the same transaction.
 INSERT INTO t_devices (id, apns_token, apns_env, locale, tz, app_version, prefs,
-                       push_status, push_status_changed_at, last_seen_at)
+                       push_status, push_status_changed_at, last_seen_at, secret_hash)
 VALUES ($1, $2, $3, $4, $5, $6, $7,
         CASE WHEN $2::text IS NOT NULL THEN 'active' ELSE 'none' END,
         CASE WHEN $2::text IS NOT NULL THEN now() END,
-        now())
+        now(), $8)
 ON CONFLICT (id) DO UPDATE SET
     apns_token   = CASE WHEN t_devices.deleted_at IS NOT NULL THEN EXCLUDED.apns_token
                         ELSE COALESCE(EXCLUDED.apns_token, t_devices.apns_token) END,
@@ -36,8 +36,11 @@ ON CONFLICT (id) DO UPDATE SET
         WHEN t_devices.deleted_at IS NOT NULL THEN NULL
         ELSE t_devices.push_status_changed_at END,
     last_seen_at = now(),
-    deleted_at   = NULL
-RETURNING id;
+    deleted_at   = NULL,
+    -- First registration (or a legacy row with no credential) adopts the
+    -- supplied hash; an existing credential is never rotated by upsert.
+    secret_hash  = COALESCE(t_devices.secret_hash, EXCLUDED.secret_hash)
+RETURNING id, secret_hash;
 
 -- name: ReleaseAPNsToken :exec
 -- A token belongs to one install. When a new device id registers a token that
@@ -54,6 +57,10 @@ WHERE apns_token = $1 AND id <> $2 AND deleted_at IS NULL;
 
 -- name: GetActiveDevice :one
 SELECT id FROM t_devices
+WHERE id = $1 AND deleted_at IS NULL;
+
+-- name: GetDeviceSecretHash :one
+SELECT COALESCE(secret_hash, '') FROM t_devices
 WHERE id = $1 AND deleted_at IS NULL;
 
 -- name: GetDeviceTz :one
@@ -90,6 +97,7 @@ UPDATE t_devices SET
     tz            = NULL,
     app_version   = NULL,
     attest_key_id = NULL,
+    secret_hash   = NULL,
     prefs         = '{}'::jsonb
 WHERE t_devices.id = $1 AND t_devices.deleted_at IS NULL;
 

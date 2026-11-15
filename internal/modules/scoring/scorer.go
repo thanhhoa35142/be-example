@@ -79,6 +79,13 @@ func Score(in Inputs, cfg Config) Result {
 	add(cfg.Weights.Fresh, comps.Fresh)
 
 	res.HasData = true
+	if wsum <= 0 {
+		// All present components carried zero/negative weight — a misconfigured
+		// t_scoring_configs row. Report no score rather than NaN, which would
+		// fail the whole batch upsert's 0-100 CHECK constraint.
+		res.HasData = false
+		return res
+	}
 	res.Score = int(math.Round(total / wsum))
 
 	if r, capVal := hardCap(in, cfg); r != nil {

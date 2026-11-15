@@ -43,15 +43,16 @@ func IsLocked(err error) bool {
 func (e *LockedError) RetryAfterDuration() time.Duration { return e.RetryAfter }
 
 type Service struct {
-	repo      Repository
-	cipher    *Cipher
-	issuer    string
-	cfg       Config
-	now       func() time.Time
-	dummyHash string
+	repo       Repository
+	challenges ChallengeStore
+	cipher     *Cipher
+	issuer     string
+	cfg        Config
+	now        func() time.Time
+	dummyHash  string
 }
 
-func NewService(repo Repository, key []byte, cfg Config) (*Service, error) {
+func NewService(repo Repository, challenges ChallengeStore, key []byte, cfg Config) (*Service, error) {
 	var c *Cipher
 	if len(key) > 0 {
 		var err error
@@ -64,7 +65,7 @@ func NewService(repo Repository, key []byte, cfg Config) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Service{repo: repo, cipher: c, issuer: "Pickhour", cfg: cfg, now: time.Now, dummyHash: dummy}, nil
+	return &Service{repo: repo, challenges: challenges, cipher: c, issuer: "Pickhour", cfg: cfg, now: time.Now, dummyHash: dummy}, nil
 }
 
 func (s *Service) SessionTTL() time.Duration { return s.cfg.SessionTTL }
@@ -110,6 +111,23 @@ func (s *Service) Login(ctx context.Context, email, password, userAgent, ip stri
 		return LoginResult{}, &LockedError{RetryAfter: user.LockedUntil.Sub(s.now())}
 	}
 
+	// Reuse a still-valid challenge for this user instead of minting a new
+	// one: repeated logins (wrong TOTP, page refresh) must not pile up
+	// challenges or invalidate an in-progress enrollment.
+	if pc, err := s.challenges.ForUser(ctx, user.ID); err == nil {
+		needsEnroll := user.TotpConfirmedAt == nil || len(user.TotpSecret) == 0
+		if pc.ExpiresAt.After(s.now()) &&
+			((pc.Kind == ChallengeEnroll && needsEnroll) ||
+				(pc.Kind == ChallengeLogin && !needsEnroll)) {
+			if pc.Kind == ChallengeEnroll {
+				return s.enrollResult(pc, email)
+			}
+			return LoginResult{Challenge: pc.Token, Mode: "totp"}, nil
+		}
+		// Stale kind (e.g. enrollment finished since) — drop it.
+		_ = s.challenges.Delete(ctx, pc)
+	}
+
 	token, hash, err := NewChallengeToken()
 	if err != nil {
 		return LoginResult{}, err
@@ -129,33 +147,55 @@ func (s *Service) Login(ctx context.Context, email, password, userAgent, ip stri
 		if err != nil {
 			return LoginResult{}, err
 		}
-		if err := s.repo.CreateChallenge(ctx, Challenge{
-			TokenHash: hash, AdminUserID: user.ID, Kind: ChallengeEnroll,
-			TotpSecret: sealed, ExpiresAt: expires,
+		if err := s.challenges.Put(ctx, &PendingChallenge{
+			Challenge: Challenge{
+				TokenHash: hash, AdminUserID: user.ID, Kind: ChallengeEnroll,
+				TotpSecret: sealed, ExpiresAt: expires,
+			},
+			Token: token,
 		}); err != nil {
 			return LoginResult{}, err
 		}
 		return LoginResult{Challenge: token, Mode: "enroll", EnrollSecret: secret, OTPAuthURL: url}, nil
 	}
 
-	if err := s.repo.CreateChallenge(ctx, Challenge{
-		TokenHash: hash, AdminUserID: user.ID, Kind: ChallengeLogin, ExpiresAt: expires,
+	if err := s.challenges.Put(ctx, &PendingChallenge{
+		Challenge: Challenge{
+			TokenHash: hash, AdminUserID: user.ID, Kind: ChallengeLogin, ExpiresAt: expires,
+		},
+		Token: token,
 	}); err != nil {
 		return LoginResult{}, err
 	}
 	return LoginResult{Challenge: token, Mode: "totp"}, nil
 }
 
-func (s *Service) challengeUser(ctx context.Context, token string, wantKind string) (*Challenge, *User, error) {
-	ch, err := s.repo.ChallengeByToken(ctx, HashToken(token))
+// enrollResult rebuilds the enroll response for a reused challenge: the
+// sealed TOTP secret is opened and the otpauth URL regenerated from it.
+func (s *Service) enrollResult(pc *PendingChallenge, email string) (LoginResult, error) {
+	secret, err := s.openSecret(pc.TotpSecret)
+	if err != nil {
+		return LoginResult{}, err
+	}
+	return LoginResult{
+		Challenge:    pc.Token,
+		Mode:         "enroll",
+		EnrollSecret: secret,
+		OTPAuthURL:   TOTPURL(s.issuer, email, secret),
+	}, nil
+}
+
+func (s *Service) challengeUser(ctx context.Context, token string, wantKind string) (*PendingChallenge, *User, error) {
+	pc, err := s.challenges.ByTokenHash(ctx, HashToken(token))
 	if err != nil {
 		if isNotFound(err) {
 			return nil, nil, ErrInvalidChallenge
 		}
 		return nil, nil, err
 	}
+	ch := &pc.Challenge
 	if ch.Kind != wantKind || !ch.ExpiresAt.After(s.now()) {
-		_ = s.repo.DeleteChallenge(ctx, ch.TokenHash)
+		_ = s.challenges.Delete(ctx, pc)
 		return nil, nil, ErrInvalidChallenge
 	}
 	user, err := s.repo.UserByID(ctx, ch.AdminUserID)
@@ -168,7 +208,7 @@ func (s *Service) challengeUser(ctx context.Context, token string, wantKind stri
 	if user.LockedUntil != nil && user.LockedUntil.After(s.now()) {
 		return nil, nil, &LockedError{RetryAfter: user.LockedUntil.Sub(s.now())}
 	}
-	return ch, user, nil
+	return pc, user, nil
 }
 
 func (s *Service) verifyTOTPStep(ctx context.Context, userID uuid.UUID, secretB32, code string) bool {
@@ -185,7 +225,7 @@ func (s *Service) verifyTOTPStep(ctx context.Context, userID uuid.UUID, secretB3
 }
 
 func (s *Service) ConfirmCode(ctx context.Context, challenge, code, userAgent, ip string) (*AuthResult, *Session, string, error) {
-	_, user, err := s.challengeUser(ctx, challenge, ChallengeLogin)
+	pc, user, err := s.challengeUser(ctx, challenge, ChallengeLogin)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -209,6 +249,9 @@ func (s *Service) ConfirmCode(ctx context.Context, challenge, code, userAgent, i
 		return nil, nil, "", ErrInvalidCode
 	}
 
+	// Consume the challenge: it is single-use, same as the enroll path.
+	_ = s.challenges.Delete(ctx, pc)
+
 	sess, raw, err := s.openSession(ctx, user, userAgent, ip)
 	if err != nil {
 		return nil, nil, "", err
@@ -217,15 +260,20 @@ func (s *Service) ConfirmCode(ctx context.Context, challenge, code, userAgent, i
 }
 
 func (s *Service) ConfirmEnroll(ctx context.Context, challenge, code, userAgent, ip string) (*AuthResult, *Session, string, error) {
-	ch, user, err := s.challengeUser(ctx, challenge, ChallengeEnroll)
+	pc, user, err := s.challengeUser(ctx, challenge, ChallengeEnroll)
 	if err != nil {
 		return nil, nil, "", err
+	}
+	// Enrollment is single-shot: a stale enroll challenge must not overwrite
+	// an already-confirmed TOTP secret or wipe the recovery codes.
+	if user.TotpConfirmedAt != nil {
+		return nil, nil, "", ErrInvalidChallenge
 	}
 	cipher, err := s.requireCipher()
 	if err != nil {
 		return nil, nil, "", err
 	}
-	secret, err := cipher.Open(ch.TotpSecret)
+	secret, err := cipher.Open(pc.TotpSecret)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -238,13 +286,13 @@ func (s *Service) ConfirmEnroll(ctx context.Context, challenge, code, userAgent,
 	if err != nil {
 		return nil, nil, "", err
 	}
-	if err := s.repo.ConfirmTOTP(ctx, user.ID, ch.TotpSecret); err != nil {
+	if err := s.repo.ConfirmTOTP(ctx, user.ID, pc.TotpSecret); err != nil {
 		return nil, nil, "", err
 	}
 	if err := s.repo.ReplaceRecoveryCodes(ctx, user.ID, hashes); err != nil {
 		return nil, nil, "", err
 	}
-	_ = s.repo.DeleteChallenge(ctx, ch.TokenHash)
+	_ = s.challenges.Delete(ctx, pc)
 	_ = s.repo.ResetAuthFailures(ctx, user.ID)
 
 	sess, raw, err := s.openSession(ctx, user, userAgent, ip)
@@ -386,7 +434,7 @@ func (s *Service) ChangePassword(ctx context.Context, token, current, next strin
 	if err := s.repo.RevokeOtherSessions(ctx, user.ID, sess.TokenHash); err != nil {
 		return err
 	}
-	return s.repo.DeleteChallengesForUser(ctx, user.ID)
+	return s.challenges.DeleteForUser(ctx, user.ID)
 }
 
 func (s *Service) ListUsers(ctx context.Context) ([]User, error) {
@@ -428,10 +476,10 @@ func (s *Service) SetPassword(ctx context.Context, email, password string) error
 	if err := s.repo.SetPassword(ctx, user.ID, hash); err != nil {
 		return err
 	}
-	if err := s.repo.DeleteChallengesForUser(ctx, user.ID); err != nil {
+	if err := s.repo.RevokeOtherSessions(ctx, user.ID, nil); err != nil {
 		return err
 	}
-	return s.repo.RevokeOtherSessions(ctx, user.ID, nil)
+	return s.challenges.DeleteForUser(ctx, user.ID)
 }
 
 func (s *Service) Reset2FA(ctx context.Context, email string) error {
@@ -442,13 +490,13 @@ func (s *Service) Reset2FA(ctx context.Context, email string) error {
 	if err := s.repo.ResetTOTP(ctx, user.ID); err != nil {
 		return err
 	}
-	if err := s.repo.DeleteChallengesForUser(ctx, user.ID); err != nil {
-		return err
-	}
 	if err := s.repo.ReplaceRecoveryCodes(ctx, user.ID, nil); err != nil {
 		return err
 	}
-	return s.repo.DeleteTOTPUsed(ctx, user.ID)
+	if err := s.repo.DeleteTOTPUsed(ctx, user.ID); err != nil {
+		return err
+	}
+	return s.challenges.DeleteForUser(ctx, user.ID)
 }
 
 func (s *Service) SetDisabled(ctx context.Context, email string, disabled bool) error {

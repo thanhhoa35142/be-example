@@ -24,6 +24,18 @@ func (q *Queries) GetActiveDevice(ctx context.Context, id uuid.UUID) (uuid.UUID,
 	return id_2, err
 }
 
+const getDeviceSecretHash = `-- name: GetDeviceSecretHash :one
+SELECT COALESCE(secret_hash, '') FROM t_devices
+WHERE id = $1 AND deleted_at IS NULL
+`
+
+func (q *Queries) GetDeviceSecretHash(ctx context.Context, id uuid.UUID) (string, error) {
+	row := q.db.QueryRow(ctx, getDeviceSecretHash, id)
+	var secret_hash string
+	err := row.Scan(&secret_hash)
+	return secret_hash, err
+}
+
 const getDeviceTz = `-- name: GetDeviceTz :one
 SELECT COALESCE(tz, 'UTC') FROM t_devices
 WHERE id = $1 AND deleted_at IS NULL
@@ -96,6 +108,7 @@ UPDATE t_devices SET
     tz            = NULL,
     app_version   = NULL,
     attest_key_id = NULL,
+    secret_hash   = NULL,
     prefs         = '{}'::jsonb
 WHERE t_devices.id = $1 AND t_devices.deleted_at IS NULL
 `
@@ -130,11 +143,11 @@ func (q *Queries) TouchDevice(ctx context.Context, id uuid.UUID) error {
 
 const upsertDevice = `-- name: UpsertDevice :one
 INSERT INTO t_devices (id, apns_token, apns_env, locale, tz, app_version, prefs,
-                       push_status, push_status_changed_at, last_seen_at)
+                       push_status, push_status_changed_at, last_seen_at, secret_hash)
 VALUES ($1, $2, $3, $4, $5, $6, $7,
         CASE WHEN $2::text IS NOT NULL THEN 'active' ELSE 'none' END,
         CASE WHEN $2::text IS NOT NULL THEN now() END,
-        now())
+        now(), $8)
 ON CONFLICT (id) DO UPDATE SET
     apns_token   = CASE WHEN t_devices.deleted_at IS NOT NULL THEN EXCLUDED.apns_token
                         ELSE COALESCE(EXCLUDED.apns_token, t_devices.apns_token) END,
@@ -159,8 +172,11 @@ ON CONFLICT (id) DO UPDATE SET
         WHEN t_devices.deleted_at IS NOT NULL THEN NULL
         ELSE t_devices.push_status_changed_at END,
     last_seen_at = now(),
-    deleted_at   = NULL
-RETURNING id
+    deleted_at   = NULL,
+    -- First registration (or a legacy row with no credential) adopts the
+    -- supplied hash; an existing credential is never rotated by upsert.
+    secret_hash  = COALESCE(t_devices.secret_hash, EXCLUDED.secret_hash)
+RETURNING id, secret_hash
 `
 
 type UpsertDeviceParams struct {
@@ -171,6 +187,12 @@ type UpsertDeviceParams struct {
 	Tz         pgtype.Text `json:"tz"`
 	AppVersion pgtype.Text `json:"app_version"`
 	Prefs      []byte      `json:"prefs"`
+	SecretHash pgtype.Text `json:"secret_hash"`
+}
+
+type UpsertDeviceRow struct {
+	ID         uuid.UUID   `json:"id"`
+	SecretHash pgtype.Text `json:"secret_hash"`
 }
 
 // push_status tracks token state: providing apns_token marks the device
@@ -180,7 +202,7 @@ type UpsertDeviceParams struct {
 // (locale, tz, version, prefs, push identifiers) comes back with it.
 // Callers must first release the APNs token from any other holder
 // (ReleaseAPNsToken) in the same transaction.
-func (q *Queries) UpsertDevice(ctx context.Context, arg UpsertDeviceParams) (uuid.UUID, error) {
+func (q *Queries) UpsertDevice(ctx context.Context, arg UpsertDeviceParams) (UpsertDeviceRow, error) {
 	row := q.db.QueryRow(ctx, upsertDevice,
 		arg.ID,
 		arg.ApnsToken,
@@ -189,8 +211,9 @@ func (q *Queries) UpsertDevice(ctx context.Context, arg UpsertDeviceParams) (uui
 		arg.Tz,
 		arg.AppVersion,
 		arg.Prefs,
+		arg.SecretHash,
 	)
-	var id uuid.UUID
-	err := row.Scan(&id)
-	return id, err
+	var i UpsertDeviceRow
+	err := row.Scan(&i.ID, &i.SecretHash)
+	return i, err
 }

@@ -43,25 +43,24 @@ func (h *EntitlementHandler) Get(c *gin.Context) {
 }
 
 type linkTransactionRequest struct {
-	DeviceID          string `json:"deviceId"`
 	SignedTransaction string `json:"signedTransaction"`
 }
 
 func (h *EntitlementHandler) Link(c *gin.Context) {
 	var req linkTransactionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Invalid body", "expected JSON with deviceId and signedTransaction")
+		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Invalid body", "expected JSON with signedTransaction")
 		return
 	}
-	if _, err := uuid.Parse(req.DeviceID); err != nil {
-		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidID, "Invalid deviceId", "expected a UUID")
+	deviceID, ok := requestDeviceID(c)
+	if !ok {
 		return
 	}
 	if req.SignedTransaction == "" {
 		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Missing signedTransaction", "")
 		return
 	}
-	e, err := h.svc.LinkTransaction(c.Request.Context(), req.DeviceID, req.SignedTransaction)
+	e, err := h.svc.LinkTransaction(c.Request.Context(), deviceID.String(), req.SignedTransaction)
 	if err != nil {
 		h.writeError(c, err)
 		return

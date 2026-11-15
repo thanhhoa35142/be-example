@@ -65,7 +65,8 @@ Every non-GeoJSON success response is wrapped:
 ### Request headers
 
 - `X-Request-ID: <id>` (optional) — sent for support correlation; echoed in responses if 1-64 chars of `[A-Za-z0-9._-]`, otherwise the server generates one.
-- `X-Device-ID: <uuid>` — the device id for requests that have no body (`GET /v1/alerts`, `DELETE /v1/alerts/{id}`). **Preferred** over the legacy `?deviceId=` query parameter, which is still accepted for older builds (query strings end up in proxy and access logs).
+- `X-Device-ID: <uuid>` — the device id on routes that have no `:id` path parameter (`/v1/alerts*`, reports, `/v1/events`, `/v1/entitlement/link`).
+- `X-Device-Token: <secret>` — the per-device credential issued by `POST /v1/devices` (returned once as `deviceSecret`, kept in the iOS Keychain). **Required on every device-scoped route** together with `X-Device-ID` (or the `:id` path parameter for `/v1/devices/{id}/*`). Missing/invalid → `401 unauthorized`. It is deliberately not `Authorization`: arbitrary Authorization headers must not interact with the public response cache.
 - `X-Client: pickhour-ios` — identifies the app; sent by the official client.
 - `X-Client-Version: <semver>+<build>` — app version, e.g. `0.1.0+3`.
 - `X-Client-OS: ios <version>` — OS version string.
@@ -365,8 +366,10 @@ Empty strings are treated as absent. A violated limit answers `400 invalid_body`
 Response `200`:
 
 ```json
-{ "data": { "id": "3f6569db-3d46-41c5-a1dd-11335502dcce" } }
+{ "data": { "id": "3f6569db-3d46-41c5-a1dd-11335502dcce", "deviceSecret": "<43-char base64url>" } }
 ```
+
+`deviceSecret` is present **only when this call issued the credential** (first registration, or a pre-migration row with no credential). It is shown exactly once — store it in the Keychain and send it as `X-Device-Token` on every device-scoped request. Re-registering a device that already holds a credential requires the token in `X-Device-Token` (`401 unauthorized` otherwise) and never returns a new secret. Only the SHA-256 hash is stored server-side.
 
 An `apnsToken` belongs to one install: if another live device holds it (e.g. a reinstall that lost its Keychain registers a new `id` with the same token), the **new device takes the token over**; the previous holder's token/env are cleared and its push status becomes `unregistered`. There is no longer a permanent `409` for this case (`409 conflict` only on a lost concurrent race — retry).
 
@@ -375,7 +378,7 @@ Re-registering an `id` that was deleted via `DELETE /v1/devices/{id}` works but 
 ### `DELETE /v1/devices/{id}`
 
 Soft-delete (GDPR/CCPA unlink). In the same statement it hard-deletes the device's alert rules (their delivery log cascades), weekend digest, analytics events (`t_events`) and subscription links (so Plus is lost until the purchase is restored on a device), and clears the stored push token, attestation key, locale, tz, app version and prefs. Crowd reports, spot reports and score feedback are kept on purpose (they only feed anonymous aggregates; the device row no longer holds personal data). `204` on success, `404` if unknown/already deleted.
-Until real auth exists, the device UUID acts as the capability token — keep it in Keychain.
+Requires `X-Device-Token` for that device id.
 
 ---
 
@@ -386,7 +389,7 @@ Confirm a spot or report it wrong. One report per device/spot/type/**day** — r
 Request:
 
 ```json
-{ "deviceId": "3f65...", "type": "issue", "issueCode": "no_toilet" }
+{ "type": "issue", "issueCode": "no_toilet" }
 ```
 
 | field | values |
@@ -412,7 +415,7 @@ Response `201` (or `200` when duplicate):
 Request:
 
 ```json
-{ "deviceId": "3f65...", "level": 3 }
+{ "level": 3 }
 ```
 
 `level`: `1` = quiet, `2` = moderate, `3` = busy.
@@ -429,7 +432,7 @@ The community crowd level for a slot only overrides the model once **5 distinct 
 "Is this score right?" verdict on a spot+hour.
 
 ```json
-{ "deviceId": "3f65...", "spotId": "01a1...", "tsHour": "2026-11-11T14:00:00Z", "verdict": 1 }
+{ "spotId": "01a1...", "tsHour": "2026-11-11T14:00:00Z", "verdict": 1 }
 ```
 
 `verdict`: `-1` (too low) \| `0` (about right) \| `+1` (too high).
@@ -464,11 +467,11 @@ Unknown codes may appear as the scorer evolves — clients should render a sensi
 
 ## Alerts
 
-Alert rules fire a push when the best score in an area meets `minScore` during a local-time window. Free plan: **1 rule**; Plus: unlimited. Windows may cross midnight (`startLocal` > `endLocal`). `daysMask` bit `i` = weekday `i` (0=Sunday … 6=Saturday); e.g. `127` = every day, `65` = Sat+Sun (`64+1`). Each (rule, window) delivers at most once.
+Alert rules fire a push when the best score in an area meets `minScore` during a local-time window. Free plan: **1 rule**; Plus: **20 rules**. Windows may cross midnight (`startLocal` > `endLocal`). `daysMask` bit `i` = weekday `i` (0=Sunday … 6=Saturday); e.g. `127` = every day, `65` = Sat+Sun (`64+1`). Each (rule, window) delivers at most once.
 
 ### `GET /v1/alerts`
 
-Send the device id as `X-Device-ID: <uuid>` (preferred). The legacy `?deviceId={uuid}` query parameter still works; the header wins when both are present.
+Send the device id as `X-Device-ID: <uuid>` together with `X-Device-Token`.
 
 ```json
 {"data":{"items":[{"id":"...","deviceId":"...","spotId":"...","h3Cell":null,"areaCenter":null,"radiusM":null,"minScore":50,"daysMask":127,"startLocal":"08:00","endLocal":"10:00","tz":"Europe/Amsterdam","enabled":true}]}}
@@ -477,7 +480,7 @@ Send the device id as `X-Device-ID: <uuid>` (preferred). The legacy `?deviceId={
 ### `POST /v1/alerts` — create (201)
 
 ```json
-{"deviceId":"...","spotId":"...","minScore":50,"daysMask":127,"startLocal":"08:00","endLocal":"10:00","tz":"Europe/Amsterdam"}
+{"spotId":"...","minScore":50,"daysMask":127,"startLocal":"08:00","endLocal":"10:00","tz":"Europe/Amsterdam"}
 ```
 
 Target: exactly one of `spotId`, `h3Cell` or `area` (anything else → `400 invalid_body`). `h3Cell` and `area` also need `radiusM` (meters, 1..50000); `radiusM` with `spotId` is rejected.
@@ -485,7 +488,7 @@ Target: exactly one of `spotId`, `h3Cell` or `area` (anything else → `400 inva
 Coarse area (no H3 library needed on the client):
 
 ```json
-{"deviceId":"...","area":{"lat":52.36,"lon":4.88},"radiusM":3000,"minScore":50,"daysMask":127,"startLocal":"08:00","endLocal":"10:00","tz":"Europe/Amsterdam"}
+{"area":{"lat":52.36,"lon":4.88},"radiusM":3000,"minScore":50,"daysMask":127,"startLocal":"08:00","endLocal":"10:00","tz":"Europe/Amsterdam"}
 ```
 
 `lat` ∈ [-90, 90], `lon` ∈ [-180, 180], both required. The server rounds both to 2 decimals (~1 km), converts the point to an H3 cell at **resolution 7** (`geo.H3Resolution`, ~1.2 km edge, same as `spot.cell_id`) and stores **only the cell** — the raw coordinates are never stored or logged and are not echoed back. Evaluation measures `radiusM` from the cell **center**, which can sit up to ~1.2 km from the submitted point.
@@ -502,7 +505,7 @@ Validation: `startLocal`/`endLocal` must be `HH:MM` (00:00-23:59) and must diffe
 
 ### `PUT /v1/alerts/{id}` / `DELETE /v1/alerts/{id}`
 
-Same body as create (PUT replaces all fields). DELETE sends the device id as `X-Device-ID` (preferred) or legacy `?deviceId=`; → `204`.
+Same body as create (PUT replaces all fields). The device is identified by `X-Device-ID` + `X-Device-Token`; → `204`.
 
 ### Push payload (APNs)
 
@@ -591,14 +594,14 @@ Sent by worker job `digest.weekly` through the same APNs client as alerts (colla
 Attach a StoreKit 2 `signedTransaction` (JWS) to a device:
 
 ```json
-{"deviceId":"...","signedTransaction":"<jws>"}
+{"signedTransaction":"<jws>"}
 ```
 
 → `{"data":{"plan":"plus"}}`.
 
 The server **verifies** the JWS: `alg` must be `ES256`, the `x5c` chain must lead to the embedded Apple Root CA G3, the signature (raw R||S) must match, `bundleId` must equal the configured `APPSTORE_BUNDLE_ID`, and `environment` must be `Production` (or `Sandbox`, accepted by default because App Review purchases in Sandbox against production; `APPSTORE_ALLOW_SANDBOX=false` rejects it; `Xcode`/`LocalTesting` are always rejected — a StoreKit-testing build cannot link to a production server). The stored `lastSignedDate` is the transaction's own `signedDate`; a stale (older-signed) transaction never overwrites newer state, and a revoked/refunded subscription is terminal: no later transaction re-activates it.
 
-Device binding: when the transaction carries an `appAccountToken` that is a UUID it must equal `deviceId` (`403 account_mismatch`); a missing or non-UUID token is accepted. A transaction can be linked to at most **5 active devices** (`409 device_limit`; a deleted device frees its slot).
+Device binding is **mandatory**: the transaction must carry an `appAccountToken` equal to the `X-Device-ID` UUID (`403 account_mismatch` otherwise) — the app sets it to the device UUID at purchase time. Only products listed in `APPSTORE_PLUS_PRODUCT_IDS` may grant Plus (`invalid_body` otherwise; empty list = unconfigured, accepts all bundle products — set it before go-live). Subscription transactions without `expiresDate` are rejected. A transaction can be linked to at most **5 active devices** (`409 device_limit`; a deleted device frees its slot).
 
 Errors: `invalid_body` (malformed/unsigned/forged JWS, wrong bundle, unsupported environment), `not_found` (unknown device), `account_mismatch` (403), `device_limit` (409), `service_unavailable` (503, verification not configured on the server).
 
@@ -665,7 +668,7 @@ Without `by`, items are `{value, count, devices}` and the `by` field is omitted 
 ### `POST /v1/events` — product analytics batch
 
 ```json
-{"deviceId":"...","events":[{"name":"app_open"},{"name":"paywall_view","props":{"source":"forecast_day3"}}]}
+{"events":[{"name":"app_open"},{"name":"paywall_view","props":{"source":"forecast_day3"}}]}
 ```
 
 → `202 {"data":{"status":"accepted","count":3}}`. Rules: `name` must match `[a-z][a-z0-9_]{0,63}`; batch 1–100 events; **no location in props**; 5000 events/device/day cap → `rate_limited`; each event's `props` is capped at 4096 bytes serialized (`invalid_body`); the whole request at 512 KiB (`413`). Admin đọc qua `GET /v1/admin/events?days=` (byName/byDay).

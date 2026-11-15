@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 	"time"
 
@@ -105,6 +106,18 @@ func NewTOTPSecret(issuer, account string) (secret, url string, err error) {
 		return "", "", err
 	}
 	return key.Secret(), key.URL(), nil
+}
+
+// TOTPURL rebuilds the otpauth URL for an existing secret — used when a
+// pending enroll challenge is reused and the secret must be shown again.
+func TOTPURL(issuer, account, secretB32 string) string {
+	v := url.Values{}
+	v.Set("secret", secretB32)
+	v.Set("issuer", issuer)
+	v.Set("period", fmt.Sprint(totpPeriod))
+	v.Set("digits", fmt.Sprint(totpDigits))
+	v.Set("algorithm", "SHA1")
+	return "otpauth://totp/" + url.PathEscape(issuer+":"+account) + "?" + v.Encode()
 }
 
 func ValidateTOTP(secretB32, code string, now time.Time) (counter int64, ok bool) {

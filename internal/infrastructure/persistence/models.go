@@ -23,15 +23,6 @@ type TAdminAuditEvent struct {
 	CreatedAt   time.Time   `json:"created_at"`
 }
 
-type TAdminAuthChallenge struct {
-	TokenHash   []byte    `json:"token_hash"`
-	AdminUserID uuid.UUID `json:"admin_user_id"`
-	Kind        string    `json:"kind"`
-	TotpSecret  []byte    `json:"totp_secret"`
-	ExpiresAt   time.Time `json:"expires_at"`
-	CreatedAt   time.Time `json:"created_at"`
-}
-
 type TAdminGoogleToken struct {
 	AdminUserID   uuid.UUID `json:"admin_user_id"`
 	GoogleSub     string    `json:"google_sub"`
@@ -201,6 +192,7 @@ type TDevice struct {
 	CreatedAt           time.Time          `json:"created_at"`
 	LastSeenAt          pgtype.Timestamptz `json:"last_seen_at"`
 	DeletedAt           pgtype.Timestamptz `json:"deleted_at"`
+	SecretHash          pgtype.Text        `json:"secret_hash"`
 }
 
 type TDeviceSubscription struct {

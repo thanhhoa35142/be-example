@@ -86,7 +86,9 @@ type Stats struct {
 
 var Limits = map[string]int{
 	"free": 1,
-	"plus": -1,
+	// Plus is generous but finite — unlimited rules let one device make the
+	// evaluator loop over unbounded per-rule queries every run.
+	"plus": 20,
 }
 
 func parseHHMM(s string) (time.Duration, error) {
@@ -157,8 +159,15 @@ func normalizeShape(in RuleInput) (RuleInput, error) {
 		in.H3Cell = &cell
 		in.Area = nil
 	}
-	if in.H3Cell != nil && (in.RadiusM == nil || *in.RadiusM <= 0 || *in.RadiusM > 50000) {
-		return in, fmt.Errorf("%w: radiusM must be 1..50000 for area rules", ErrInvalidRule)
+	if in.H3Cell != nil {
+		// The cell is stored as bigint — values above MaxInt64 would wrap
+		// negative and silently produce a rule that never fires.
+		if *in.H3Cell > math.MaxInt64 {
+			return in, fmt.Errorf("%w: h3Cell out of range", ErrInvalidRule)
+		}
+		if in.RadiusM == nil || *in.RadiusM <= 0 || *in.RadiusM > 50000 {
+			return in, fmt.Errorf("%w: radiusM must be 1..50000 for area rules", ErrInvalidRule)
+		}
 	}
 	if in.SpotID != nil && in.RadiusM != nil {
 		return in, fmt.Errorf("%w: radiusM only applies to area rules", ErrInvalidRule)

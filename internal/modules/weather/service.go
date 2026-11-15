@@ -2,6 +2,7 @@ package weather
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -10,7 +11,10 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-const ForecastDays = 15
+// ForecastDays is 8, not the product's 7: one extra day of buffer for
+// timezone edge cases. Nothing reads beyond 7 days (scoring horizon,
+// /v1 forecast, recommendations, feedback window).
+const ForecastDays = 8
 
 const retentionDays = 14
 
@@ -57,7 +61,9 @@ func (s *Service) Refresh(ctx context.Context) (Stats, error) {
 		if !ok {
 			slog.Warn("weather: daily quota exhausted, skipping refresh",
 				"provider", s.provider.Name(), "cells", len(cells), "limit", s.dailyLimit)
-			return Stats{Cells: len(cells)}, nil
+			// Surface as a job failure — a silent skip leaves weather stale
+			// for hours while t_job_runs shows a healthy run.
+			return Stats{Cells: len(cells)}, fmt.Errorf("weather: daily quota exhausted (%d cells, limit %d)", len(cells), s.dailyLimit)
 		}
 	}
 
@@ -114,6 +120,12 @@ func (s *Service) Refresh(ctx context.Context) (Stats, error) {
 	}
 
 	_ = g.Wait()
+
+	// A majority of cells failing means the provider (or our quota) is broken
+	// — report the run as failed instead of "succeeded" with stale weather.
+	if st.Cells > 0 && st.Failed*2 > st.Cells {
+		return st, fmt.Errorf("weather: %d of %d cells failed", st.Failed, st.Cells)
+	}
 
 	if err := s.repo.DeleteBefore(ctx, now.Add(-retentionDays*24*time.Hour)); err != nil {
 		return st, err

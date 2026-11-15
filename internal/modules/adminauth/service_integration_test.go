@@ -26,7 +26,7 @@ func newService(t *testing.T) (*adminauth.Service, *pgxpool.Pool) {
 	for i := range key {
 		key[i] = byte(i * 7)
 	}
-	svc, err := adminauth.NewService(persistence.NewAdminAuthRepo(persistence.New(pool)), key, adminauth.DefaultConfig())
+	svc, err := adminauth.NewService(persistence.NewAdminAuthRepo(persistence.New(pool)), adminauth.NewMemoryChallengeStore(), key, adminauth.DefaultConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,6 +83,16 @@ func TestAdminAuthFlow(t *testing.T) {
 		t.Fatalf("expected enroll result, got %+v", login)
 	}
 
+	// A repeat login while the challenge is still valid reuses it: same
+	// token, same pending secret — no pile-up of challenges.
+	again, err := svc.Login(ctx, email, "a-very-long-test-password", "ua", "1.1.1.1")
+	if err != nil {
+		t.Fatalf("login reuse: %v", err)
+	}
+	if again.Challenge != login.Challenge || again.EnrollSecret != login.EnrollSecret {
+		t.Fatalf("enroll challenge not reused: %+v vs %+v", again, login)
+	}
+
 	if _, _, _, err := svc.ConfirmEnroll(ctx, login.Challenge, "000000", "ua", "1.1.1.1"); !errors.Is(err, adminauth.ErrInvalidCode) {
 		t.Fatalf("bad enroll code: %v", err)
 	}
@@ -114,6 +124,13 @@ func TestAdminAuthFlow(t *testing.T) {
 	}
 	if login2.Mode != "totp" {
 		t.Fatalf("expected totp mode, got %s", login2.Mode)
+	}
+	again2, err := svc.Login(ctx, email, "a-very-long-test-password", "ua", "1.1.1.1")
+	if err != nil {
+		t.Fatalf("login2 reuse: %v", err)
+	}
+	if again2.Challenge != login2.Challenge || again2.Mode != "totp" {
+		t.Fatalf("totp challenge not reused: %+v vs %+v", again2, login2)
 	}
 
 	code := totpCodeAt(t, login.EnrollSecret, time.Now().Add(30*time.Second))

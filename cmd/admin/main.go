@@ -8,8 +8,10 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 	"github.com/thanhhoa35142/be-example/internal/infrastructure/persistence"
 	"github.com/thanhhoa35142/be-example/internal/modules/adminauth"
 	"github.com/thanhhoa35142/be-example/internal/platform/config"
@@ -25,12 +27,32 @@ func openService() (*adminauth.Service, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	svc, err := adminauth.NewService(persistence.NewAdminAuthRepo(persistence.New(pool)), nil, adminauth.DefaultConfig())
+	// Challenges live in Redis; fall back to memory only when REDIS_URL is
+	// unset. A malformed URL is a config error — fail loudly instead of
+	// silently operating on a store the API never reads.
+	var store adminauth.ChallengeStore = adminauth.NewMemoryChallengeStore()
+	cleanup := func() { pool.Close() }
+	if cfg.RedisURL != "" {
+		opts, err := redis.ParseURL(cfg.RedisURL)
+		if err != nil {
+			pool.Close()
+			return nil, nil, fmt.Errorf("redis url: %w", err)
+		}
+		rdb := redis.NewClient(opts)
+		cleanup = func() { _ = rdb.Close(); pool.Close() }
+		store = persistence.NewAdminAuthChallengeStore(rdb)
+		pctx, pcancel := context.WithTimeout(ctx, 3*time.Second)
+		if err := rdb.Ping(pctx).Err(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: redis unreachable (%v) — challenge cleanup may fail\n", err)
+		}
+		pcancel()
+	}
+	svc, err := adminauth.NewService(persistence.NewAdminAuthRepo(persistence.New(pool)), store, nil, adminauth.DefaultConfig())
 	if err != nil {
-		pool.Close()
+		cleanup()
 		return nil, nil, err
 	}
-	return svc, func() { pool.Close() }, nil
+	return svc, cleanup, nil
 }
 
 func emailFlag(fs *flag.FlagSet) *string {

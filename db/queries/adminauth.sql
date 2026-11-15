@@ -59,19 +59,6 @@ UPDATE t_admin_users
 SET disabled_at = CASE WHEN sqlc.arg('disabled')::boolean THEN now() ELSE NULL END, updated_at = now()
 WHERE id = $1;
 
--- name: CreateAdminAuthChallenge :exec
-INSERT INTO t_admin_auth_challenges (token_hash, admin_user_id, kind, totp_secret, expires_at)
-VALUES ($1, $2, $3, $4, $5);
-
--- name: GetAdminAuthChallenge :one
-SELECT * FROM t_admin_auth_challenges WHERE token_hash = $1;
-
--- name: DeleteAdminAuthChallenge :exec
-DELETE FROM t_admin_auth_challenges WHERE token_hash = $1;
-
--- name: DeleteAdminAuthChallengesForUser :exec
-DELETE FROM t_admin_auth_challenges WHERE admin_user_id = $1;
-
 -- name: CreateAdminSession :one
 INSERT INTO t_admin_sessions (token_hash, admin_user_id, user_agent, ip, expires_at)
 VALUES ($1, $2, $3, $4, $5)
@@ -104,7 +91,7 @@ DELETE FROM t_admin_sessions
 WHERE admin_user_id = $1
   AND (sqlc.narg('keep_token_hash')::bytea IS NULL OR token_hash <> sqlc.narg('keep_token_hash'));
 
--- name: DeleteExpiredAdminSessions :exec
+-- name: DeleteExpiredAdminSessions :execrows
 DELETE FROM t_admin_sessions WHERE expires_at < now() - interval '1 day';
 
 -- name: InsertAdminRecoveryCodes :exec

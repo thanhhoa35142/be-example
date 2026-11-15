@@ -39,13 +39,22 @@ func (h *DevicesHandler) Register(c *gin.Context) {
 		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidID, "Invalid id", "expected a UUID")
 		return
 	}
-	outID, err := h.svc.Register(c.Request.Context(), devices.RegisterInput{
+	in := devices.RegisterInput{
 		ID: id, APNsToken: req.APNsToken, APNsEnv: req.APNsEnv,
 		Locale: req.Locale, TZ: req.TZ, AppVersion: req.AppVersion, Prefs: req.Prefs,
-	})
+	}
+	if tok := c.GetHeader(DeviceTokenHeader); tok != "" {
+		in.TokenHash = devices.HashSecret(tok)
+	}
+	out, err := h.svc.Register(c.Request.Context(), in)
 	if err != nil {
 		if errors.Is(err, devices.ErrInvalidInput) {
 			httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Invalid device", err.Error())
+			return
+		}
+		if errors.Is(err, devices.ErrUnauthorized) {
+			httpx.WriteProblem(c, http.StatusUnauthorized, httpx.CodeUnauthorized,
+				"Device authentication required", "this device already has a credential; send it in "+DeviceTokenHeader)
 			return
 		}
 		if errors.Is(err, devices.ErrConflict) {
@@ -55,7 +64,12 @@ func (h *DevicesHandler) Register(c *gin.Context) {
 		httpx.WriteError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": gin.H{"id": outID.String()}})
+	data := gin.H{"id": out.ID.String()}
+	if out.Secret != nil {
+		// Shown exactly once — the app must store it in the Keychain.
+		data["deviceSecret"] = *out.Secret
+	}
+	c.JSON(http.StatusOK, gin.H{"data": data})
 }
 
 func (h *DevicesHandler) Delete(c *gin.Context) {

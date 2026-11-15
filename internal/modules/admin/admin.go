@@ -13,6 +13,7 @@ import (
 
 var (
 	ErrReportNotFound      = errors.New("report not found")
+	ErrReportConflict      = errors.New("report already moderated")
 	ErrInvalidStatus       = errors.New("invalid report status")
 	ErrInvalidConfig       = errors.New("invalid scoring config")
 	ErrConfigExists        = errors.New("scoring config version exists")
@@ -22,6 +23,16 @@ var (
 	ErrJobScheduleNotFound = errors.New("job schedule not found")
 	ErrJobRunNotFound      = errors.New("job run not found")
 	ErrInvalidCursor       = errors.New("invalid cursor")
+)
+
+// ModReportOutcome distinguishes why a moderation attempt did or didn't
+// change a report — the handler maps these to 404 vs 409.
+type ModReportOutcome int
+
+const (
+	ModReportDone ModReportOutcome = iota
+	ModReportNotFound
+	ModReportConflict
 )
 
 type Page[T any] struct {

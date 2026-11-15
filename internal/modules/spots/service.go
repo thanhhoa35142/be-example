@@ -72,6 +72,16 @@ func (s *Service) list(ctx context.Context, q ListQuery, capWide bool) (ListResu
 		return ListResult{}, ErrInvalidQuery
 	}
 	now := time.Now().UTC()
+	// Bound the forecast window — scores only exist ~7 days out; anything
+	// further is an invalid query, not an empty result worth caching.
+	for _, t := range []*time.Time{q.When, q.From} {
+		if t != nil {
+			tt := t.UTC()
+			if tt.Before(now.Add(-24*time.Hour)) || tt.After(now.Add(8*24*time.Hour)) {
+				return ListResult{}, ErrInvalidQuery
+			}
+		}
+	}
 	ts := now
 	switch {
 	case q.When != nil:

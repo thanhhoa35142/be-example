@@ -117,38 +117,6 @@ func (r *AdminAuthRepo) SetDisabled(ctx context.Context, id uuid.UUID, disabled 
 	return r.q.SetAdminUserDisabled(ctx, SetAdminUserDisabledParams{ID: id, Disabled: disabled})
 }
 
-func (r *AdminAuthRepo) CreateChallenge(ctx context.Context, ch adminauth.Challenge) error {
-	return r.q.CreateAdminAuthChallenge(ctx, CreateAdminAuthChallengeParams{
-		TokenHash:   ch.TokenHash,
-		AdminUserID: ch.AdminUserID,
-		Kind:        ch.Kind,
-		TotpSecret:  ch.TotpSecret,
-		ExpiresAt:   ch.ExpiresAt.UTC(),
-	})
-}
-
-func (r *AdminAuthRepo) ChallengeByToken(ctx context.Context, tokenHash []byte) (*adminauth.Challenge, error) {
-	row, err := r.q.GetAdminAuthChallenge(ctx, tokenHash)
-	if err != nil {
-		return nil, err
-	}
-	return &adminauth.Challenge{
-		TokenHash:   row.TokenHash,
-		AdminUserID: row.AdminUserID,
-		Kind:        row.Kind,
-		TotpSecret:  row.TotpSecret,
-		ExpiresAt:   row.ExpiresAt.UTC(),
-	}, nil
-}
-
-func (r *AdminAuthRepo) DeleteChallenge(ctx context.Context, tokenHash []byte) error {
-	return r.q.DeleteAdminAuthChallenge(ctx, tokenHash)
-}
-
-func (r *AdminAuthRepo) DeleteChallengesForUser(ctx context.Context, userID uuid.UUID) error {
-	return r.q.DeleteAdminAuthChallengesForUser(ctx, userID)
-}
-
 func (r *AdminAuthRepo) CreateSession(ctx context.Context, tokenHash []byte, userID uuid.UUID, userAgent, ip string, expiresAt time.Time) (*adminauth.Session, error) {
 	row, err := r.q.CreateAdminSession(ctx, CreateAdminSessionParams{
 		TokenHash:   tokenHash,

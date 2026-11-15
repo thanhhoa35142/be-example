@@ -7,15 +7,17 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/thanhhoa35142/be-example/internal/modules/traffic"
 )
 
 type TrafficRepo struct {
-	q *Queries
+	q    *Queries
+	pool *pgxpool.Pool
 }
 
-func NewTrafficRepo(q *Queries) *TrafficRepo {
-	return &TrafficRepo{q: q}
+func NewTrafficRepo(q *Queries, pool *pgxpool.Pool) *TrafficRepo {
+	return &TrafficRepo{q: q, pool: pool}
 }
 
 func pgDate(t time.Time) pgtype.Date {
@@ -30,19 +32,30 @@ func (r *TrafficRepo) UpsertGscDaily(ctx context.Context, row traffic.GscDaily) 
 	})
 }
 
-func (r *TrafficRepo) DeleteGscDims(ctx context.Context, siteURL, dimension string) error {
-	return r.q.DeleteTrafficGscDims(ctx, DeleteTrafficGscDimsParams{
-		SiteUrl: siteURL, Dimension: dimension,
-	})
-}
+func (r *TrafficRepo) ReplaceGscDims(ctx context.Context, siteURL, dimension string, rows []traffic.GscDim) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	q := r.q.WithTx(tx)
 
-func (r *TrafficRepo) UpsertGscDim(ctx context.Context, row traffic.GscDim) error {
-	return r.q.UpsertTrafficGscDim(ctx, UpsertTrafficGscDimParams{
-		SiteUrl: row.SiteURL, Dimension: row.Dimension, Key: row.Key,
-		Clicks: row.Clicks, Impressions: row.Impressions,
-		Ctr: row.CTR, Position: row.Position,
-		PeriodStart: pgDate(row.PeriodStart), PeriodEnd: pgDate(row.PeriodEnd),
-	})
+	if err := q.DeleteTrafficGscDims(ctx, DeleteTrafficGscDimsParams{
+		SiteUrl: siteURL, Dimension: dimension,
+	}); err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if err := q.UpsertTrafficGscDim(ctx, UpsertTrafficGscDimParams{
+			SiteUrl: row.SiteURL, Dimension: row.Dimension, Key: row.Key,
+			Clicks: row.Clicks, Impressions: row.Impressions,
+			Ctr: row.CTR, Position: row.Position,
+			PeriodStart: pgDate(row.PeriodStart), PeriodEnd: pgDate(row.PeriodEnd),
+		}); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *TrafficRepo) UpsertGa4Daily(ctx context.Context, row traffic.Ga4Daily) error {

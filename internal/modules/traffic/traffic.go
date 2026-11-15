@@ -101,8 +101,9 @@ type Ga4Totals struct {
 
 type Repository interface {
 	UpsertGscDaily(ctx context.Context, row GscDaily) error
-	DeleteGscDims(ctx context.Context, siteURL, dimension string) error
-	UpsertGscDim(ctx context.Context, row GscDim) error
+	// ReplaceGscDims atomically swaps one site+dimension's rows: delete the
+	// old window and insert the new rows in a single transaction.
+	ReplaceGscDims(ctx context.Context, siteURL, dimension string, rows []GscDim) error
 	UpsertGa4Daily(ctx context.Context, row Ga4Daily) error
 
 	GscDaily(ctx context.Context, since time.Time) ([]GscDailyPoint, error)

@@ -128,11 +128,11 @@ func TestLinkAccountTokenBinding(t *testing.T) {
 		t.Fatalf("matching token: %v", err)
 	}
 
-	if _, err := svc.LinkTransaction(t.Context(), dev, pki.tx(t, "2", now, ``)); err != nil {
-		t.Fatalf("no token: %v", err)
+	if _, err := svc.LinkTransaction(t.Context(), dev, pki.tx(t, "2", now, ``)); !errors.Is(err, ErrAccountTokenMismatch) {
+		t.Fatalf("missing token must be rejected: %v", err)
 	}
-	if _, err := svc.LinkTransaction(t.Context(), dev, pki.tx(t, "3", now, `,"appAccountToken":"not-a-uuid"`)); err != nil {
-		t.Fatalf("non-uuid token: %v", err)
+	if _, err := svc.LinkTransaction(t.Context(), dev, pki.tx(t, "3", now, `,"appAccountToken":"not-a-uuid"`)); !errors.Is(err, ErrAccountTokenMismatch) {
+		t.Fatalf("non-uuid token must be rejected: %v", err)
 	}
 }
 
@@ -143,17 +143,17 @@ func TestLinkDeviceCap(t *testing.T) {
 	for i := 0; i < MaxDevicesPerSubscription; i++ {
 		last = uuid.NewString()
 		repo.devices[last] = true
-		if _, err := svc.LinkTransaction(t.Context(), last, pki.tx(t, "1", now.Add(time.Duration(i)*time.Second), ``)); err != nil {
+		if _, err := svc.LinkTransaction(t.Context(), last, pki.tx(t, "1", now.Add(time.Duration(i)*time.Second), fmt.Sprintf(`,"appAccountToken":%q`, last))); err != nil {
 			t.Fatalf("device %d: %v", i, err)
 		}
 	}
 	extra := uuid.NewString()
 	repo.devices[extra] = true
-	if _, err := svc.LinkTransaction(t.Context(), extra, pki.tx(t, "1", now.Add(time.Minute), ``)); !errors.Is(err, ErrDeviceLimit) {
+	if _, err := svc.LinkTransaction(t.Context(), extra, pki.tx(t, "1", now.Add(time.Minute), fmt.Sprintf(`,"appAccountToken":%q`, extra))); !errors.Is(err, ErrDeviceLimit) {
 		t.Fatalf("over cap: %v", err)
 	}
 
-	if _, err := svc.LinkTransaction(t.Context(), last, pki.tx(t, "1", now.Add(2*time.Minute), ``)); err != nil {
+	if _, err := svc.LinkTransaction(t.Context(), last, pki.tx(t, "1", now.Add(2*time.Minute), fmt.Sprintf(`,"appAccountToken":%q`, last))); err != nil {
 		t.Fatalf("relink at cap: %v", err)
 	}
 }
@@ -164,7 +164,8 @@ func TestRefundedCannotBeReactivatedByOlderTransaction(t *testing.T) {
 	repo.devices[dev] = true
 	t0 := time.Now().Add(-48 * time.Hour)
 
-	if e, err := svc.LinkTransaction(t.Context(), dev, pki.tx(t, "1", t0, ``)); err != nil || e.Plan != PlanPlus {
+	tok := fmt.Sprintf(`,"appAccountToken":%q`, dev)
+	if e, err := svc.LinkTransaction(t.Context(), dev, pki.tx(t, "1", t0, tok)); err != nil || e.Plan != PlanPlus {
 		t.Fatalf("purchase: %v %v", e, err)
 	}
 
@@ -177,7 +178,7 @@ func TestRefundedCannotBeReactivatedByOlderTransaction(t *testing.T) {
 		t.Fatal("refund did not revoke")
 	}
 
-	e, err := svc.LinkTransaction(t.Context(), dev, pki.tx(t, "1", t0, ``))
+	e, err := svc.LinkTransaction(t.Context(), dev, pki.tx(t, "1", t0, tok))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +187,7 @@ func TestRefundedCannotBeReactivatedByOlderTransaction(t *testing.T) {
 	}
 
 	t2 := t1.Add(time.Hour)
-	if e, _ := svc.LinkTransaction(t.Context(), dev, pki.tx(t, "1", t2, ``)); e.Plan != PlanFree || repo.subs["1"].Status != "revoked" {
+	if e, _ := svc.LinkTransaction(t.Context(), dev, pki.tx(t, "1", t2, tok)); e.Plan != PlanFree || repo.subs["1"].Status != "revoked" {
 		t.Fatalf("newer non-revoked transaction un-revoked: status=%s", repo.subs["1"].Status)
 	}
 }
@@ -233,4 +234,37 @@ func TestNotificationOrderingAndNestedVerification(t *testing.T) {
 
 func b64url(s string) string {
 	return strings.TrimRight(strings.NewReplacer("+", "-", "/", "_").Replace(b64([]byte(s))), "=")
+}
+
+func TestLinkProductAllowlist(t *testing.T) {
+	dev := uuid.NewString()
+	tok := fmt.Sprintf(`,"appAccountToken":%q`, dev)
+
+	cfg := defaultCfg()
+	cfg.ProductIDs = map[string]bool{"com.pickhour.plus.yearly": true}
+	svc, pki, repo := newTestService(t, cfg)
+	repo.devices[dev] = true
+	if _, err := svc.LinkTransaction(t.Context(), dev, pki.tx(t, "9", time.Now(), tok)); err != nil {
+		t.Fatalf("allowlisted product: %v", err)
+	}
+
+	cfg2 := defaultCfg()
+	cfg2.ProductIDs = map[string]bool{"com.other.product": true}
+	svc2, pki2, repo2 := newTestService(t, cfg2)
+	repo2.devices[dev] = true
+	if _, err := svc2.LinkTransaction(t.Context(), dev, pki2.tx(t, "9", time.Now(), tok)); !errors.Is(err, ErrInvalidJWS) {
+		t.Fatalf("non-allowlisted product: %v, want ErrInvalidJWS", err)
+	}
+}
+
+func TestSubscriptionWithoutExpiresDateRejected(t *testing.T) {
+	svc, pki, repo := newTestService(t, defaultCfg())
+	dev := uuid.NewString()
+	repo.devices[dev] = true
+	jws := pki.sign(t, fmt.Sprintf(
+		`{"originalTransactionId":"x","productId":"com.pickhour.plus.yearly","type":"Auto-Renewable Subscription","signedDate":%d,"bundleId":%q,"environment":"Production","appAccountToken":%q}`,
+		time.Now().UnixMilli(), testBundle, dev))
+	if _, err := svc.LinkTransaction(t.Context(), dev, jws); !errors.Is(err, ErrInvalidJWS) {
+		t.Fatalf("subscription without expiresDate: %v, want ErrInvalidJWS", err)
+	}
 }

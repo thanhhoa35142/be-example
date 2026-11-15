@@ -48,30 +48,6 @@ func (q *Queries) ConsumeAdminRecoveryCode(ctx context.Context, arg ConsumeAdmin
 	return result.RowsAffected(), nil
 }
 
-const createAdminAuthChallenge = `-- name: CreateAdminAuthChallenge :exec
-INSERT INTO t_admin_auth_challenges (token_hash, admin_user_id, kind, totp_secret, expires_at)
-VALUES ($1, $2, $3, $4, $5)
-`
-
-type CreateAdminAuthChallengeParams struct {
-	TokenHash   []byte    `json:"token_hash"`
-	AdminUserID uuid.UUID `json:"admin_user_id"`
-	Kind        string    `json:"kind"`
-	TotpSecret  []byte    `json:"totp_secret"`
-	ExpiresAt   time.Time `json:"expires_at"`
-}
-
-func (q *Queries) CreateAdminAuthChallenge(ctx context.Context, arg CreateAdminAuthChallengeParams) error {
-	_, err := q.db.Exec(ctx, createAdminAuthChallenge,
-		arg.TokenHash,
-		arg.AdminUserID,
-		arg.Kind,
-		arg.TotpSecret,
-		arg.ExpiresAt,
-	)
-	return err
-}
-
 const createAdminSession = `-- name: CreateAdminSession :one
 INSERT INTO t_admin_sessions (token_hash, admin_user_id, user_agent, ip, expires_at)
 VALUES ($1, $2, $3, $4, $5)
@@ -108,24 +84,6 @@ func (q *Queries) CreateAdminSession(ctx context.Context, arg CreateAdminSession
 	return i, err
 }
 
-const deleteAdminAuthChallenge = `-- name: DeleteAdminAuthChallenge :exec
-DELETE FROM t_admin_auth_challenges WHERE token_hash = $1
-`
-
-func (q *Queries) DeleteAdminAuthChallenge(ctx context.Context, tokenHash []byte) error {
-	_, err := q.db.Exec(ctx, deleteAdminAuthChallenge, tokenHash)
-	return err
-}
-
-const deleteAdminAuthChallengesForUser = `-- name: DeleteAdminAuthChallengesForUser :exec
-DELETE FROM t_admin_auth_challenges WHERE admin_user_id = $1
-`
-
-func (q *Queries) DeleteAdminAuthChallengesForUser(ctx context.Context, adminUserID uuid.UUID) error {
-	_, err := q.db.Exec(ctx, deleteAdminAuthChallengesForUser, adminUserID)
-	return err
-}
-
 const deleteAdminRecoveryCodes = `-- name: DeleteAdminRecoveryCodes :exec
 DELETE FROM t_admin_recovery_codes WHERE admin_user_id = $1
 `
@@ -153,31 +111,16 @@ func (q *Queries) DeleteAdminTOTPUsedForUser(ctx context.Context, adminUserID uu
 	return err
 }
 
-const deleteExpiredAdminSessions = `-- name: DeleteExpiredAdminSessions :exec
+const deleteExpiredAdminSessions = `-- name: DeleteExpiredAdminSessions :execrows
 DELETE FROM t_admin_sessions WHERE expires_at < now() - interval '1 day'
 `
 
-func (q *Queries) DeleteExpiredAdminSessions(ctx context.Context) error {
-	_, err := q.db.Exec(ctx, deleteExpiredAdminSessions)
-	return err
-}
-
-const getAdminAuthChallenge = `-- name: GetAdminAuthChallenge :one
-SELECT token_hash, admin_user_id, kind, totp_secret, expires_at, created_at FROM t_admin_auth_challenges WHERE token_hash = $1
-`
-
-func (q *Queries) GetAdminAuthChallenge(ctx context.Context, tokenHash []byte) (TAdminAuthChallenge, error) {
-	row := q.db.QueryRow(ctx, getAdminAuthChallenge, tokenHash)
-	var i TAdminAuthChallenge
-	err := row.Scan(
-		&i.TokenHash,
-		&i.AdminUserID,
-		&i.Kind,
-		&i.TotpSecret,
-		&i.ExpiresAt,
-		&i.CreatedAt,
-	)
-	return i, err
+func (q *Queries) DeleteExpiredAdminSessions(ctx context.Context) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteExpiredAdminSessions)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const getAdminSessionByTokenHash = `-- name: GetAdminSessionByTokenHash :one

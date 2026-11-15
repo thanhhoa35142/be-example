@@ -39,7 +39,7 @@ func (q *Queries) ActivateScoringConfig(ctx context.Context, version int16) (int
 }
 
 const adminEventDayCounts = `-- name: AdminEventDayCounts :many
-SELECT date_trunc('day', created_at)::timestamptz AS day, count(*) AS n
+SELECT (date_trunc('day', created_at AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')::timestamptz AS day, count(*) AS n
 FROM t_events
 WHERE created_at >= $1 AND created_at < $2
 GROUP BY day
@@ -56,6 +56,9 @@ type AdminEventDayCountsRow struct {
 	N   int64     `json:"n"`
 }
 
+// Buckets are UTC midnights regardless of the session TimeZone: the inner
+// AT TIME ZONE converts to a naive UTC timestamp, date_trunc floors it, and
+// the outer AT TIME ZONE converts back to timestamptz.
 func (q *Queries) AdminEventDayCounts(ctx context.Context, arg AdminEventDayCountsParams) ([]AdminEventDayCountsRow, error) {
 	rows, err := q.db.Query(ctx, adminEventDayCounts, arg.FromTs, arg.ToTs)
 	if err != nil {
@@ -622,18 +625,19 @@ func (q *Queries) GetJobSchedule(ctx context.Context, job string) (TWorkerJobSch
 }
 
 const getSpotReportTarget = `-- name: GetSpotReportTarget :one
-SELECT spot_id, type FROM t_spot_reports WHERE id = $1
+SELECT spot_id, type, status FROM t_spot_reports WHERE id = $1
 `
 
 type GetSpotReportTargetRow struct {
 	SpotID uuid.UUID `json:"spot_id"`
 	Type   string    `json:"type"`
+	Status string    `json:"status"`
 }
 
 func (q *Queries) GetSpotReportTarget(ctx context.Context, id uuid.UUID) (GetSpotReportTargetRow, error) {
 	row := q.db.QueryRow(ctx, getSpotReportTarget, id)
 	var i GetSpotReportTargetRow
-	err := row.Scan(&i.SpotID, &i.Type)
+	err := row.Scan(&i.SpotID, &i.Type, &i.Status)
 	return i, err
 }
 
@@ -1504,7 +1508,7 @@ func (q *Queries) UpdatePlanLimit(ctx context.Context, arg UpdatePlanLimitParams
 }
 
 const updateSpotReportStatus = `-- name: UpdateSpotReportStatus :execrows
-UPDATE t_spot_reports SET status = $2 WHERE id = $1
+UPDATE t_spot_reports SET status = $2 WHERE id = $1 AND status = 'pending'
 `
 
 type UpdateSpotReportStatusParams struct {
@@ -1512,6 +1516,9 @@ type UpdateSpotReportStatusParams struct {
 	Status string    `json:"status"`
 }
 
+// Only pending reports can transition; the DB trigger enforces the same
+// rule, this WHERE just turns a duplicate moderation into 0 rows instead of
+// a trigger exception.
 func (q *Queries) UpdateSpotReportStatus(ctx context.Context, arg UpdateSpotReportStatusParams) (int64, error) {
 	result, err := q.db.Exec(ctx, updateSpotReportStatus, arg.ID, arg.Status)
 	if err != nil {

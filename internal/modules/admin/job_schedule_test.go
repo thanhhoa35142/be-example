@@ -13,9 +13,10 @@ func TestValidateJobInterval(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "minimum", seconds: 900, limits: jobScheduleLimits["weather.refresh"]},
-		{name: "maximum", seconds: 3600, limits: jobScheduleLimits["weather.refresh"]},
+		{name: "production interval", seconds: 10800, limits: jobScheduleLimits["weather.refresh"]},
+		{name: "maximum", seconds: 21600, limits: jobScheduleLimits["weather.refresh"]},
 		{name: "below minimum", seconds: 899, limits: jobScheduleLimits["weather.refresh"], wantErr: true},
-		{name: "above maximum", seconds: 3601, limits: jobScheduleLimits["weather.refresh"], wantErr: true},
+		{name: "above maximum", seconds: 21601, limits: jobScheduleLimits["weather.refresh"], wantErr: true},
 	}
 
 	for _, tt := range tests {

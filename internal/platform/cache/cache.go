@@ -10,8 +10,17 @@ const VersionKey = "pic:ver:data"
 
 const WeatherVersionKey = "pic:ver:weather"
 
+// AdminAggVersionKey versions the cached admin aggregate responses
+// (overview/metrics/events). Bumping it invalidates only those entries —
+// the public spot caches keep their own version.
+const AdminAggVersionKey = "pic:ver:adminagg"
+
 func Bump(ctx context.Context, rdb *redis.Client) error {
 	return rdb.Incr(ctx, VersionKey).Err()
+}
+
+func BumpAdminAgg(ctx context.Context, rdb *redis.Client) error {
+	return rdb.Incr(ctx, AdminAggVersionKey).Err()
 }
 
 func BumpWeather(ctx context.Context, rdb *redis.Client) error {

@@ -2,6 +2,7 @@ package http
 
 import (
 	"errors"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -178,8 +179,8 @@ func parseBBox(raw string) (spots.BBox, error) {
 	vals := make([]float64, 4)
 	for i, p := range parts {
 		v, err := strconv.ParseFloat(strings.TrimSpace(p), 64)
-		if err != nil {
-			return spots.BBox{}, err
+		if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
+			return spots.BBox{}, errors.New("bad format")
 		}
 		vals[i] = v
 	}

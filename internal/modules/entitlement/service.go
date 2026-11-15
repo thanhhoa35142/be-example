@@ -35,10 +35,13 @@ func (s *Service) LinkTransaction(ctx context.Context, deviceID, signedTransacti
 		return nil, err
 	}
 
-	if tok, perr := uuid.Parse(accountToken); perr == nil {
-		if dev, derr := uuid.Parse(deviceID); derr != nil || tok != dev {
-			return nil, ErrAccountTokenMismatch
-		}
+	// appAccountToken is mandatory: the app sets it to the device UUID at
+	// purchase time, binding the transaction to this install. Without it one
+	// signedTransaction could be linked to arbitrary devices.
+	tok, perr := uuid.Parse(accountToken)
+	dev, derr := uuid.Parse(deviceID)
+	if perr != nil || derr != nil || tok != dev {
+		return nil, ErrAccountTokenMismatch
 	}
 	exists, err := s.repo.DeviceExists(ctx, deviceID)
 	if err != nil {

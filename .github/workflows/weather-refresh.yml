@@ -1,0 +1,140 @@
+name: weather-refresh
+
+# Self-hosted Open-Meteo weather refresh (docs/WEATHER_SELFHOST_PROPOSAL.md).
+# Each run: spin up an ephemeral Postgres, restore the picnic_test dump
+# from the `weather-test-db` release, sync GFS/GEFS + DEM from the
+# open-data bucket, serve the forecast API locally, then run
+# `worker -job weather.refresh` against the ephemeral DB.
+#
+# Phase 2 status: workflow_dispatch ONLY — no schedule yet. Enable the
+# cron below after measuring real GFS publication lag on the bucket.
+# GFS runs at 00/06/12/18 UTC; candidate cron (delay ~3-4h):
+#   schedule:
+#     - cron: "30 3,9,15,21 * * *"
+#
+# Prod path (later): point DATABASE_URL at the prod DB over Tailscale
+# (tag:ci -> tcp:5432 ACL, secret TS_AUTHKEY + PROD_DATABASE_URL), and
+# disable this ephemeral-DB path via the `target` input.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "ephemeral (restore dump in-job) — prod comes later"
+        type: choice
+        options: [ephemeral]
+        default: ephemeral
+      models:
+        description: "Sync model domains"
+        type: string
+        default: "ncep_gfs013,ncep_gefs025,ncep_gefs05"
+      api_models:
+        description: "models= value for the forecast API"
+        type: string
+        default: "gfs_global"
+      past_days:
+        description: "Sync --past-days"
+        type: string
+        default: "2"
+
+concurrency:
+  group: weather-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    services:
+      postgres:
+        image: postgis/postgis:18-3.6
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: picnic_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      MODELS: ${{ inputs.models }}
+      API_MODELS: ${{ inputs.api_models }}
+      PAST_DAYS: ${{ inputs.past_days }}
+      VARS: "temperature_2m,relative_humidity_2m,dew_point_2m,wind_u_component_10m,wind_v_component_10m,precipitation,precipitation_probability,cloud_cover,uv_index,shortwave_radiation"
+      IMAGE: ghcr.io/open-meteo/open-meteo:latest
+      DATABASE_URL: postgres://postgres:test@localhost:5432/picnic_test?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build worker
+        run: go build -o /tmp/worker ./cmd/worker
+
+      - name: Download test DB dump
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download weather-test-db -p picnic_test.dump -R ${{ github.repository }} --clobber --dir /tmp
+
+      - name: Restore dump
+        run: |
+          docker run --rm --network host -e PGPASSWORD=test -v /tmp:/w postgis/postgis:18-3.6 \
+            pg_restore -h localhost -U postgres -d picnic_test --no-owner --no-privileges /w/picnic_test.dump
+
+      - name: Sanity check cells
+        run: |
+          docker run --rm --network host -e PGPASSWORD=test postgis/postgis:18-3.6 \
+            psql "$DATABASE_URL" -t -c \
+            "SELECT count(*) AS cells FROM (SELECT DISTINCT cell_id FROM t_spots) s" \
+            -c "SELECT count(*) AS forecast_rows FROM t_weather_hourly_forecasts"
+
+      - name: Create data volume
+        run: docker volume create open-meteo-data
+
+      - name: Sync DEM
+        run: |
+          docker run --rm -v open-meteo-data:/app/data $IMAGE \
+            sync copernicus_dem90 static
+
+      - name: Sync model data
+        run: |
+          echo "models=$MODELS past_days=$PAST_DAYS"
+          time docker run --rm -v open-meteo-data:/app/data $IMAGE \
+            sync "$MODELS" "$VARS" --past-days "$PAST_DAYS" --concurrent 8
+
+      - name: Start forecast API
+        run: |
+          docker run -d --name open-meteo -v open-meteo-data:/app/data \
+            -p 8080:8080 $IMAGE serve --env production --hostname 0.0.0.0 --port 8080
+          for i in $(seq 1 60); do
+            curl -sf "http://localhost:8080/v1/forecast?latitude=52.37&longitude=4.90&hourly=temperature_2m&forecast_days=1&models=gfs013" >/dev/null && break
+            sleep 2
+          done
+
+      - name: Run weather.refresh
+        env:
+          OPEN_METEO_URL: http://localhost:8080/v1/forecast
+          OPEN_METEO_MODELS: ${{ inputs.api_models }}
+          WEATHER_DAILY_LIMIT: "0"
+          RUN_MIGRATIONS: "false"
+          APP_ENV: production
+        run: /tmp/worker -job weather.refresh
+
+      - name: Job outcome
+        if: always()
+        run: |
+          docker run --rm --network host -e PGPASSWORD=test postgis/postgis:18-3.6 \
+            psql "$DATABASE_URL" -c \
+            "SELECT job, status, started_at, finished_at, rows_affected, left(coalesce(error,''),200) AS error FROM t_job_runs WHERE job='weather.refresh' ORDER BY id DESC LIMIT 3" || true
+          docker run --rm --network host -e PGPASSWORD=test postgis/postgis:18-3.6 \
+            psql "$DATABASE_URL" -t -c \
+            "SELECT count(*) AS forecast_rows, count(DISTINCT cell_id) AS cells FROM t_weather_hourly_forecasts" || true

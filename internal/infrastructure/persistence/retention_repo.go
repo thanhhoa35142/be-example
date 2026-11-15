@@ -23,6 +23,7 @@ type PurgeStats struct {
 	JobRuns          int64
 	AlertDeliveries  int64
 	PayloadsScrubbed int64
+	AdminSessions    int64
 }
 
 var (
@@ -82,6 +83,12 @@ func (r *RetentionRepo) Purge(ctx context.Context) (PurgeStats, error) {
 	if st.AlertDeliveries, err = purge(now.Add(-deliveryRetention), func(b time.Time) (int64, error) {
 		return r.q.PurgeAlertDeliveries(ctx, PurgeAlertDeliveriesParams{WindowStart: b, Limit: purgeBatch})
 	}); err != nil {
+		return st, err
+	}
+
+	// Auth tables: expired sessions are tiny but unbounded without a sweep
+	// (login creates a row per session). Challenges live in Redis with TTL.
+	if st.AdminSessions, err = r.q.DeleteExpiredAdminSessions(ctx); err != nil {
 		return st, err
 	}
 

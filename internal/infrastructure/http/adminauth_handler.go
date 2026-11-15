@@ -42,13 +42,17 @@ func (h *AdminAuthHandler) denyFailed(c *gin.Context) bool {
 func (h *AdminAuthHandler) hitFailed(c *gin.Context) { h.failed.Hit(c.ClientIP()) }
 
 func setSessionCookie(c *gin.Context, token string, ttl time.Duration) {
+	// Lax, not Strict: the Google OAuth callback is a cross-site top-level GET
+	// and Strict would withhold the cookie, breaking account linking. Lax
+	// still blocks cookie-bearing cross-site POSTs, and mutations additionally
+	// require the X-Pickhour-Admin header + Origin check.
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:     AdminSessionCookie,
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
 		Secure:   true,
-		SameSite: http.SameSiteStrictMode,
+		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(ttl / time.Second),
 	})
 }
@@ -60,7 +64,7 @@ func clearSessionCookie(c *gin.Context) {
 		Path:     "/",
 		HttpOnly: true,
 		Secure:   true,
-		SameSite: http.SameSiteStrictMode,
+		SameSite: http.SameSiteLaxMode,
 		MaxAge:   -1,
 	})
 }

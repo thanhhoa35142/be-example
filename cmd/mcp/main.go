@@ -24,10 +24,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
-	port := os.Getenv("MCP_PORT")
-	if port == "" {
-		port = "8081"
-	}
+	port := cfg.MCPPort
 
 	ctx := context.Background()
 

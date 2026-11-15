@@ -22,7 +22,6 @@ func NewAlertsHandler(svc *alerts.Service) *AlertsHandler {
 }
 
 type alertRuleRequest struct {
-	DeviceID   string     `json:"deviceId"`
 	SpotID     *uuid.UUID `json:"spotId"`
 	H3Cell     *uint64    `json:"h3Cell"`
 	Area       *areaPoint `json:"area"`
@@ -90,17 +89,12 @@ func (h *AlertsHandler) input(req alertRuleRequest) (alerts.RuleInput, bool) {
 	}, true
 }
 
-const deviceIDHeader = "X-Device-ID"
-
 func requestDeviceID(c *gin.Context) (uuid.UUID, bool) {
-	raw := c.GetHeader(deviceIDHeader)
-	if raw == "" {
-		raw = c.Query("deviceId")
-	}
+	raw := c.GetHeader(DeviceIDHeader)
 	id, err := uuid.Parse(raw)
 	if err != nil {
-		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidQuery, "Invalid device id",
-			"send the device UUID in the X-Device-ID header (or legacy deviceId query parameter)")
+		httpx.WriteProblem(c, http.StatusUnauthorized, httpx.CodeUnauthorized, "Device authentication required",
+			"send the device UUID in the "+DeviceIDHeader+" header")
 		return uuid.Nil, false
 	}
 	return id, true
@@ -129,9 +123,8 @@ func (h *AlertsHandler) Create(c *gin.Context) {
 		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Invalid body", "expected JSON alert rule")
 		return
 	}
-	deviceID, err := uuid.Parse(req.DeviceID)
-	if err != nil {
-		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidID, "Invalid deviceId", "expected a UUID")
+	deviceID, ok := requestDeviceID(c)
+	if !ok {
 		return
 	}
 	in, ok := h.input(req)
@@ -158,9 +151,8 @@ func (h *AlertsHandler) Update(c *gin.Context) {
 		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Invalid body", "expected JSON alert rule")
 		return
 	}
-	deviceID, err := uuid.Parse(req.DeviceID)
-	if err != nil {
-		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidID, "Invalid deviceId", "expected a UUID")
+	deviceID, ok := requestDeviceID(c)
+	if !ok {
 		return
 	}
 	in, ok := h.input(req)

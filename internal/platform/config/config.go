@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -12,11 +13,14 @@ import (
 
 type Config struct {
 	Port              string
+	MCPPort           string
 	DatabaseURL       string
 	RedisURL          string
 	WeatherProvider   string
 	WeatherH3Res      int
 	WeatherDailyLimit int
+	WeatherOpenMeteoURL    string
+	WeatherOpenMeteoModels string
 	RunMigrations     bool
 	OverpassURL       string
 	IngestExtractDir  string
@@ -28,6 +32,9 @@ type Config struct {
 
 	AppStoreBundleID     string
 	AppStoreAllowSandbox bool
+	// AppStorePlusProductIDs is the APPSTORE_PLUS_PRODUCT_IDS allowlist —
+	// comma-separated product IDs that may grant Plus.
+	AppStorePlusProductIDs []string
 
 	AppleAppIDs   []string
 	AppStoreAppID string
@@ -56,10 +63,11 @@ type Config struct {
 	GoogleClientSecret string
 	GoogleRedirectURI  string
 
-	DBStatementTimeout string
-	DBLockTimeout      string
-	DBMaxConns         int32
-	DBJIT              string
+	DBStatementTimeout       string
+	DBWorkerStatementTimeout string
+	DBLockTimeout            string
+	DBMaxConns               int32
+	DBJIT                    string
 }
 
 func Load() (Config, error) {
@@ -80,13 +88,28 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	// Sandbox IAP receipts are only accepted outside production by default —
+	// a free sandbox "purchase" must never grant production Plus. Enable
+	// explicitly via APPSTORE_ALLOW_SANDBOX=true for the App Review window.
+	appEnv := os.Getenv("APP_ENV")
+	sandboxDefault := "true"
+	if appEnv == "production" {
+		sandboxDefault = "false"
+	}
 	cfg := Config{
 		Port:              getEnv("PORT", "8080"),
+		MCPPort:           getEnv("MCP_PORT", "8081"),
 		DatabaseURL:       os.Getenv("DATABASE_URL"),
 		RedisURL:          os.Getenv("REDIS_URL"),
 		WeatherProvider:   getEnv("WEATHER_PROVIDER", "open-meteo"),
 		WeatherH3Res:      getEnvInt("WEATHER_H3_RES", 6),
 		WeatherDailyLimit: getEnvInt("WEATHER_DAILY_LIMIT", 9000),
+		// OPEN_METEO_URL points at a self-hosted instance for the Actions
+		// weather-refresh job; OPEN_METEO_MODELS selects the model set
+		// (e.g. "gfs_global" — required there since best_match needs the
+		// full domain set). Empty models keeps public-API behaviour.
+		WeatherOpenMeteoURL:    getEnv("OPEN_METEO_URL", ""),
+		WeatherOpenMeteoModels: getEnv("OPEN_METEO_MODELS", ""),
 		RunMigrations:     getEnv("RUN_MIGRATIONS", "true") != "false",
 		OverpassURL:       getEnv("OVERPASS_URL", "https://overpass-api.de/api/interpreter"),
 		IngestExtractDir:  getEnv("INGEST_EXTRACT_DIR", "./data/extracts"),
@@ -94,9 +117,10 @@ func Load() (Config, error) {
 		OsmiumPBF:         os.Getenv("OSMIUM_PBF"),
 		OsmiumCmd:         os.Getenv("OSMIUM_CMD"),
 
-		AppEnv:               os.Getenv("APP_ENV"),
+		AppEnv:               appEnv,
 		AppStoreBundleID:     os.Getenv("APPSTORE_BUNDLE_ID"),
-		AppStoreAllowSandbox: getEnv("APPSTORE_ALLOW_SANDBOX", "true") != "false",
+		AppStoreAllowSandbox:  getEnv("APPSTORE_ALLOW_SANDBOX", sandboxDefault) != "false",
+		AppStorePlusProductIDs: splitList(os.Getenv("APPSTORE_PLUS_PRODUCT_IDS")),
 		AppleAppIDs:          splitList(os.Getenv("APPLE_APP_IDS")),
 		AppStoreAppID:        strings.TrimSpace(os.Getenv("APPSTORE_APP_ID")),
 
@@ -124,10 +148,11 @@ func Load() (Config, error) {
 		GoogleClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
 		GoogleRedirectURI:  os.Getenv("GOOGLE_REDIRECT_URI"),
 
-		DBStatementTimeout: getEnv("DB_STATEMENT_TIMEOUT", "5s"),
-		DBLockTimeout:      getEnv("DB_LOCK_TIMEOUT", "2s"),
-		DBMaxConns:         int32(getEnvInt("DB_MAX_CONNS", 0)),
-		DBJIT:              getEnv("DB_JIT", "off"),
+		DBStatementTimeout:       getEnv("DB_STATEMENT_TIMEOUT", "5s"),
+		DBWorkerStatementTimeout: getEnv("DB_WORKER_STATEMENT_TIMEOUT", "120s"),
+		DBLockTimeout:            getEnv("DB_LOCK_TIMEOUT", "2s"),
+		DBMaxConns:               int32(getEnvInt("DB_MAX_CONNS", 0)),
+		DBJIT:                    getEnv("DB_JIT", "off"),
 	}
 	if cfg.MaxBodyBytes <= 0 {
 		return Config{}, fmt.Errorf("BODY_MAX_BYTES must be > 0")
@@ -193,6 +218,7 @@ func getEnvInt(key string, fallback int) int {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
 		}
+		slog.Warn("invalid integer env value, using fallback", "key", key, "value", v, "fallback", fallback)
 	}
 	return fallback
 }

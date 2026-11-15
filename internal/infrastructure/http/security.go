@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -213,7 +214,7 @@ func AdminAuth(token string, sessions SessionAuthenticator, failed ratelimit.Che
 	}
 }
 
-func originAllowed(c *gin.Context, origin string, allowedOrigins []string) bool {
+func originAllowed(c *gin.Context, origin string, allowedOrigins, trustedProxies []string) bool {
 	u, err := url.Parse(origin)
 	if err != nil || u.Host == "" {
 		return false
@@ -227,17 +228,84 @@ func originAllowed(c *gin.Context, origin string, allowedOrigins []string) bool 
 			return true
 		}
 
-		if au, aerr := url.Parse(allowed); aerr == nil && au.Host != "" && strings.EqualFold(u.Host, au.Host) {
+		if au, aerr := url.Parse(allowed); aerr == nil && au.Host != "" {
+			if !strings.EqualFold(u.Host, au.Host) {
+				continue
+			}
+			// When the allowlist entry carries a scheme, the Origin scheme
+			// must match too — otherwise http:// would pass an https:// rule.
+			if au.Scheme != "" && !strings.EqualFold(u.Scheme, au.Scheme) {
+				continue
+			}
 			return true
 		}
 	}
-	if xfh := strings.TrimSpace(c.GetHeader("X-Forwarded-Host")); xfh != "" {
+	// X-Forwarded-Host is only meaningful when the request actually arrived
+	// through a configured trusted proxy (e.g. the Next.js rewrite); honoring
+	// it from arbitrary peers would let a caller spoof the Origin allowlist.
+	// The forwarded value must itself be an allowlisted host — echoing an
+	// arbitrary XFH would defeat the check entirely.
+	if xfh := strings.TrimSpace(c.GetHeader("X-Forwarded-Host")); xfh != "" && remoteAddrTrusted(c, trustedProxies) {
+		if !originHostAllowed(xfh, allowedOrigins) {
+			return false
+		}
 		return strings.EqualFold(u.Host, xfh)
 	}
 	return strings.EqualFold(u.Host, c.Request.Host)
 }
 
-func AdminCSRF(allowedOrigins []string) gin.HandlerFunc {
+// originHostAllowed reports whether hostport (host or host:port, no scheme)
+// matches the host of any configured allowed origin.
+func originHostAllowed(hostport string, allowedOrigins []string) bool {
+	hostport = strings.TrimSpace(hostport)
+	for _, allowed := range allowedOrigins {
+		allowed = strings.TrimSpace(allowed)
+		if allowed == "" {
+			continue
+		}
+		if strings.EqualFold(hostport, allowed) {
+			return true
+		}
+		if au, err := url.Parse(allowed); err == nil && au.Host != "" && strings.EqualFold(hostport, au.Host) {
+			return true
+		}
+	}
+	return false
+}
+
+// remoteAddrTrusted reports whether the TCP peer is one of the configured
+// trusted proxies (IP or CIDR), mirroring what gin uses for ClientIP.
+func remoteAddrTrusted(c *gin.Context, proxies []string) bool {
+	if len(proxies) == 0 {
+		return false
+	}
+	host, _, err := net.SplitHostPort(c.Request.RemoteAddr)
+	if err != nil {
+		host = c.Request.RemoteAddr
+	}
+	ip := net.ParseIP(strings.TrimSpace(host))
+	if ip == nil {
+		return false
+	}
+	for _, p := range proxies {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if strings.Contains(p, "/") {
+			if _, n, err := net.ParseCIDR(p); err == nil && n.Contains(ip) {
+				return true
+			}
+			continue
+		}
+		if pip := net.ParseIP(p); pip != nil && pip.Equal(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func AdminCSRF(allowedOrigins, trustedProxies []string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if isSafeMethod(c.Request.Method) ||
 			strings.HasPrefix(c.GetHeader("Authorization"), "Bearer ") {
@@ -250,7 +318,7 @@ func AdminCSRF(allowedOrigins []string) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		if origin := c.GetHeader("Origin"); origin != "" && !originAllowed(c, origin, allowedOrigins) {
+		if origin := c.GetHeader("Origin"); origin != "" && !originAllowed(c, origin, allowedOrigins, trustedProxies) {
 			httpx.WriteProblem(c, http.StatusForbidden, httpx.CodeForbidden,
 				"Forbidden", "origin not allowed")
 			c.Abort()

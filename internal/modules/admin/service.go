@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/thanhhoa35142/be-example/internal/modules/scoring"
 )
 
 var weightKeys = map[string]bool{
@@ -28,7 +29,9 @@ type jobScheduleLimit struct {
 }
 
 var jobScheduleLimits = map[string]jobScheduleLimit{
-	"weather.refresh":        {min: 15 * 60, max: 60 * 60, desc: "Fetch weather forecasts for the coming days"},
+	// weather.refresh: provider quota (9000 calls/day) over ~1070 cells only
+	// affords ~8 runs/day — 3h is the sane floor, 6h the ceiling.
+	"weather.refresh":        {min: 15 * 60, max: 6 * 60 * 60, desc: "Fetch weather forecasts for the coming days"},
 	"crowd.refresh":          {min: 60 * 60, max: 30 * 24 * 60 * 60, desc: "Refresh provider crowd estimates"},
 	"crowd.aggregate":        {min: 60, max: 24 * 60 * 60, desc: "Aggregate community crowd reports"},
 	"scoring.recompute":      {min: 5 * 60, max: 6 * 60 * 60, desc: "Recompute spot scores for the forecast window"},
@@ -256,22 +259,15 @@ func (s *Service) ModerateReport(ctx context.Context, id uuid.UUID, status strin
 	if status != "accepted" && status != "rejected" {
 		return ErrInvalidStatus
 	}
-	ok, err := s.repo.UpdateReportStatus(ctx, id, status)
+	outcome, err := s.repo.ModerateReport(ctx, id, status)
 	if err != nil {
 		return err
 	}
-	if !ok {
+	switch outcome {
+	case ModReportNotFound:
 		return ErrReportNotFound
-	}
-	if status != "accepted" {
-		return nil
-	}
-	spotID, typ, err := s.repo.SpotReportTarget(ctx, id)
-	if err != nil {
-		return err
-	}
-	if typ == "closed" {
-		return s.repo.CloseSpotForReport(ctx, spotID)
+	case ModReportConflict:
+		return ErrReportConflict
 	}
 	return nil
 }
@@ -283,6 +279,16 @@ func (s *Service) ListScoringConfigs(ctx context.Context) ([]ScoringConfigVersio
 func (s *Service) CreateScoringConfig(ctx context.Context, in ScoringConfigInput) (*ScoringConfigVersion, error) {
 	if err := validateConfigJSON(in.Weights, weightKeys, "weights"); err != nil {
 		return nil, err
+	}
+	// A non-positive weight sum would make Score() divide by ~zero and the
+	// batch upsert violate the 0-100 CHECK — reject at write time.
+	var w scoring.Weights
+	if err := json.Unmarshal(in.Weights, &w); err != nil {
+		return nil, fmt.Errorf("%w: weights must be numeric", ErrInvalidConfig)
+	}
+	wsum := w.Weather + w.Crowd + w.Amenity + w.Shade + w.Fresh
+	if wsum <= 0 {
+		return nil, fmt.Errorf("%w: weights must sum to a positive value", ErrInvalidConfig)
 	}
 	if err := validateConfigJSON(in.Thresholds, thresholdKeys, "thresholds"); err != nil {
 		return nil, err

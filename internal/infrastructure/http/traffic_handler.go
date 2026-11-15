@@ -38,12 +38,12 @@ func (h *TrafficHandler) Gsc(c *gin.Context) {
 		httpx.WriteError(c, err)
 		return
 	}
-	queries, qWin, err := h.svc.GscTop(c.Request.Context(), "query", days, 25)
+	queries, qWin, err := h.svc.GscTop(c.Request.Context(), "query", 25)
 	if err != nil {
 		httpx.WriteError(c, err)
 		return
 	}
-	pages, pWin, err := h.svc.GscTop(c.Request.Context(), "page", days, 25)
+	pages, pWin, err := h.svc.GscTop(c.Request.Context(), "page", 25)
 	if err != nil {
 		httpx.WriteError(c, err)
 		return

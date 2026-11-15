@@ -81,14 +81,14 @@ func TestRecNormalizeMatchesHandlerCanon(t *testing.T) {
 	if v.Get("x") != "" {
 		t.Fatal("unknown params must be dropped")
 	}
-	if got := v.Get("lat"); got != "52.37" {
-		t.Fatalf("lat=%q want round3", got)
+	if got := v.Get("lat"); got != "52.3704" {
+		t.Fatalf("lat=%q want raw value (no rounding — distance must stay exact)", got)
 	}
-	if got := v.Get("lon"); got != "4.895" {
-		t.Fatalf("lon=%q want round3", got)
+	if got := v.Get("lon"); got != "4.8951" {
+		t.Fatalf("lon=%q want raw value", got)
 	}
-	if got := v.Get("radius"); got != "1100" {
-		t.Fatalf("radius=%q want 100m bucket", got)
+	if got := v.Get("radius"); got != "1050" {
+		t.Fatalf("radius=%q want raw value (no bucketing)", got)
 	}
 	if got := v.Get("when"); got != "2026-11-14T10:00:00Z" {
 		t.Fatalf("when=%q want hour-truncated", got)
@@ -102,17 +102,13 @@ func TestRecNormalizeMatchesHandlerCanon(t *testing.T) {
 }
 
 func TestCanonRadiusMEdges(t *testing.T) {
-	for in, want := range map[float64]float64{
-		0:     0,
-		-5:    -5,
-		50001: 50001,
-		550:   600,
-		549:   500,
-		5000:  5000,
-		49999: 50000,
+	// canonRadiusM is a pass-through validator now: the key must keep the raw
+	// radius because ST_DWithin uses it exactly.
+	for in := range map[float64]bool{
+		0: true, -5: true, 50001: true, 550: true, 549: true, 5000: true, 49999: true,
 	} {
-		if got := canonRadiusM(in); got != want {
-			t.Fatalf("canonRadiusM(%v)=%v want %v", in, got, want)
+		if got := canonRadiusM(in); got != in {
+			t.Fatalf("canonRadiusM(%v)=%v want passthrough", in, got)
 		}
 	}
 }
@@ -121,8 +117,8 @@ func TestCanonGeoBounds(t *testing.T) {
 	if got := canonGeo(90)(95); got != 95 {
 		t.Fatalf("out-of-range lat must pass through, got %v", got)
 	}
-	if got := canonGeo(90)(52.37049); got != 52.37 {
-		t.Fatalf("lat=%v want round3", got)
+	if got := canonGeo(90)(52.37049); got != 52.37049 {
+		t.Fatalf("lat=%v want raw value", got)
 	}
 }
 

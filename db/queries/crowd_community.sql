@@ -24,7 +24,11 @@ ON CONFLICT (spot_id, dow, hour) DO UPDATE SET
     n_reports  = EXCLUDED.n_reports,
     updated_at = EXCLUDED.updated_at;
 
--- name: DeleteStaleCommunityEstimates :execrows
+-- name: DeleteUnrefreshedCommunityEstimates :execrows
+-- Community estimates not rewritten by the current aggregate run are stale:
+-- their slot dropped below MinCommunityReports or aged out of the 30-day
+-- report window. The caller passes the run start; upserted rows carry
+-- updated_at = now() > run start and survive.
 DELETE FROM t_crowd_estimates
 WHERE source = 'community'
-  AND updated_at < now() - interval '35 days';
+  AND updated_at < sqlc.arg('run_start')::timestamptz;

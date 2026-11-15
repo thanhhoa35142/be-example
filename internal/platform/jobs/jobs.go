@@ -27,7 +27,12 @@ func Acquire(ctx context.Context, pool *pgxpool.Pool, name string) (func(), erro
 		return nil, ErrLockNotAcquired
 	}
 	return func() {
-		_, _ = conn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", lockKey(name))
+		if _, err := conn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", lockKey(name)); err != nil {
+			// A failed unlock may leave the session-level lock held; destroy
+			// the connection instead of returning a still-locked conn to the pool.
+			_ = conn.Hijack().Close(context.Background())
+			return
+		}
 		conn.Release()
 	}, nil
 }

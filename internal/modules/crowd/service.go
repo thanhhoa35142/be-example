@@ -189,6 +189,7 @@ func (s *Service) estimateSpot(
 const MinCommunityReports = 5
 
 func (s *Service) AggregateCommunity(ctx context.Context) (Stats, error) {
+	runStart := time.Now().UTC()
 	slots, err := s.repo.CommunityStats(ctx, MinCommunityReports)
 	if err != nil {
 		return Stats{}, err
@@ -208,7 +209,7 @@ func (s *Service) AggregateCommunity(ctx context.Context) (Stats, error) {
 		}
 		st.Written++
 	}
-	n, err := s.repo.DeleteStaleCommunity(ctx)
+	n, err := s.repo.DeleteStaleCommunity(ctx, runStart)
 	if err != nil {
 		return st, err
 	}

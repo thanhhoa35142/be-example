@@ -81,7 +81,7 @@ func main() {
 		notifier.NewSender(logger, alertsRepo, apnsClient),
 	)
 
-	adminSvc := admin.NewService(persistence.NewAdminRepo(queries))
+	adminSvc := admin.NewService(persistence.NewAdminRepo(queries, pool))
 	keysSvc := apikeys.NewService(persistence.NewAPIKeysRepo(queries, pool))
 	eventsSvc := events.NewService(persistence.NewEventsRepo(queries))
 	digestSvc := digest.NewService(persistence.NewDigestRepo(queries), entitlementSvc, nil, logger)
@@ -96,6 +96,7 @@ func main() {
 	authFail := ratelimit.PerMinute(float64(cfg.RateAuthFailPerMin), cfg.RateAuthFailPerMin)
 
 	var rdb *redis.Client
+	redisHealthy := false
 	limiterFor := func(r ratelimit.Rule, _ string) ratelimit.Checker { return ratelimit.New(r) }
 	if cfg.RedisURL != "" {
 		opts, err := redis.ParseURL(cfg.RedisURL)
@@ -108,6 +109,7 @@ func main() {
 
 			log.Printf("redis unreachable at boot (%v) — using in-memory rate limits, cache bypassed until it recovers", err)
 		} else {
+			redisHealthy = true
 			log.Printf("redis enabled (%s): shared rate limits + response cache", opts.Addr)
 		}
 		pcancel()
@@ -122,7 +124,16 @@ func main() {
 		if err != nil || len(key) != 32 {
 			log.Fatalf("MFA_SECRET_KEYS must be 64 hex chars (32 bytes)")
 		}
-		authSvc, err := adminauth.NewService(persistence.NewAdminAuthRepo(queries), key, adminauth.Config{
+		// Login challenges live in Redis (TTL-expiring, single-use). If Redis
+		// was unreachable at boot, fall back to process memory so logins keep
+		// working — challenges are then not shared across instances.
+		var challengeStore adminauth.ChallengeStore = adminauth.NewMemoryChallengeStore()
+		if rdb != nil && redisHealthy {
+			challengeStore = persistence.NewAdminAuthChallengeStore(rdb)
+		} else {
+			logger.Warn("admin auth challenges are in-memory (REDIS_URL unset or Redis down at boot); lost on restart, not shared across instances")
+		}
+		authSvc, err := adminauth.NewService(persistence.NewAdminAuthRepo(queries), challengeStore, key, adminauth.Config{
 			ChallengeTTL: cfg.MFAChallengeTTL,
 			SessionTTL:   cfg.MFASessionTTL,
 			IdleTTL:      cfg.MFASessionIdleTTL,
@@ -167,16 +178,17 @@ func main() {
 
 	// Traffic reads work even without Google config — they just return empty
 	// until the worker has synced something.
-	trafficSvc := traffic.NewService(goAuthSvc, persistence.NewTrafficRepo(queries), logger)
+	trafficSvc := traffic.NewService(goAuthSvc, persistence.NewTrafficRepo(queries, pool), logger)
 
 	router, err := infrahttp.NewRouter(pool, infrahttp.Handlers{
 		Spots:           infrahttp.NewSpotsHandler(spotsSvc),
 		Recommendations: infrahttp.NewRecommendationsHandler(recSvc),
 		Devices:         infrahttp.NewDevicesHandler(devicesSvc),
+		DeviceSvc:       devicesSvc,
 		Reports:         infrahttp.NewReportsHandler(reportsSvc),
 		Alerts:          infrahttp.NewAlertsHandler(alertsSvc),
 		Entitlement:     infrahttp.NewEntitlementHandler(entitlementSvc),
-		Admin:           infrahttp.NewAdminHandler(adminSvc, keysSvc),
+		Admin:           infrahttp.NewAdminHandler(adminSvc, keysSvc, rdb),
 		AdminAuth:       adminAuthHandler,
 		GoAuth:          goAuthHandler,
 		Traffic:         infrahttp.NewTrafficHandler(trafficSvc),
@@ -241,8 +253,16 @@ func appStoreVerifier(cfg config.Config, logger *slog.Logger) entitlement.Option
 	if cfg.AppStoreAllowSandbox {
 		logger.Warn("App Store Sandbox payloads are accepted (APPSTORE_ALLOW_SANDBOX=true); set it to false once the app is live")
 	}
+	productIDs := make(map[string]bool, len(cfg.AppStorePlusProductIDs))
+	for _, id := range cfg.AppStorePlusProductIDs {
+		productIDs[id] = true
+	}
+	if len(productIDs) == 0 {
+		logger.Warn("APPSTORE_PLUS_PRODUCT_IDS is empty: every product in the bundle can grant Plus — set it before go-live")
+	}
 	return entitlement.WithVerifier(v, entitlement.Config{
 		BundleID:     cfg.AppStoreBundleID,
 		AllowSandbox: cfg.AppStoreAllowSandbox,
+		ProductIDs:   productIDs,
 	})
 }

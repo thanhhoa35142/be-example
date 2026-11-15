@@ -133,29 +133,29 @@ func (s *Service) syncGSC(ctx context.Context, token, siteURL string, start, end
 	}
 
 	// Dimension snapshots cover the whole window (no date dimension), so
-	// clear the site/dimension before rewriting to drop vanished keys.
+	// swap the site/dimension atomically to drop vanished keys without
+	// leaving a partial window behind on failure.
 	for _, dim := range []string{"query", "page"} {
 		drows, err := s.google.SearchAnalytics(ctx, token, siteURL, []string{dim}, start, end, dimRowLimit)
 		if err != nil {
 			return written, err
 		}
-		if err := s.repo.DeleteGscDims(ctx, siteURL, dim); err != nil {
-			return written, err
-		}
+		rows := make([]GscDim, 0, len(drows))
 		for _, r := range drows {
 			if len(r.Keys) == 0 || r.Keys[0] == "" {
 				continue
 			}
-			if err := s.repo.UpsertGscDim(ctx, GscDim{
+			rows = append(rows, GscDim{
 				SiteURL: siteURL, Dimension: dim, Key: r.Keys[0],
 				Clicks: r.Clicks, Impressions: r.Impressions,
 				CTR: r.CTR, Position: r.Position,
 				PeriodStart: start, PeriodEnd: end,
-			}); err != nil {
-				return written, err
-			}
-			written++
+			})
 		}
+		if err := s.repo.ReplaceGscDims(ctx, siteURL, dim, rows); err != nil {
+			return written, err
+		}
+		written += len(rows)
 	}
 	return written, nil
 }
@@ -191,7 +191,9 @@ func (s *Service) GscDaily(ctx context.Context, days int) ([]GscDailyPoint, erro
 	return s.repo.GscDaily(ctx, since)
 }
 
-func (s *Service) GscTop(ctx context.Context, dimension string, days, limit int) ([]GscDimRow, *GscDimWindow, error) {
+// GscTop returns the latest synced dimension window; dims are stored
+// as a single rolling snapshot, so no per-day filter applies.
+func (s *Service) GscTop(ctx context.Context, dimension string, limit int) ([]GscDimRow, *GscDimWindow, error) {
 	rows, err := s.repo.GscDims(ctx, dimension, limit)
 	if err != nil {
 		return nil, nil, err

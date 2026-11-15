@@ -20,11 +20,6 @@ type Repository interface {
 	ResetTOTP(ctx context.Context, id uuid.UUID) error
 	SetDisabled(ctx context.Context, id uuid.UUID, disabled bool) error
 
-	CreateChallenge(ctx context.Context, ch Challenge) error
-	ChallengeByToken(ctx context.Context, tokenHash []byte) (*Challenge, error)
-	DeleteChallenge(ctx context.Context, tokenHash []byte) error
-	DeleteChallengesForUser(ctx context.Context, userID uuid.UUID) error
-
 	CreateSession(ctx context.Context, tokenHash []byte, userID uuid.UUID, userAgent, ip string, expiresAt time.Time) (*Session, error)
 	SessionByToken(ctx context.Context, tokenHash []byte) (*Session, *User, error)
 	TouchSession(ctx context.Context, sessionID uuid.UUID) error

@@ -23,7 +23,7 @@ func NewDevicesRepo(q *Queries, pool *pgxpool.Pool) *DevicesRepo {
 	return &DevicesRepo{q: q, pool: pool}
 }
 
-func (r *DevicesRepo) Upsert(ctx context.Context, in devices.RegisterInput) (uuid.UUID, error) {
+func (r *DevicesRepo) Upsert(ctx context.Context, in devices.RegisterInput) (devices.UpsertResult, error) {
 	prefs, err := json.Marshal(in.Prefs)
 	if err != nil || len(in.Prefs) == 0 {
 		prefs = []byte("{}")
@@ -37,40 +37,47 @@ func (r *DevicesRepo) Upsert(ctx context.Context, in devices.RegisterInput) (uui
 		AppVersion: textParam(in.AppVersion),
 		Prefs:      prefs,
 	}
+	if in.SecretHash != "" {
+		params.SecretHash = pgtype.Text{String: in.SecretHash, Valid: true}
+	}
 
 	for attempt := 0; ; attempt++ {
-		id, err := r.upsertTakingOverToken(ctx, params)
+		res, err := r.upsertTakingOverToken(ctx, params)
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			if attempt == 0 {
 				continue
 			}
-			return uuid.Nil, devices.ErrConflict
+			return devices.UpsertResult{}, devices.ErrConflict
 		}
-		return id, err
+		return res, err
 	}
 }
 
-func (r *DevicesRepo) upsertTakingOverToken(ctx context.Context, p UpsertDeviceParams) (uuid.UUID, error) {
+func (r *DevicesRepo) upsertTakingOverToken(ctx context.Context, p UpsertDeviceParams) (devices.UpsertResult, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return uuid.Nil, err
+		return devices.UpsertResult{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	q := r.q.WithTx(tx)
 	if p.ApnsToken.Valid {
 		if err := q.ReleaseAPNsToken(ctx, ReleaseAPNsTokenParams{ApnsToken: p.ApnsToken, ID: p.ID}); err != nil {
-			return uuid.Nil, err
+			return devices.UpsertResult{}, err
 		}
 	}
-	id, err := q.UpsertDevice(ctx, p)
+	row, err := q.UpsertDevice(ctx, p)
 	if err != nil {
-		return uuid.Nil, err
+		return devices.UpsertResult{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return uuid.Nil, err
+		return devices.UpsertResult{}, err
 	}
-	return id, nil
+	return devices.UpsertResult{ID: row.ID, SecretHash: row.SecretHash.String}, nil
+}
+
+func (r *DevicesRepo) SecretHash(ctx context.Context, id uuid.UUID) (string, error) {
+	return r.q.GetDeviceSecretHash(ctx, id)
 }
 
 func (r *DevicesRepo) Exists(ctx context.Context, id uuid.UUID) (bool, error) {

@@ -19,6 +19,9 @@ func (s *Service) Recommend(ctx context.Context, q Query) ([]Item, error) {
 		math.IsNaN(q.Lon) || q.Lon < -180 || q.Lon > 180 {
 		return nil, ErrInvalidQuery
 	}
+	if math.IsNaN(q.RadiusM) || math.IsInf(q.RadiusM, 0) {
+		return nil, ErrInvalidQuery
+	}
 	if q.RadiusM <= 0 {
 		q.RadiusM = DefaultRadiusM
 	}
@@ -31,6 +34,12 @@ func (s *Service) Recommend(ctx context.Context, q Query) ([]Item, error) {
 	if q.Limit > MaxLimit {
 		q.Limit = MaxLimit
 	}
+	now := time.Now().UTC()
 	q.When = q.When.UTC().Truncate(time.Hour)
+	// Bound the forecast window — scores only exist ~7 days out; anything
+	// further is an invalid query, not an empty result worth caching.
+	if q.When.Before(now.Add(-24*time.Hour)) || q.When.After(now.Add(8*24*time.Hour)) {
+		return nil, ErrInvalidQuery
+	}
 	return s.repo.Nearby(ctx, q.Lat, q.Lon, q.RadiusM, q.When, q.Limit, q.Filter)
 }

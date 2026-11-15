@@ -126,10 +126,13 @@ ORDER BY r.created_at, r.id
 LIMIT $1;
 
 -- name: UpdateSpotReportStatus :execrows
-UPDATE t_spot_reports SET status = $2 WHERE id = $1;
+-- Only pending reports can transition; the DB trigger enforces the same
+-- rule, this WHERE just turns a duplicate moderation into 0 rows instead of
+-- a trigger exception.
+UPDATE t_spot_reports SET status = $2 WHERE id = $1 AND status = 'pending';
 
 -- name: GetSpotReportTarget :one
-SELECT spot_id, type FROM t_spot_reports WHERE id = $1;
+SELECT spot_id, type, status FROM t_spot_reports WHERE id = $1;
 
 -- name: CloseSpotForReport :execrows
 -- Report-driven close: only active/pending spots move; the ingest planner
@@ -215,7 +218,10 @@ ORDER BY n DESC
 LIMIT 100;
 
 -- name: AdminEventDayCounts :many
-SELECT date_trunc('day', created_at)::timestamptz AS day, count(*) AS n
+-- Buckets are UTC midnights regardless of the session TimeZone: the inner
+-- AT TIME ZONE converts to a naive UTC timestamp, date_trunc floors it, and
+-- the outer AT TIME ZONE converts back to timestamptz.
+SELECT (date_trunc('day', created_at AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')::timestamptz AS day, count(*) AS n
 FROM t_events
 WHERE created_at >= sqlc.arg('from_ts') AND created_at < sqlc.arg('to_ts')
 GROUP BY day

@@ -9,13 +9,14 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
-	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	"github.com/thanhhoa35142/be-example/internal/infrastructure/persistence"
@@ -99,14 +100,19 @@ func main() {
 
 	poolCfg.MaxConns = 12
 
+	// Start from the shared runtime params (lock_timeout, jit=off, …) so the
+	// worker doesn't drift from the API's settings.
 	if poolCfg.ConnConfig.RuntimeParams == nil {
 		poolCfg.ConnConfig.RuntimeParams = map[string]string{}
 	}
-	if cfg.DBLockTimeout != "" {
-		poolCfg.ConnConfig.RuntimeParams["lock_timeout"] = cfg.DBLockTimeout
+	for k, v := range cfg.DBRuntimeParams() {
+		poolCfg.ConnConfig.RuntimeParams[k] = v
 	}
-	if os.Getenv("DB_STATEMENT_TIMEOUT") != "" {
-		poolCfg.ConnConfig.RuntimeParams["statement_timeout"] = cfg.DBStatementTimeout
+	// Batch jobs run heavy statements (ingest upserts, score recompute) that
+	// legitimately exceed the API's statement timeout, so the worker uses
+	// its own, larger budget.
+	if cfg.DBWorkerStatementTimeout != "" {
+		poolCfg.ConnConfig.RuntimeParams["statement_timeout"] = cfg.DBWorkerStatementTimeout
 	}
 	if cfg.DBMaxConns > 0 {
 		poolCfg.MaxConns = cfg.DBMaxConns
@@ -141,18 +147,38 @@ func main() {
 				return err
 			}
 			if rdb != nil && (dirty.data.Load() || dirty.weather.Load()) {
-				bctx, cancel := context.WithTimeout(ctx, 2*time.Second)
-				if dirty.data.Load() {
-					if err := cache.Bump(bctx, rdb); err != nil {
-						logger.Warn("cache version bump failed", "error", err)
+				// Retry once — a transient Redis blip shouldn't leave the API
+				// serving stale cached responses silently. If it still fails,
+				// fail the job so the miss is visible in t_job_runs.
+				var bumpErr error
+				for attempt := 0; attempt < 2; attempt++ {
+					bctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+					bumpErr = nil
+					if dirty.data.Load() {
+						if err := cache.Bump(bctx, rdb); err != nil {
+							bumpErr = err
+						}
+					}
+					if dirty.weather.Load() && bumpErr == nil {
+						if err := cache.BumpWeather(bctx, rdb); err != nil {
+							bumpErr = err
+						}
+					}
+					cancel()
+					if bumpErr == nil {
+						break
+					}
+					if attempt == 0 {
+						select {
+						case <-ctx.Done():
+							return ctx.Err()
+						case <-time.After(500 * time.Millisecond):
+						}
 					}
 				}
-				if dirty.weather.Load() {
-					if err := cache.BumpWeather(bctx, rdb); err != nil {
-						logger.Warn("cache weather version bump failed", "error", err)
-					}
+				if bumpErr != nil {
+					return fmt.Errorf("cache version bump failed after retry: %w", bumpErr)
 				}
-				cancel()
 			}
 			return nil
 		}
@@ -182,12 +208,12 @@ func main() {
 	default:
 		weatherProvider = weather.NewOpenMeteo(httpx.NewClient(httpx.Policy{
 			Name: "open-meteo", RatePerSec: 5, Burst: 10,
-		}))
+		}), cfg.WeatherOpenMeteoURL, cfg.WeatherOpenMeteoModels)
 	}
-	weatherSvc := weather.NewService(persistence.NewWeatherRepo(queries), weatherProvider, cfg.WeatherDailyLimit)
+	weatherSvc := weather.NewService(persistence.NewWeatherRepo(queries, pool), weatherProvider, cfg.WeatherDailyLimit)
 	crowdSvc := crowd.NewService(persistence.NewCrowdRepo(queries))
 	holidaysSvc := holidays.NewService(persistence.NewHolidaysRepo(queries))
-	adminSvc := admin.NewService(persistence.NewAdminRepo(queries))
+	adminSvc := admin.NewService(persistence.NewAdminRepo(queries, pool))
 
 	// Google traffic sync needs the OAuth link config + the sealing key.
 	// Without it the job still registers (so the schedule row resolves) but
@@ -201,7 +227,7 @@ func main() {
 				ClientSecret: cfg.GoogleClientSecret,
 				RedirectURL:  cfg.GoogleRedirectURI,
 			}); err == nil {
-				trafficSvc = traffic.NewService(goAuthSvc, persistence.NewTrafficRepo(queries), logger)
+				trafficSvc = traffic.NewService(goAuthSvc, persistence.NewTrafficRepo(queries, pool), logger)
 			} else {
 				logger.Warn("google sync disabled: goauth init failed", "error", err)
 			}
@@ -212,7 +238,7 @@ func main() {
 		logger.Info("google sync disabled: GOOGLE_* or MFA_SECRET_KEYS not configured")
 	}
 	if trafficSvc == nil {
-		trafficSvc = traffic.NewService(nil, persistence.NewTrafficRepo(queries), logger)
+		trafficSvc = traffic.NewService(nil, persistence.NewTrafficRepo(queries, pool), logger)
 	}
 	entitlementSvc := entitlement.NewService(persistence.NewEntitlementRepo(queries, pool))
 	alertsRepo := persistence.NewAlertsRepo(queries, pool)
@@ -296,10 +322,19 @@ func main() {
 			seen := map[string]bool{}
 			for _, i := range todo {
 				e := packs[i].OSMExtract
-				if e == "" || seen[e] || osmiumSrc.ArtifactsReady(e) {
+				if e == "" || seen[e] {
 					continue
 				}
 				seen[e] = true
+				if osmiumSrc.ArtifactsReady(e) {
+					// Extract already on disk (restored or placed manually)
+					// but extract_fetched_at may be NULL — record it so the
+					// pack doesn't re-ingest on every run forever.
+					if err := ingestRepo.MarkExtractFetched(ctx, e, time.Now().UTC()); err != nil {
+						failedExtract[e] = err
+					}
+					continue
+				}
 				downloaded, err := ingest.EnsureExtract(ctx, nil, cfg.IngestExtractDir, e)
 				if err == nil && downloaded {
 					err = ingestRepo.MarkExtractFetched(ctx, e, time.Now().UTC())
@@ -541,7 +576,8 @@ func main() {
 					"weather", stats.WeatherForecasts, "scores", stats.SpotScores,
 					"events", stats.Events, "crowd_reports", stats.CrowdReports,
 					"job_runs", stats.JobRuns, "deliveries", stats.AlertDeliveries,
-					"payloads_scrubbed", stats.PayloadsScrubbed)
+					"payloads_scrubbed", stats.PayloadsScrubbed,
+					"admin_sessions", stats.AdminSessions)
 				return nil
 			},
 		},
@@ -577,7 +613,9 @@ func runJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, adminS
 		executeJob(ctx, pool, logger, adminSvc, j)
 	}
 
-	interval := time.Duration(0)
+	// Fallback interval when the schedule row is missing — without it the job
+	// would run once at boot and never reschedule (timer stays nil forever).
+	interval := time.Hour
 	enabled := true
 	offset := j.initialDelay
 	if schedule, err := adminSvc.JobSchedule(ctx, j.name); err == nil {
@@ -585,7 +623,7 @@ func runJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, adminS
 		enabled = schedule.Enabled
 		offset = time.Duration(schedule.OffsetSeconds) * time.Second
 	} else {
-		logger.Warn("job schedule missing, using defaults", "job", j.name, "error", err)
+		logger.Warn("job schedule missing, using 1h fallback", "job", j.name, "error", err)
 	}
 
 	if offset > 0 {
@@ -613,19 +651,47 @@ func runJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, adminS
 		schedule, err := adminSvc.JobSchedule(ctx, j.name)
 		if err != nil {
 			logger.Error("job schedule load failed", "job", j.name, "error", err)
+			// Still arm the timer with the fallback interval — a missing row
+			// must not silently disable scheduling.
+			if timer == nil && interval > 0 {
+				timer = time.NewTimer(interval)
+				timerC = timer.C
+			}
 			return
 		}
 		enabled = schedule.Enabled
 		nextInterval := time.Duration(schedule.IntervalSeconds) * time.Second
+		if timer == nil {
+			// First successful load must always arm the timer — returning early
+			// on an unchanged interval would leave timerC nil forever and the
+			// job would never run on schedule again.
+			if nextInterval <= 0 {
+				return
+			}
+			interval = nextInterval
+			timer = time.NewTimer(interval)
+			timerC = timer.C
+			return
+		}
 		if nextInterval == interval {
 			return
 		}
 		interval = nextInterval
 		logger.Info("job schedule updated", "job", j.name, "interval", interval)
-		if timer == nil {
-			timer = time.NewTimer(interval)
-			timerC = timer.C
-		} else if resetTimer {
+		if interval <= 0 {
+			// A non-positive interval disables scheduling; disarm the timer
+			// rather than Reset(0), which would busy-loop.
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer = nil
+			timerC = nil
+			return
+		}
+		if resetTimer {
 			if !timer.Stop() {
 				select {
 				case <-timer.C:
@@ -662,15 +728,36 @@ func runJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, adminS
 	}
 }
 
-func executeJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, adminSvc *admin.Service, j job) {
+// runJobFunc invokes a job function with panic recovery: a panic becomes a
+// recorded job failure instead of crashing the whole worker process.
+func runJobFunc(ctx context.Context, fn func(context.Context) error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("job panic: %v\n%s", r, debug.Stack())
+		}
+	}()
+	return fn(ctx)
+}
+
+// executeJob runs one job under its advisory lock. It reports whether the
+// lock was acquired and the job actually ran — callers that trigger runs
+// indirectly (ingest notify) use this to re-arm instead of dropping work.
+func executeJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, adminSvc *admin.Service, j job) bool {
+	// Top-level recovery: panics in job bookkeeping (not just j.fn) must not
+	// kill the worker process. Registered first so it runs after release().
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("job panicked", "job", j.name, "panic", r, "stack", string(debug.Stack()))
+		}
+	}()
 
 	release, err := jobs.Acquire(ctx, pool, j.name)
 	if errors.Is(err, jobs.ErrLockNotAcquired) {
-		return
+		return false
 	}
 	if err != nil {
 		logger.Error("job lock failed", "job", j.name, "error", err)
-		return
+		return false
 	}
 	defer release()
 
@@ -687,7 +774,7 @@ func executeJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, ad
 	}
 	statsBag := &jobStatsBag{}
 	ctx = context.WithValue(ctx, jobStatsKey{}, statsBag)
-	jobErr := j.fn(ctx)
+	jobErr := runJobFunc(ctx, j.fn)
 	var statsJSON []byte
 	if len(statsBag.m) > 0 {
 		statsJSON, _ = json.Marshal(statsBag.m)
@@ -704,7 +791,12 @@ func executeJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, ad
 			adminSvc.RecordJobFinish(ctx, runID, "failed", nil, jobErr, statsJSON)
 		}
 	}
+	return true
 }
+
+// ingestDebounce is how long ingest notifications are coalesced before
+// triggering scoring.recompute.
+const ingestDebounce = 15 * time.Second
 
 func listenIngestDone(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, adminSvc *admin.Service, registry []job) {
 	var scoring *job
@@ -718,22 +810,76 @@ func listenIngestDone(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logg
 		return
 	}
 
-	conn, err := pool.Acquire(ctx)
-	if err != nil {
-		logger.Warn("ingest listener: acquire conn", "error", err)
-		return
-	}
-	defer conn.Release()
-	pgxConn := conn.Conn()
-	if _, err := pgxConn.Exec(ctx, "LISTEN pickhour_ingest"); err != nil {
-		logger.Warn("ingest listener: LISTEN failed", "error", err)
-		return
-	}
-	logger.Info("ingest listener ready")
+	pending := false
+	var timer *time.Timer
+	var timerC <-chan time.Time
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
 
+	// The LISTEN connection can drop on any Postgres restart or network blip.
+	// Reconnect with backoff instead of dying silently — pg_notify is not
+	// persistent, so notifications during the gap are lost, but the listener
+	// must come back.
+	backoff := time.Second
+	for ctx.Err() == nil {
+		conn, err := pool.Acquire(ctx)
+		if err != nil {
+			logger.Warn("ingest listener: acquire conn", "error", err)
+		} else {
+			pgxConn := conn.Conn()
+			if _, err := pgxConn.Exec(ctx, "LISTEN pickhour_ingest"); err != nil {
+				logger.Warn("ingest listener: LISTEN failed", "error", err)
+				conn.Release()
+			} else {
+				logger.Info("ingest listener ready")
+				backoff = time.Second
+				if listenSession(ctx, pool, pgxConn, logger, adminSvc, scoring, &pending, &timer, &timerC) {
+					conn.Release()
+					return // ctx done
+				}
+				// Connection dropped — loop reconnects after backoff.
+				conn.Release()
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(backoff):
+				}
+				backoff = min(backoff*2, 60*time.Second)
+				continue
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, 60*time.Second)
+	}
+}
+
+// listenSession consumes notifications on an established LISTEN connection
+// until it dies or ctx is canceled. It returns true when ctx ended. The
+// pending/timer state is shared across reconnects so a notification received
+// just before a disconnect still triggers a recompute after reconnecting.
+func listenSession(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	pgxConn *pgx.Conn,
+	logger *slog.Logger,
+	adminSvc *admin.Service,
+	scoring *job,
+	pending *bool,
+	timer **time.Timer,
+	timerC *<-chan time.Time,
+) bool {
 	notifyCh := make(chan struct{}, 64)
+	done := make(chan struct{})
 	go func() {
 		defer close(notifyCh)
+		defer close(done)
 		for {
 			if _, err := pgxConn.WaitForNotification(ctx); err != nil {
 				return
@@ -746,37 +892,36 @@ func listenIngestDone(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logg
 		}
 	}()
 
-	const debounce = 15 * time.Second
-	pending := false
-	var timer *time.Timer
-	var timerC <-chan time.Time
-	defer func() {
-		if timer != nil {
-			timer.Stop()
-		}
-	}()
-
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			<-done
+			return true
 		case _, ok := <-notifyCh:
 			if !ok {
-				return
+				<-done
+				return false
 			}
-			pending = true
-			if timer == nil {
-				timer = time.NewTimer(debounce)
+			*pending = true
+			if *timer == nil {
+				*timer = time.NewTimer(ingestDebounce)
 			} else {
-				timer.Reset(debounce)
+				(*timer).Reset(ingestDebounce)
 			}
-			timerC = timer.C
-		case <-timerC:
-			timerC = nil
-			if pending {
-				pending = false
+			*timerC = (*timer).C
+		case <-*timerC:
+			*timerC = nil
+			if *pending {
 				logger.Info("ingest notify received, running scoring.recompute")
-				executeJob(ctx, pool, logger, adminSvc, *scoring)
+				if executeJob(ctx, pool, logger, adminSvc, *scoring) {
+					*pending = false
+					continue
+				}
+				// Lock held (scheduled run or previous trigger still going):
+				// keep pending and retry after the debounce window instead of
+				// dropping the request and leaving scores stale.
+				*timer = time.NewTimer(ingestDebounce)
+				*timerC = (*timer).C
 			}
 		}
 	}

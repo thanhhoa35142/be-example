@@ -11,14 +11,17 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 	"github.com/thanhhoa35142/be-example/internal/modules/admin"
 	"github.com/thanhhoa35142/be-example/internal/modules/apikeys"
+	"github.com/thanhhoa35142/be-example/internal/platform/cache"
 	"github.com/thanhhoa35142/be-example/internal/platform/httpx"
 )
 
 type AdminHandler struct {
 	svc  *admin.Service
 	keys *apikeys.Service
+	rdb  *redis.Client
 }
 
 // RecordAudit implements AuditRecorder for the AdminAudit middleware.
@@ -26,8 +29,8 @@ func (h *AdminHandler) RecordAudit(ctx context.Context, e admin.AuditEvent) erro
 	return h.svc.RecordAudit(ctx, e)
 }
 
-func NewAdminHandler(svc *admin.Service, keys *apikeys.Service) *AdminHandler {
-	return &AdminHandler{svc: svc, keys: keys}
+func NewAdminHandler(svc *admin.Service, keys *apikeys.Service, rdb *redis.Client) *AdminHandler {
+	return &AdminHandler{svc: svc, keys: keys, rdb: rdb}
 }
 
 func (h *AdminHandler) Overview(c *gin.Context) {
@@ -50,6 +53,19 @@ func (h *AdminHandler) Freshness(c *gin.Context) {
 
 func (h *AdminHandler) CacheStats(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": DefaultCacheStats.Snapshot()})
+}
+
+// RefreshCache bumps the admin aggregate cache version so the next read of
+// /overview, /metrics and /events recomputes instead of serving Redis.
+// No-op when Redis is not configured (nothing is cached then anyway).
+func (h *AdminHandler) RefreshCache(c *gin.Context) {
+	if h.rdb != nil {
+		if err := cache.BumpAdminAgg(c.Request.Context(), h.rdb); err != nil {
+			httpx.WriteError(c, err)
+			return
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"ok": true}})
 }
 
 func parseFilter(c *gin.Context) (admin.MetricsFilter, error) {
@@ -295,6 +311,8 @@ func (h *AdminHandler) ModerateReport(c *gin.Context) {
 			httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Invalid status", "expected accepted or rejected")
 		case errors.Is(err, admin.ErrReportNotFound):
 			httpx.WriteProblem(c, http.StatusNotFound, httpx.CodeNotFound, "Report not found", "")
+		case errors.Is(err, admin.ErrReportConflict):
+			httpx.WriteProblem(c, http.StatusConflict, httpx.CodeConflict, "Report already moderated", "")
 		default:
 			httpx.WriteError(c, err)
 		}

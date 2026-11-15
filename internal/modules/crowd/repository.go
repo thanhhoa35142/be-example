@@ -53,7 +53,9 @@ type Repository interface {
 
 	UpsertCommunity(ctx context.Context, spotID uuid.UUID, dow, hour, level, nReports int) error
 
-	DeleteStaleCommunity(ctx context.Context) (int64, error)
+	// DeleteStaleCommunity removes community estimates not refreshed since
+	// runStart — i.e. slots that dropped out of the current aggregate.
+	DeleteStaleCommunity(ctx context.Context, runStart time.Time) (int64, error)
 }
 
 type CommunitySlot struct {

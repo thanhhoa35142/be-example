@@ -327,14 +327,14 @@ func TestAdminAuthSessionCookie(t *testing.T) {
 
 func TestAdminCSRF(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	build := func(origins []string) *gin.Engine {
+	build := func(origins, proxies []string) *gin.Engine {
 		r := gin.New()
-		r.Use(RequestID(), AdminCSRF(origins))
+		r.Use(RequestID(), AdminCSRF(origins, proxies))
 		r.POST("/x", ok)
 		r.GET("/x", ok)
 		return r
 	}
-	r := build(nil)
+	r := build(nil, nil)
 
 	if w := do(r, "GET", "/x", "1.1.1.1", nil, ""); w.Code != 200 {
 		t.Fatalf("GET: %d", w.Code)
@@ -354,22 +354,43 @@ func TestAdminCSRF(t *testing.T) {
 		t.Fatalf("no origin: %d", w.Code)
 	}
 
+	// X-Forwarded-Host is only honored when the peer is a trusted proxy;
+	// from an untrusted peer the Origin must match the allowlist directly.
 	if w := do(r, "POST", "/x", "1.1.1.1", map[string]string{
 		AdminCSRFHeader: "1", "Origin": "https://admin.example.com", "X-Forwarded-Host": "admin.example.com",
-	}, ""); w.Code != 200 {
-		t.Fatalf("xfh origin: %d %s", w.Code, w.Body)
+	}, ""); w.Code != 403 {
+		t.Fatalf("xfh from untrusted peer should be ignored: %d", w.Code)
 	}
 
-	if w := do(r, "POST", "/x", "1.1.1.1", map[string]string{
+	r3 := build([]string{"https://admin.example.com"}, []string{"1.1.1.1"})
+	if w := do(r3, "POST", "/x", "1.1.1.1", map[string]string{
+		AdminCSRFHeader: "1", "Origin": "https://admin.example.com", "X-Forwarded-Host": "admin.example.com",
+	}, ""); w.Code != 200 {
+		t.Fatalf("xfh origin via trusted proxy: %d %s", w.Code, w.Body)
+	}
+	// XFH not in the allowlist must not smuggle an Origin through, even from
+	// a trusted proxy peer.
+	if w := do(r3, "POST", "/x", "1.1.1.1", map[string]string{
+		AdminCSRFHeader: "1", "Origin": "https://evil.example.com", "X-Forwarded-Host": "evil.example.com",
+	}, ""); w.Code != 403 {
+		t.Fatalf("unlisted xfh via trusted proxy should be rejected: %d", w.Code)
+	}
+	if w := do(r3, "POST", "/x", "1.1.1.1", map[string]string{
 		AdminCSRFHeader: "1", "Origin": "https://evil.example.com", "X-Forwarded-Host": "admin.example.com",
 	}, ""); w.Code != 403 {
-		t.Fatalf("evil origin: %d", w.Code)
+		t.Fatalf("evil origin via trusted proxy: %d", w.Code)
 	}
 
-	r2 := build([]string{"https://ops.example.com"})
+	r2 := build([]string{"https://ops.example.com"}, nil)
 	if w := do(r2, "POST", "/x", "1.1.1.1", map[string]string{
 		AdminCSRFHeader: "1", "Origin": "https://ops.example.com",
 	}, ""); w.Code != 200 {
 		t.Fatalf("allowlisted origin: %d", w.Code)
+	}
+	// Scheme downgrade: http:// must not pass an https:// allowlist entry.
+	if w := do(r2, "POST", "/x", "1.1.1.1", map[string]string{
+		AdminCSRFHeader: "1", "Origin": "http://ops.example.com",
+	}, ""); w.Code != 403 {
+		t.Fatalf("scheme downgrade should be rejected: %d", w.Code)
 	}
 }

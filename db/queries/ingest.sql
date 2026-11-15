@@ -196,7 +196,9 @@ FROM (SELECT unnest(@spot_ids::uuid[])       AS spot_id,
              unnest(@content_hashes::text[]) AS content_hash) u
 ON CONFLICT (source, source_id) DO UPDATE SET
     spot_id = EXCLUDED.spot_id,
-    version = EXCLUDED.version,
+    -- Osmium features carry no OSM version (NULLIF(0,0) -> NULL); keep the
+    -- last known version instead of erasing Overpass-sourced provenance.
+    version = COALESCE(EXCLUDED.version, t_spot_sources.version),
     via = EXCLUDED.via,
     content_hash = COALESCE(EXCLUDED.content_hash, t_spot_sources.content_hash),
     last_seen_at = now(),
