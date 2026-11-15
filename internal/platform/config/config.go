@@ -107,7 +107,7 @@ func Load() (Config, error) {
 		// OPEN_METEO_URL points at a self-hosted instance for the Actions
 		// weather-refresh job; OPEN_METEO_MODELS selects the model set
 		// (e.g. "gfs_global" — required there since best_match needs the
-		// full domain set). Empty models keeps public-API behaviour.
+		// full domain set). Empty models keeps public-API behavior.
 		WeatherOpenMeteoURL:    getEnv("OPEN_METEO_URL", ""),
 		WeatherOpenMeteoModels: getEnv("OPEN_METEO_MODELS", ""),
 		RunMigrations:     getEnv("RUN_MIGRATIONS", "true") != "false",
