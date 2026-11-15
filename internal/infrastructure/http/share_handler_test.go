@@ -31,7 +31,7 @@ func TestAppleAppSiteAssociation(t *testing.T) {
 	if w.Code != http.StatusOK || !strings.HasPrefix(w.Header().Get("Content-Type"), "application/json") {
 		t.Fatalf("configured: got %d %q", w.Code, w.Header().Get("Content-Type"))
 	}
-	for _, want := range []string{`"TEAM123456.app.example"`, `"/s/*"`} {
+	for _, want := range []string{`"TEAM123456.app.example"`, `"/s/*"`, `"/p/*"`} {
 		if !strings.Contains(w.Body.String(), want) {
 			t.Errorf("body missing %s: %s", want, w.Body.String())
 		}

@@ -103,6 +103,7 @@ func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error
 
 	if h.Share != nil {
 		r.GET("/s/:id", h.Share.Spot)
+		r.GET("/p/:token", tokenLimit, h.Share.PlanPage)
 		r.GET("/.well-known/apple-app-site-association", h.Share.AppleAppSiteAssociation)
 	}
 

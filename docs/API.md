@@ -236,7 +236,8 @@ Merged spot → `301` with `Location: /v1/spots/{newId}` — follow it.
 | route | notes |
 |---|---|
 | `GET /s/{spotId}` | Public HTML page for a shared spot: name, current score, "Open in Pickhour" (`pickhour://spot/{id}`), optional "Get the App", Apple Maps directions. `301` to the new id for a merged spot, `404` page for an unknown one. The app shares `https://<share host>/s/{spotId}`; the host must route `/s/*` and `/.well-known/*` to this API. Optional `?at=<RFC3339>` (a planned picnic, see below) |
-| `GET /.well-known/apple-app-site-association` | JSON claiming `/s/*` for the app ids in `APPLE_APP_IDS` (`<TeamID>.<bundle id>`, comma-separated). `404` while that variable is empty. Must be served over HTTPS without redirects |
+| `GET /p/{shareToken}` | Public HTML page for a shared plan (C2), see "Plan page" below |
+| `GET /.well-known/apple-app-site-association` | JSON claiming `/s/*` and `/p/*` for the app ids in `APPLE_APP_IDS` (`<TeamID>.<bundle id>`, comma-separated). `404` while that variable is empty. Must be served over HTTPS without redirects |
 
 `APPSTORE_APP_ID` (numeric) adds the "Get the App" link and the Safari smart banner.
 
@@ -248,6 +249,8 @@ Merged spot → `301` with `Location: /v1/spots/{newId}` — follow it.
 - "Open in Pickhour" becomes `pickhour://spot/{id}?at=2026-11-21T15%3A00%3A00Z` (query-encoded; decode with `URLComponents.queryItems`).
 - Merged spot: `301` to `/s/{newId}?at=<canonical>` (an invalid `at` is dropped).
 - If no score exists for that hour (e.g. scoring has not run), the page shows place and time without a score.
+
+**Plan page: `GET /p/{shareToken}`.** One plan window: place, the planned date and `HH:MM–HH:MM` window in the plan's `tz`, the live window score (mean of its hourly scores) and up to 3 reasons of its lowest hour, plus "Open Pickhour to see better times" when the plan is `worse` or `bad`. Nothing about the owner or followers, no alternative. `Cache-Control: private, max-age=60`, `X-Robots-Tag: noindex, nofollow`, `<meta name="robots" content="noindex">`, `Referrer-Policy: no-referrer`, `<link rel="canonical" href="/p/{token}">`. "Open in Pickhour" is `pickhour://plan/{token}`; the universal link is `https://<share host>/p/{token}` (the host must route `/p/*` too). Unknown, malformed, canceled and ended tokens all get the same `404` page. Per-IP token limit 30/min burst 10 (shared with the other token routes).
 
 ### `GET /v1/spots/{id}/forecast`
 

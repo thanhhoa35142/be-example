@@ -201,6 +201,7 @@ func main() {
 		Share: infrahttp.NewShareHandler(spotsSvc, infrahttp.ShareOptions{
 			AppleAppIDs:   cfg.AppleAppIDs,
 			AppStoreAppID: cfg.AppStoreAppID,
+			Plans:         plansSvc,
 		}),
 	}, infrahttp.Options{
 		TrustedProxies:      cfg.TrustedProxies,
