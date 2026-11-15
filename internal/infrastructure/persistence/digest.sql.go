@@ -167,13 +167,14 @@ func (q *Queries) ListDigestScores(ctx context.Context, arg ListDigestScoresPara
 }
 
 const listDigestSpots = `-- name: ListDigestSpots :many
-SELECT id, name, tz FROM t_spots
+SELECT id, name, kind, tz FROM t_spots
 WHERE id = ANY($1::uuid[]) AND status = 'active'
 `
 
 type ListDigestSpotsRow struct {
 	ID   uuid.UUID   `json:"id"`
 	Name pgtype.Text `json:"name"`
+	Kind string      `json:"kind"`
 	Tz   string      `json:"tz"`
 }
 
@@ -186,7 +187,12 @@ func (q *Queries) ListDigestSpots(ctx context.Context, ids []uuid.UUID) ([]ListD
 	items := []ListDigestSpotsRow{}
 	for rows.Next() {
 		var i ListDigestSpotsRow
-		if err := rows.Scan(&i.ID, &i.Name, &i.Tz); err != nil {
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Kind,
+			&i.Tz,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

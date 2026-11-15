@@ -232,6 +232,7 @@ func (s *Service) best(ctx context.Context, log *slog.Logger, c Candidate, today
 					DeviceID:    c.DeviceID,
 					SpotID:      id,
 					SpotName:    sp.Name,
+					SpotKind:    sp.Kind,
 					SpotTZ:      sp.TZ,
 					WindowStart: w.Start.UTC(),
 					WindowEnd:   w.End.UTC(),

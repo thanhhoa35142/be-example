@@ -3,6 +3,7 @@ package notifier
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -29,48 +30,47 @@ func NewSender(logger *slog.Logger, tokens TokenProvider, client *Client) *Sende
 }
 
 func (s *Sender) Send(ctx context.Context, d alerts.Delivery) error {
-	token, env, locale, ok, err := s.tokens.DeviceAPNsToken(ctx, d.DeviceID)
+	body, err := json.Marshal(buildPayload(d))
+	if err != nil {
+		return err
+	}
+	return s.push(ctx, d.DeviceID, d.RuleID.String(), kindAlertWindow, body)
+}
+
+// push delivers one encoded payload to a device. Errors follow the alerts
+// contract: ErrNoPushToken when the device has no active token,
+// ErrPushTokenDead on APNs 410 (the device is marked unregistered first).
+func (s *Sender) push(ctx context.Context, deviceID uuid.UUID, collapseID, kind string, body []byte) error {
+	token, env, _, ok, err := s.tokens.DeviceAPNsToken(ctx, deviceID)
 	if err != nil {
 		return err
 	}
 	if !ok {
 		return alerts.ErrNoPushToken
 	}
-
-	payload := buildPayload(d, locale)
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-
 	if s.client == nil {
-		s.logger.InfoContext(ctx, "alert push (APNs not configured)",
-			"rule", d.RuleID, "device", d.DeviceID,
-			"spot", d.SpotName, "score", d.Score,
-			"payload", string(body))
+		s.logger.InfoContext(ctx, "push (APNs not configured)",
+			"kind", kind, "device", deviceID, "payload", string(body))
 		return nil
 	}
 
-	status, err := s.client.Send(ctx, token, env, d.RuleID.String(), body)
+	status, err := s.client.Send(ctx, token, env, collapseID, body)
 	if status == http.StatusGone {
-
 		if u, ok := s.tokens.(Unregisterer); ok {
-			if uerr := u.MarkDeviceUnregistered(ctx, d.DeviceID); uerr != nil {
+			if uerr := u.MarkDeviceUnregistered(ctx, deviceID); uerr != nil {
 				s.logger.ErrorContext(ctx, "device unregister failed",
-					"device", d.DeviceID, "error", uerr)
+					"device", deviceID, "error", uerr)
 			}
 		}
 		s.logger.InfoContext(ctx, "apns token unregistered (410)",
-			"rule", d.RuleID, "device", d.DeviceID)
+			"kind", kind, "device", deviceID)
 		return alerts.ErrPushTokenDead
 	}
 	if err != nil {
 		s.logger.ErrorContext(ctx, "apns send failed",
-			"rule", d.RuleID, "device", d.DeviceID,
-			"status", status, "error", err)
-		return err
+			"kind", kind, "device", deviceID, "status", status, "error", err)
+		return fmt.Errorf("apns status %d: %w", status, err)
 	}
-	s.logger.InfoContext(ctx, "alert pushed",
-		"rule", d.RuleID, "device", d.DeviceID, "status", status)
+	s.logger.InfoContext(ctx, "pushed", "kind", kind, "device", deviceID, "status", status)
 	return nil
 }

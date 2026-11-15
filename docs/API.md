@@ -522,7 +522,7 @@ When a rule fires, the notifier sends an APNs alert (`apns-push-type: alert`, pr
 
 ```json
 {
-  "aps": {"alert": {"title": "Good window for a picnic", "body": "Vondelpark scores 87 — perfect timing to head out."}, "sound": "default"},
+  "aps": {"alert": {"title-loc-key": "SPOT_NAMED", "title-loc-args": ["Vondelpark"], "loc-key": "ALERT_WINDOW", "loc-args": ["87"]}, "sound": "default"},
   "kind": "alert.window",
   "spotId": "<uuid>",
   "ruleId": "<uuid>",
@@ -531,7 +531,7 @@ When a rule fires, the notifier sends an APNs alert (`apns-push-type: alert`, pr
 }
 ```
 
-- `aps.alert.title`/`body` are localized server-side from `device.locale` (en/nl; fallback en).
+- `aps.alert` carries **localization keys only** (`title-loc-key`, `loc-key`, optional `subtitle-loc-key`) and language-neutral `*-loc-args`; the app's Localizable strings hold every sentence and the server writes no text in any language. Key catalog, English reference text and full payloads per kind: [`PUSH_KEYS.md`](PUSH_KEYS.md).
 - Custom keys are top-level next to `aps` (APNs requirement) and surface in iOS `userInfo`.
 - The app routes taps on `kind == "alert.window"` + `spotId` to spot detail. Unknown `kind` values must be ignored.
 - Devices without `apnsToken` are skipped (delivery stays unrecorded, not a failure).
@@ -575,7 +575,7 @@ Sent by worker job `digest.weekly` through the same APNs client as alerts (colla
 
 ```json
 {
-  "aps": {"alert": {"title": "Your weekend picnic", "body": "Saturday 2–5 PM at Vondelpark looks best (88)."}, "sound": "default"},
+  "aps": {"alert": {"title-loc-key": "SPOT_NAMED", "title-loc-args": ["Vondelpark"], "subtitle-loc-key": "DIGEST_WHEN_SATURDAY", "subtitle-loc-args": ["14:00", "17:00"], "loc-key": "DIGEST_BODY", "loc-args": ["88"]}, "sound": "default"},
   "kind": "digest.weekend",
   "spotId": "<uuid>",
   "windowStart": "2026-11-21T13:00:00Z",
@@ -585,7 +585,7 @@ Sent by worker job `digest.weekly` through the same APNs client as alerts (colla
 ```
 
 - Window search: the coming Saturday and Sunday (device-local dates; on a Sunday only that day), 08:00–20:00 in **each spot's own timezone**, per spot the best contiguous run of 2–4 hours where every hourly score is ≥ 60 (`t_spot_scores`), ranked by mean score (ties: longer, then earlier). The single best (spot, day, window) wins; `score` is the rounded mean. If nothing qualifies, no push is sent.
-- Text is rendered in the spot's local time, 12h for `en` ("Saturday 2–5 PM at …"), 24h for `nl` ("Zaterdag 14–17 uur bij … ziet er het best uit (88)."); locale from `device.locale`, fallback `en`. Custom keys are top-level next to `aps`. The app routes taps on `kind == "digest.weekend"` + `spotId` to spot detail.
+- Localization keys only ([`PUSH_KEYS.md`](PUSH_KEYS.md)): the day is the key variant (`DIGEST_WHEN_SATURDAY` / `DIGEST_WHEN_SUNDAY`), the window is two 24-hour `HH:MM` args in the **spot's** timezone. Custom keys are top-level next to `aps`. The app routes taps on `kind == "digest.weekend"` + `spotId` to spot detail.
 - Idempotent: at most one send (or silent skip) per device per local date. A transient APNs failure releases the slot so the next hourly run retries inside the same local hour.
 
 ## Entitlement (Free / Plus)

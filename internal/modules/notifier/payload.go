@@ -1,8 +1,6 @@
 package notifier
 
 import (
-	"fmt"
-
 	"github.com/thanhhoa35142/be-example/internal/modules/alerts"
 )
 
@@ -18,55 +16,38 @@ type Payload struct {
 type APSBody struct {
 	Alert AlertContent `json:"alert"`
 	Sound string       `json:"sound"`
+	// ThreadID groups notifications in Notification Center (one per plan).
+	ThreadID string `json:"thread-id,omitempty"`
 }
 
+// AlertContent is an APNs alert made only of localization keys and
+// language-neutral arguments; the app resolves every key from its own
+// Localizable strings (docs/PUSH_KEYS.md). The server writes no sentence.
 type AlertContent struct {
-	Title string `json:"title"`
-	Body  string `json:"body"`
+	TitleLocKey     string   `json:"title-loc-key"`
+	TitleLocArgs    []string `json:"title-loc-args,omitempty"`
+	SubtitleLocKey  string   `json:"subtitle-loc-key,omitempty"`
+	SubtitleLocArgs []string `json:"subtitle-loc-args,omitempty"`
+	LocKey          string   `json:"loc-key"`
+	LocArgs         []string `json:"loc-args,omitempty"`
 }
 
-func buildPayload(d alerts.Delivery, locale string) Payload {
-	title, body := alertCopy(locale, d)
+const kindAlertWindow = "alert.window"
+
+func buildPayload(d alerts.Delivery) Payload {
+	titleKey, titleArgs := spotTitle(d.SpotName, d.SpotKind)
 	return Payload{
 		APS: APSBody{
-			Alert: AlertContent{Title: title, Body: body},
+			Alert: AlertContent{
+				TitleLocKey: titleKey, TitleLocArgs: titleArgs,
+				LocKey: KeyAlertWindow, LocArgs: []string{itoa(d.Score)},
+			},
 			Sound: "default",
 		},
-		Kind:        "alert.window",
+		Kind:        kindAlertWindow,
 		SpotID:      d.SpotID.String(),
 		RuleID:      d.RuleID.String(),
 		Score:       d.Score,
-		WindowStart: d.WindowStart.UTC().Format("2006-01-02T15:04:05Z07:00"),
+		WindowStart: d.WindowStart.UTC().Format(rfc3339),
 	}
-}
-
-func alertCopy(locale string, d alerts.Delivery) (title, body string) {
-	switch baseLang(locale) {
-	case "nl":
-		return "Goed moment voor een picknick",
-			fmt.Sprintf("%s scoort %d — perfect moment om op pad te gaan.", d.SpotName, d.Score)
-	default:
-		return "Good window for a picnic",
-			fmt.Sprintf("%s scores %d — perfect timing to head out.", d.SpotName, d.Score)
-	}
-}
-
-func baseLang(locale string) string {
-	for i, r := range locale {
-		if r == '-' || r == '_' {
-			locale = locale[:i]
-			break
-		}
-	}
-	if locale == "" {
-		return "en"
-	}
-
-	b := []byte(locale)
-	for i, c := range b {
-		if c >= 'A' && c <= 'Z' {
-			b[i] = c + 32
-		}
-	}
-	return string(b)
 }

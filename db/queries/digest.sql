@@ -53,7 +53,7 @@ SET last_sent_on = sqlc.narg(prev)::date
 WHERE device_id = sqlc.arg(device_id) AND last_sent_on = sqlc.arg(local_date)::date;
 
 -- name: ListDigestSpots :many
-SELECT id, name, tz FROM t_spots
+SELECT id, name, kind, tz FROM t_spots
 WHERE id = ANY(sqlc.arg(ids)::uuid[]) AND status = 'active';
 
 -- name: ListDigestScores :many

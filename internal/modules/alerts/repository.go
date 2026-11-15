@@ -10,6 +10,7 @@ import (
 type ScoredSpot struct {
 	ID    uuid.UUID
 	Name  string
+	Kind  string
 	Score int
 }
 

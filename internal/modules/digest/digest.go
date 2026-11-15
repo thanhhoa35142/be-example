@@ -47,6 +47,7 @@ type Candidate struct {
 type SpotInfo struct {
 	ID   uuid.UUID
 	Name string
+	Kind string
 	TZ   string
 }
 
@@ -65,6 +66,7 @@ type Delivery struct {
 	DeviceID    uuid.UUID
 	SpotID      uuid.UUID
 	SpotName    string
+	SpotKind    string
 	SpotTZ      string
 	WindowStart time.Time
 	WindowEnd   time.Time

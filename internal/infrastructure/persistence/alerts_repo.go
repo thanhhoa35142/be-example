@@ -206,6 +206,7 @@ func (r *AlertsRepo) SpotScoreAt(ctx context.Context, spotID uuid.UUID, tsHour t
 	return &alerts.ScoredSpot{
 		ID:    row.ID,
 		Name:  row.Name.String,
+		Kind:  row.Kind,
 		Score: int(row.Score),
 	}, nil
 }
@@ -226,6 +227,7 @@ func (r *AlertsRepo) BestScoredSpotNear(ctx context.Context, lat, lon float64, r
 	return &alerts.Delivery{
 		SpotID:   row.ID,
 		SpotName: row.Name.String,
+		SpotKind: row.Kind,
 		Score:    int(row.Score),
 	}, nil
 }

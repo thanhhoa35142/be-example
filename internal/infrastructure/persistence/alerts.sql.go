@@ -14,7 +14,7 @@ import (
 )
 
 const bestScoredSpotNear = `-- name: BestScoredSpotNear :one
-SELECT s.id, s.name, ss.score
+SELECT s.id, s.name, s.kind, ss.score
 FROM t_spots s
 JOIN t_spot_scores ss ON ss.spot_id = s.id AND ss.ts_hour = $1
 WHERE s.status = 'active'
@@ -36,6 +36,7 @@ type BestScoredSpotNearParams struct {
 type BestScoredSpotNearRow struct {
 	ID    uuid.UUID   `json:"id"`
 	Name  pgtype.Text `json:"name"`
+	Kind  string      `json:"kind"`
 	Score int16       `json:"score"`
 }
 
@@ -49,7 +50,12 @@ func (q *Queries) BestScoredSpotNear(ctx context.Context, arg BestScoredSpotNear
 		arg.RadiusM,
 	)
 	var i BestScoredSpotNearRow
-	err := row.Scan(&i.ID, &i.Name, &i.Score)
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Kind,
+		&i.Score,
+	)
 	return i, err
 }
 
@@ -390,7 +396,7 @@ func (q *Queries) ReclaimFailedDelivery(ctx context.Context, arg ReclaimFailedDe
 }
 
 const spotScoreAt = `-- name: SpotScoreAt :one
-SELECT s.id, s.name, ss.score
+SELECT s.id, s.name, s.kind, ss.score
 FROM t_spots s
 JOIN t_spot_scores ss ON ss.spot_id = s.id AND ss.ts_hour = $2
 WHERE s.id = $1
@@ -404,13 +410,19 @@ type SpotScoreAtParams struct {
 type SpotScoreAtRow struct {
 	ID    uuid.UUID   `json:"id"`
 	Name  pgtype.Text `json:"name"`
+	Kind  string      `json:"kind"`
 	Score int16       `json:"score"`
 }
 
 func (q *Queries) SpotScoreAt(ctx context.Context, arg SpotScoreAtParams) (SpotScoreAtRow, error) {
 	row := q.db.QueryRow(ctx, spotScoreAt, arg.ID, arg.TsHour)
 	var i SpotScoreAtRow
-	err := row.Scan(&i.ID, &i.Name, &i.Score)
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Kind,
+		&i.Score,
+	)
 	return i, err
 }
 
