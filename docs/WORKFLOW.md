@@ -26,7 +26,6 @@ Ba repo **độc lập hoàn toàn**, không submodule:
   go run ./cmd/api      # :8080
   go run ./cmd/worker   # scheduled jobs
   go run ./cmd/mcp      # :8081/mcp
-  go run ./cmd/keyctl   # CLI quản lý API keys
   ```
 - Postgres/PostGIS chạy qua docker compose **chỉ phần db**
   (`docker compose up -d db`) hoặc container `picnic-postgres` sẵn có.

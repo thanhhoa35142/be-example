@@ -4,7 +4,7 @@
 # (musl) so the dynamically-linked binary matches the runtime libc.
 #
 # Targets:
-#   (default)      alpine runtime: api, worker, mcp, migrate, keyctl
+#   (default)      alpine runtime: api, worker, mcp, migrate
 #   --target worker  debian runtime with osmium-tool for the OSM ingest
 #                  (INGEST_SOURCE=osmium). Alpine has no osmium-tool
 #                  package, so the worker is built against glibc instead.
@@ -19,8 +19,7 @@ COPY . .
 RUN CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o /out/api ./cmd/api \
  && CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o /out/worker ./cmd/worker \
  && CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o /out/mcp ./cmd/mcp \
- && CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o /out/migrate ./cmd/migrate \
- && CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o /out/keyctl ./cmd/keyctl
+ && CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o /out/migrate ./cmd/migrate
 
 # ---- worker (glibc + osmium-tool) ----------------------------------------
 FROM golang:1.26-bookworm AS build-worker

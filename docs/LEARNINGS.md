@@ -10,7 +10,7 @@ Mỗi section gồm: bài toán → cách làm → gotcha gặp phải → patte
 ### Bài toán
 
 Một repo Go chứa nhiều entrypoint (`cmd/api`, `cmd/worker`, `cmd/mcp`,
-`cmd/migrate`, `cmd/keyctl`) cần deploy thành **các container riêng biệt** —
+`cmd/migrate`) cần deploy thành **các container riêng biệt** —
 không gom nhiều process vào 1 container.
 
 ### Cách làm
@@ -131,14 +131,11 @@ Eval: request `(resource, action)` → có deny match nào không? Có → rejec
 Không → cần ≥1 allow match. Unit test bắt buộc cover: deny-wins, wildcard
 từng field, không có allow → reject.
 
-### CLI quản lý (`cmd/keyctl`)
+### Quản lý keys
 
-```bash
-keyctl create --name ops-agent --grant spots:read
-keyctl list
-keyctl grant add <id> recommendations:read
-keyctl revoke <id>
-```
+Keys được quản qua admin API `/v1/admin/api-keys` (xem `docs/API.md`) —
+bearer `MFA_SECRET_KEYS_CLI` cho scripts/CI hoặc session console. Không
+có CLI riêng; mọi thao tác đi qua endpoint đã audit.
 
 ---
 
@@ -214,7 +211,6 @@ cmd/api     → Gin HTTP :8080        (scale ngang thoải mái)
 cmd/worker  → scheduled jobs        (1 replica khuyến nghị)
 cmd/mcp     → MCP Streamable HTTP   :8081/mcp
 cmd/migrate → migrations 1 lần      (compose one-shot)
-cmd/keyctl  → CLI quản lý keys      (không deploy)
 ```
 
 - **Parallel 2 tầng**: process-level (3 services riêng, pool DB riêng) +

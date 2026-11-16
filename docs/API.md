@@ -681,15 +681,23 @@ Without `by`, items are `{value, count, devices}` and the `by` field is omitted 
 
 Keys live in `api_key` + `api_key_grant` tables. A grant is `(effect, resource, action)` where each field may be `*`; evaluation is **deny-wins**: any matching deny rejects, otherwise at least one matching allow is required. Secrets are `phk_` + 32 random bytes (base64url); only the SHA-256 hash and a display prefix are stored — the raw secret is shown once at creation.
 
-Manage keys with the staff CLI:
+Manage keys through the admin API (bearer `MFA_SECRET_KEYS_CLI` for scripts/CI, or the console session):
 
 ```bash
-go run ./cmd/keyctl create --name "ops-agent" --grant spots:read --grant recommendations:read
-# prints the secret ONCE
-go run ./cmd/keyctl list
-keyctl revoke <id>
-keyctl grant add <id> spots:read     # allow grant
-keyctl grant rm  <id> spots:read
+API=http://localhost:8080
+TOK=$MFA_SECRET_KEYS_CLI   # or a logged-in admin session cookie
+
+# create — secret is returned ONCE in data.secret
+curl -X POST $API/v1/admin/api-keys -H "Authorization: Bearer $TOK" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"ops-agent","grants":[{"effect":"allow","resource":"ops","action":"read"},{"effect":"allow","resource":"db","action":"read"}]}'
+
+curl $API/v1/admin/api-keys -H "Authorization: Bearer $TOK"                  # list with grants
+curl -X POST $API/v1/admin/api-keys/$ID/revoke -H "Authorization: Bearer $TOK"               # revoke
+curl -X POST $API/v1/admin/api-keys/$ID/grants -H "Authorization: Bearer $TOK" \
+  -d '{"effect":"allow","resource":"spots","action":"read"}' # add grant
+curl -X DELETE $API/v1/admin/api-keys/$ID/grants -H "Authorization: Bearer $TOK" \
+  -d '{"effect":"allow","resource":"spots","action":"read"}' # remove grant
 ```
 
 Key fields: `expires_at` (optional TTL), `revoked_at`, `last_used_at` (stamped async on each auth), `rate_limit_rps` (stored; enforcement planned).
