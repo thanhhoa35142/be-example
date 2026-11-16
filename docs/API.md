@@ -702,6 +702,23 @@ Key fields: `expires_at` (optional TTL), `revoked_at`, `last_used_at` (stamped a
 | `spot_get` | `spots:read` | Spot detail: names, amenities, sources |
 | `spot_forecast` | `spots:read` | Hourly 0–100 forecast, 7 days |
 | `recommend_spots` | `recommendations:read` | Ranked spots near lat/lon |
+| `job_status` | `ops:read` | Recent `t_job_runs` (filter `job`, `status`, `limit`) + job schedules (interval, enabled, pending run request) |
+| `data_freshness` | `ops:read` | Last weather/score/crowd timestamps + overview counters (active spots, fresh scores, devices, pending reports) |
+| `pack_health` | `ops:read` | Per-pack status/counts/last import; `slug` arg returns full pack detail (pending reports, spot breakdown, ingest roles, recent runs) |
+| `db_query` | `db:read` | Single read-only `SELECT`/`WITH` via the restricted `mcp_ro` role (see below); `maxRows` cap 1000 |
+
+### db_query (restricted SQL)
+
+`db_query` is only registered when `MCP_RO_DATABASE_URL` is set, and it connects as the dedicated Postgres role `mcp_ro` — enforcement is at the database, not in Go: the role has `SELECT` on an explicit table allowlist (packs, spots, scores, weather, crowd, reports, job runs, schedules, quotas, holidays, ingest features) and `default_transaction_read_only=on`. Secrets/user tables (`t_api_keys`, `t_devices`, `t_admin_*`, notifications, digests) are not granted; new tables stay invisible until added to `db/mcp-ro.sql` and re-run.
+
+Setup once per database:
+
+```bash
+MCP_RO_PASSWORD='...' psql "$DATABASE_URL" -v ro_password="$MCP_RO_PASSWORD" -f db/mcp-ro.sql
+# then set MCP_RO_DATABASE_URL=postgres://mcp_ro:<pw>@host:port/db?sslmode=disable
+```
+
+The Go side additionally requires the statement to start with `SELECT`/`WITH` and caps it at 8 KB; pgx's extended protocol rejects multi-statements. Results are capped at `maxRows` (default 200, max 1000) with `truncated: true` when hit.
 
 Example client config (streamable HTTP + bearer):
 

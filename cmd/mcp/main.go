@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/thanhhoa35142/be-example/internal/infrastructure/persistence"
+	"github.com/thanhhoa35142/be-example/internal/modules/admin"
 	"github.com/thanhhoa35142/be-example/internal/modules/apikeys"
 	"github.com/thanhhoa35142/be-example/internal/modules/recommendations"
 	"github.com/thanhhoa35142/be-example/internal/modules/spots"
@@ -47,12 +48,32 @@ func main() {
 	spotsSvc := spots.NewService(persistence.NewSpotsRepository(queries))
 	recSvc := recommendations.NewService(persistence.NewRecommendationsRepo(queries))
 	keysSvc := apikeys.NewService(persistence.NewAPIKeysRepo(queries, pool))
+	adminSvc := admin.NewService(persistence.NewAdminRepo(queries, pool))
 
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "pickhour",
 		Version: "0.1.0",
 	}, nil)
 	registerTools(server, spotsSvc, recSvc, keysSvc)
+	registerOpsTools(server, adminSvc, keysSvc)
+
+	if cfg.MCPRODatabaseURL != "" {
+		roPool, err := persistence.NewPool(ctx, cfg.MCPRODatabaseURL, map[string]string{
+			"statement_timeout": "30s",
+			"jit":               "off",
+		}, 4)
+		if err != nil {
+			log.Printf("mcp db_query disabled: ro pool: %v", err)
+		} else if err := roPool.Ping(ctx); err != nil {
+			log.Printf("mcp db_query disabled: ro pool ping: %v", err)
+			roPool.Close()
+		} else {
+			defer roPool.Close()
+			registerDBQueryTool(server, keysSvc, roPool)
+		}
+	} else {
+		log.Print("mcp db_query disabled: MCP_RO_DATABASE_URL not set")
+	}
 
 	mcpHandler := mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return server },
