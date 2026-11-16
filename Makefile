@@ -40,7 +40,7 @@ dev: db-up ## Hot-reload dev mode (requires air)
 build: ## Build binary
 	go build -o bin/api ./cmd/api
 
-test: ## Run unit tests
+test: ## Run tests (integration tests need TEST_DATABASE_URL / REDIS_TEST_URL)
 	go test ./...
 
 lint: ## golangci-lint + gofmt check
