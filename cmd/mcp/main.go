@@ -35,7 +35,12 @@ func main() {
 		}
 	}
 
-	pool, err := persistence.NewPool(ctx, cfg.DatabaseURL, cfg.DBRuntimeParams(), cfg.DBMaxConns)
+	// Ops tools run admin aggregates (e.g. count(DISTINCT spot_id) over
+	// t_spot_scores) that exceed the API's 5s statement budget — give the
+	// MCP pool its own, larger timeout.
+	mcpParams := cfg.DBRuntimeParams()
+	mcpParams["statement_timeout"] = cfg.MCPStatementTimeout
+	pool, err := persistence.NewPool(ctx, cfg.DatabaseURL, mcpParams, cfg.DBMaxConns)
 	if err != nil {
 		log.Fatalf("db connect: %v", err)
 	}

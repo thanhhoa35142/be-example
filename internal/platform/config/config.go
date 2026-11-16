@@ -69,6 +69,7 @@ type Config struct {
 	DBLockTimeout            string
 	DBMaxConns               int32
 	DBJIT                    string
+	MCPStatementTimeout      string
 }
 
 func Load() (Config, error) {
@@ -150,6 +151,7 @@ func Load() (Config, error) {
 		DBLockTimeout:            getEnv("DB_LOCK_TIMEOUT", "2s"),
 		DBMaxConns:               int32(getEnvInt("DB_MAX_CONNS", 0)),
 		DBJIT:                    getEnv("DB_JIT", "off"),
+		MCPStatementTimeout:      getEnv("MCP_STATEMENT_TIMEOUT", "30s"),
 	}
 	if cfg.MaxBodyBytes <= 0 {
 		return Config{}, fmt.Errorf("BODY_MAX_BYTES must be > 0")

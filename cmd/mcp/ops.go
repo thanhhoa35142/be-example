@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -42,9 +43,74 @@ type packHealthArgs struct {
 	Slug string `json:"slug,omitempty" jsonschema:"optional pack slug; when set returns the full pack detail instead of the list"`
 }
 
+// uuid.UUID marshals as a string but the SDK's schema inference treats it
+// as a byte array — map admin types to string-ID DTOs for tool output.
+type mcpCityPack struct {
+	ID           string     `json:"id"`
+	Slug         string     `json:"slug"`
+	Name         string     `json:"name"`
+	Country      string     `json:"country"`
+	TZ           string     `json:"tz"`
+	Status       string     `json:"status"`
+	LastImportAt *time.Time `json:"lastImportAt"`
+	ActiveSpots  int64      `json:"activeSpots"`
+	TotalSpots   int64      `json:"totalSpots"`
+	NextStatuses []string   `json:"nextStatuses"`
+}
+
+type mcpCitySpot struct {
+	ID        string    `json:"id"`
+	Name      *string   `json:"name"`
+	Kind      string    `json:"kind"`
+	Status    string    `json:"status"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+type mcpPackDetail struct {
+	mcpCityPack
+	OsmExtract       *string           `json:"osmExtract"`
+	ExtractFetchedAt *time.Time        `json:"extractFetchedAt"`
+	PendingReports   int64             `json:"pendingReports"`
+	SpotCounts       []admin.NameCount `json:"spotCounts"`
+	IngestRoles      []admin.NameCount `json:"ingestRoles"`
+	ExcludeReasons   []admin.NameCount `json:"excludeReasons"`
+	RecentRuns       []admin.JobRun    `json:"recentRuns"`
+	RecentSpots      []mcpCitySpot     `json:"recentSpots"`
+}
+
 type packHealthOut struct {
-	Packs  []admin.CityPack      `json:"packs,omitempty"`
-	Detail *admin.CityPackDetail `json:"detail,omitempty"`
+	Packs  []mcpCityPack  `json:"packs,omitempty"`
+	Detail *mcpPackDetail `json:"detail,omitempty"`
+}
+
+func toMcpPack(p admin.CityPack) mcpCityPack {
+	return mcpCityPack{
+		ID: p.ID.String(), Slug: p.Slug, Name: p.Name, Country: p.Country,
+		TZ: p.Tz, Status: p.Status, LastImportAt: p.LastImportAt,
+		ActiveSpots: p.ActiveSpots, TotalSpots: p.TotalSpots,
+		NextStatuses: p.NextStatuses,
+	}
+}
+
+func toMcpPackDetail(d admin.CityPackDetail) *mcpPackDetail {
+	spots := make([]mcpCitySpot, 0, len(d.RecentSpots))
+	for _, s := range d.RecentSpots {
+		spots = append(spots, mcpCitySpot{
+			ID: s.ID.String(), Name: s.Name, Kind: s.Kind,
+			Status: s.Status, UpdatedAt: s.UpdatedAt,
+		})
+	}
+	return &mcpPackDetail{
+		mcpCityPack:      toMcpPack(d.CityPack),
+		OsmExtract:       d.OsmExtract,
+		ExtractFetchedAt: d.ExtractFetchedAt,
+		PendingReports:   d.PendingReports,
+		SpotCounts:       d.SpotCounts,
+		IngestRoles:      d.IngestRoles,
+		ExcludeReasons:   d.ExcludeReasons,
+		RecentRuns:       d.RecentRuns,
+		RecentSpots:      spots,
+	}
 }
 
 type dbQueryArgs struct {
@@ -144,7 +210,11 @@ func registerOpsTools(s *mcp.Server, adminSvc *admin.Service, keysSvc *apikeys.S
 			return nil, packHealthOut{}, opsToolError(ctx, "pack_health", err)
 		}
 		if args.Slug == "" {
-			return nil, packHealthOut{Packs: packs}, nil
+			out := make([]mcpCityPack, 0, len(packs))
+			for _, p := range packs {
+				out = append(out, toMcpPack(p))
+			}
+			return nil, packHealthOut{Packs: out}, nil
 		}
 		for _, p := range packs {
 			if p.Slug == args.Slug {
@@ -152,7 +222,7 @@ func registerOpsTools(s *mcp.Server, adminSvc *admin.Service, keysSvc *apikeys.S
 				if err != nil {
 					return nil, packHealthOut{}, opsToolError(ctx, "pack_health", err)
 				}
-				return nil, packHealthOut{Detail: &d}, nil
+				return nil, packHealthOut{Detail: toMcpPackDetail(d)}, nil
 			}
 		}
 		return nil, packHealthOut{}, errors.New("city pack not found")
