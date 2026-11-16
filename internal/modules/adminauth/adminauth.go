@@ -30,18 +30,22 @@ type User struct {
 	LastLoginAt     *time.Time `json:"lastLoginAt"`
 	FailedAttempts  int        `json:"-"`
 	LockedUntil     *time.Time `json:"-"`
+	AuthEpoch       int64      `json:"-"`
 	CreatedAt       time.Time  `json:"createdAt"`
 }
 
+// Session is the authenticated-admin identity resolved from an access token.
+// ID is the session id (sid claim), stable across refresh rotations.
 type Session struct {
-	ID         uuid.UUID `json:"id"`
-	TokenHash  []byte    `json:"-"`
-	UserID     uuid.UUID `json:"-"`
-	UserAgent  string    `json:"userAgent"`
-	IP         string    `json:"ip"`
-	CreatedAt  time.Time `json:"createdAt"`
-	ExpiresAt  time.Time `json:"expiresAt"`
-	LastSeenAt time.Time `json:"lastSeenAt"`
+	ID     uuid.UUID `json:"id"`
+	UserID uuid.UUID `json:"-"`
+}
+
+// TokenPair is issued at login/enroll and on every refresh rotation.
+// Access is short-lived (minutes); refresh is long-lived and single-use.
+type TokenPair struct {
+	Access  string `json:"-"`
+	Refresh string `json:"-"`
 }
 
 type SessionInfo struct {

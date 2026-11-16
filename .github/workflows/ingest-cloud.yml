@@ -193,18 +193,50 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
 
-      - name: Dump database (excluding raw ingest layer)
+      - name: Dump database (excluding raw ingest layer + user data)
         run: |
           # t_ingest_features is the bulk raw layer, re-derivable by
           # re-running ingest; t_ingest_staging is an empty UNLOGGED COPY
           # target. Exclude their DATA only — the tables themselves must be
           # in the dump (schema_migrations says they exist; -T would drop
           # them and break ingest on the restored DB).
+          #
+          # The artifact is uploaded to a PUBLIC repo, so every table that
+          # can hold credentials or user-generated data must be excluded
+          # with --exclude-table-data (schema stays, rows don't):
+          #   admin auth: t_admin_users/sessions/google_tokens/
+          #     recovery_codes/totp_used/audit_events
+          #   devices & monetization: t_devices, t_device_subscriptions,
+          #     t_api_keys, t_api_key_grants, t_subscriptions,
+          #     t_alert_rules, t_alert_deliveries, t_apple_notifications,
+          #     t_weekly_digests
+          #   user-generated content: t_crowd_reports, t_crowd_estimates,
+          #     t_spot_reports, t_events, t_score_feedbacks
           docker run --rm --network host -e PGPASSWORD=picnic \
             -v "$PWD:/out" postgis/postgis:18-3.6 \
             pg_dump -h localhost -U picnic -d picnic -Fc -Z9 \
             --exclude-table-data=t_ingest_features \
             --exclude-table-data=t_ingest_staging \
+            --exclude-table-data=t_admin_users \
+            --exclude-table-data=t_admin_sessions \
+            --exclude-table-data=t_admin_google_tokens \
+            --exclude-table-data=t_admin_recovery_codes \
+            --exclude-table-data=t_admin_totp_used \
+            --exclude-table-data=t_admin_audit_events \
+            --exclude-table-data=t_devices \
+            --exclude-table-data=t_device_subscriptions \
+            --exclude-table-data=t_api_keys \
+            --exclude-table-data=t_api_key_grants \
+            --exclude-table-data=t_subscriptions \
+            --exclude-table-data=t_alert_rules \
+            --exclude-table-data=t_alert_deliveries \
+            --exclude-table-data=t_apple_notifications \
+            --exclude-table-data=t_weekly_digests \
+            --exclude-table-data=t_crowd_reports \
+            --exclude-table-data=t_crowd_estimates \
+            --exclude-table-data=t_spot_reports \
+            --exclude-table-data=t_events \
+            --exclude-table-data=t_score_feedbacks \
             -f /out/pickhour-cloud.dump
           ls -lh pickhour-cloud.dump
 

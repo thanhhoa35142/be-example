@@ -157,6 +157,10 @@ func (s *Service) JobRun(ctx context.Context, id int64) (JobRun, error) {
 	return s.repo.GetJobRun(ctx, id)
 }
 
+func (s *Service) JobRunsForJob(ctx context.Context, job string, limit int) ([]JobRun, error) {
+	return s.repo.ListJobRunsForJob(ctx, job, clampLimit(limit))
+}
+
 func (s *Service) RecordAudit(ctx context.Context, e AuditEvent) error {
 	return s.repo.InsertAuditEvent(ctx, e)
 }
@@ -225,6 +229,21 @@ func (s *Service) UpdateJobSchedule(ctx context.Context, job string, intervalSec
 		return JobSchedule{}, err
 	}
 	schedule, err := s.repo.UpdateJobSchedule(ctx, job, intervalSeconds)
+	if err != nil {
+		return JobSchedule{}, err
+	}
+	schedule.MinIntervalSeconds = limits.min
+	schedule.MaxIntervalSeconds = limits.max
+	schedule.Description = limits.desc
+	return schedule, nil
+}
+
+func (s *Service) SetJobScheduleEnabled(ctx context.Context, job string, enabled bool) (JobSchedule, error) {
+	limits, ok := jobScheduleLimits[job]
+	if !ok {
+		return JobSchedule{}, ErrJobScheduleNotFound
+	}
+	schedule, err := s.repo.SetJobScheduleEnabled(ctx, job, enabled)
 	if err != nil {
 		return JobSchedule{}, err
 	}

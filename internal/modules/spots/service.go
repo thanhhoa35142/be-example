@@ -40,10 +40,6 @@ func NewService(repo Repository) *Service {
 	return &Service{repo: repo}
 }
 
-func (s *Service) ListInBBox(ctx context.Context, bbox BBox, when *time.Time) ([]SpotWithScore, error) {
-	return s.List(ctx, ListQuery{BBox: &bbox, When: when})
-}
-
 type ListResult struct {
 	Items     []SpotWithScore
 	Total     int

@@ -247,16 +247,28 @@ func (h *AdminHandler) JobRun(c *gin.Context) {
 }
 
 type updateJobScheduleRequest struct {
-	IntervalSeconds int64 `json:"intervalSeconds"`
+	IntervalSeconds *int64 `json:"intervalSeconds"`
+	Enabled         *bool  `json:"enabled"`
 }
 
 func (h *AdminHandler) UpdateJobSchedule(c *gin.Context) {
 	var req updateJobScheduleRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Invalid body", "expected intervalSeconds")
+	if err := c.ShouldBindJSON(&req); err != nil || (req.IntervalSeconds == nil && req.Enabled == nil) {
+		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Invalid body", "expected intervalSeconds and/or enabled")
 		return
 	}
-	schedule, err := h.svc.UpdateJobSchedule(c.Request.Context(), c.Param("job"), req.IntervalSeconds)
+	ctx := c.Request.Context()
+	job := c.Param("job")
+	var schedule admin.JobSchedule
+	var err error
+	if req.IntervalSeconds != nil {
+		schedule, err = h.svc.UpdateJobSchedule(ctx, job, *req.IntervalSeconds)
+	} else {
+		schedule, err = h.svc.JobSchedule(ctx, job)
+	}
+	if err == nil && req.Enabled != nil {
+		schedule, err = h.svc.SetJobScheduleEnabled(ctx, job, *req.Enabled)
+	}
 	if err != nil {
 		switch {
 		case errors.Is(err, admin.ErrInvalidJobSchedule):
@@ -318,6 +330,8 @@ func (h *AdminHandler) ModerateReport(c *gin.Context) {
 		}
 		return
 	}
+	// Accepting a "closed" report closes the spot — public caches must drop it.
+	h.bumpPublicCache(c)
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"status": req.Status}})
 }
 

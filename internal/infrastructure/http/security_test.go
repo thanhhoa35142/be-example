@@ -312,11 +312,11 @@ func TestAdminAuthSessionCookie(t *testing.T) {
 		ok(c)
 	})
 
-	good := map[string]string{"Cookie": AdminSessionCookie + "=tok-good"}
+	good := map[string]string{"Cookie": AdminAccessCookie + "=tok-good"}
 	if w := do(r, "GET", "/admin/x", "1.1.1.1", good, ""); w.Code != 200 {
 		t.Fatalf("valid session: %d", w.Code)
 	}
-	bad := map[string]string{"Cookie": AdminSessionCookie + "=tok-bad"}
+	bad := map[string]string{"Cookie": AdminAccessCookie + "=tok-bad"}
 	if w := do(r, "GET", "/admin/x", "1.1.1.1", bad, ""); w.Code != 401 {
 		t.Fatalf("bad session: %d", w.Code)
 	}

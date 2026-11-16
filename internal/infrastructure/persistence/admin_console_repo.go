@@ -2,6 +2,7 @@ package persistence
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sort"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/thanhhoa35142/be-example/internal/modules/admin"
+	"github.com/thanhhoa35142/be-example/internal/modules/spots"
 )
 
 func (r *AdminRepo) RequestJobRun(ctx context.Context, job string) (admin.JobSchedule, error) {
@@ -23,9 +25,29 @@ func (r *AdminRepo) RequestJobRun(ctx context.Context, job string) (admin.JobSch
 	return jobScheduleFromRow(row), nil
 }
 
-func (r *AdminRepo) ClaimJobRunRequest(ctx context.Context, job string) (bool, error) {
-	n, err := r.q.ClaimJobRunRequest(ctx, job)
-	return n > 0, err
+func (r *AdminRepo) RequestJobRunForPack(ctx context.Context, job, packSlug string) (admin.JobSchedule, error) {
+	row, err := r.q.RequestJobRunForPack(ctx, RequestJobRunForPackParams{
+		Job:              job,
+		RunRequestedPack: pgtype.Text{String: packSlug, Valid: true},
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return admin.JobSchedule{}, admin.ErrJobScheduleNotFound
+	}
+	if err != nil {
+		return admin.JobSchedule{}, err
+	}
+	return jobScheduleFromRow(row), nil
+}
+
+func (r *AdminRepo) ClaimJobRunRequest(ctx context.Context, job string) (string, bool, error) {
+	pack, err := r.q.ClaimJobRunRequest(ctx, job)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return pack.String, true, nil
 }
 
 func (r *AdminRepo) ListPlanLimits(ctx context.Context) ([]admin.PlanLimit, error) {
@@ -195,15 +217,15 @@ func (r *AdminRepo) CityPackStatus(ctx context.Context, id uuid.UUID) (string, b
 	return row.Status, row.LastImportAt.Valid, nil
 }
 
-func (r *AdminRepo) UpdateCityPackStatus(ctx context.Context, id uuid.UUID, status string) error {
+func (r *AdminRepo) UpdateCityPackStatus(ctx context.Context, id uuid.UUID, status string) (bool, error) {
 	n, err := r.q.UpdateCityPackStatus(ctx, UpdateCityPackStatusParams{ID: id, Status: status})
 	if err != nil {
-		return mapTransitionError(err)
+		return false, mapTransitionError(err)
 	}
 	if n == 0 {
-		return admin.ErrCityPackNotFound
+		return false, admin.ErrCityPackNotFound
 	}
-	return nil
+	return true, nil
 }
 
 func (r *AdminRepo) SearchSpots(ctx context.Context, f admin.SpotFilter) ([]admin.AdminSpot, error) {
@@ -269,4 +291,137 @@ func mapTransitionError(err error) error {
 		return errors.Join(admin.ErrInvalidTransition, err)
 	}
 	return err
+}
+
+const (
+	spotDetailScoresLimit      = 48
+	spotDetailTransitionsLimit = 100
+	spotDetailAuditLimit       = 50
+)
+
+func (r *AdminRepo) SpotDetail(ctx context.Context, id uuid.UUID) (*admin.SpotDetail, error) {
+	row, err := r.q.GetAdminSpotByID(ctx, id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, admin.ErrSpotNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	d := &admin.SpotDetail{
+		ID:              row.ID,
+		Name:            textPtr(row.Name),
+		Names:           json.RawMessage(row.Names),
+		Kind:            row.Kind,
+		City:            textPtr(row.City),
+		Country:         row.Country,
+		Tz:              row.Tz,
+		CellID:          row.CellID,
+		Status:          row.Status,
+		StatusReason:    textPtr(row.StatusReason),
+		StatusChangedAt: timePtr(row.StatusChangedAt),
+		Quality:         int2Ptr(row.Quality),
+		Attrs:           json.RawMessage(row.Attrs),
+		Curated:         row.Curated,
+		Lat:             row.Lat,
+		Lon:             row.Lon,
+		Area:            json.RawMessage(row.AreaGeojson),
+		MergedInto:      uuidPtr(row.MergedInto),
+		MergedIntoName:  textPtr(row.MergedIntoName),
+		PackSlug:        row.PackSlug,
+		PackName:        row.PackName,
+		LastVerifiedAt:  timePtr(row.LastVerifiedAt),
+		CreatedAt:       row.CreatedAt.UTC(),
+		UpdatedAt:       row.UpdatedAt.UTC(),
+	}
+
+	amenities, err := r.q.ListSpotAmenities(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	d.Amenities = make([]spots.Amenity, 0, len(amenities))
+	for _, a := range amenities {
+		d.Amenities = append(d.Amenities, spots.Amenity{Type: a.Type, DistanceM: int(a.DistanceM), Source: a.Source})
+	}
+
+	sources, err := r.q.ListSpotSources(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	d.Sources = make([]spots.Source, 0, len(sources))
+	for _, s := range sources {
+		d.Sources = append(d.Sources, spots.Source{
+			Name:       s.Source,
+			ID:         s.SourceID,
+			Version:    intPtr(s.Version),
+			ImportedAt: s.ImportedAt.UTC(),
+		})
+	}
+
+	scores, err := r.q.ListAdminSpotScores(ctx, ListAdminSpotScoresParams{SpotID: id, Limit: spotDetailScoresLimit})
+	if err != nil {
+		return nil, err
+	}
+	d.Scores = make([]admin.SpotScorePoint, 0, len(scores))
+	for _, s := range scores {
+		d.Scores = append(d.Scores, admin.SpotScorePoint{
+			TSHour:     s.TsHour.UTC(),
+			Score:      int(s.Score),
+			Confidence: int(s.Confidence),
+			CapReason:  textPtr(s.CapReason),
+			Reasons:    json.RawMessage(s.Reasons),
+			ComputedAt: s.ComputedAt.UTC(),
+		})
+	}
+
+	transitions, err := r.q.ListAdminSpotTransitions(ctx, ListAdminSpotTransitionsParams{
+		EntityID: id.String(), Limit: spotDetailTransitionsLimit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	d.Transitions = make([]admin.SpotTransition, 0, len(transitions))
+	for _, t := range transitions {
+		d.Transitions = append(d.Transitions, admin.SpotTransition{
+			FromStatus: textPtr(t.FromStatus),
+			ToStatus:   t.ToStatus,
+			ChangedAt:  t.ChangedAt.UTC(),
+		})
+	}
+
+	auditPath := "/v1/admin/spots/" + id.String()
+	events, err := r.q.ListAdminSpotAuditEvents(ctx, ListAdminSpotAuditEventsParams{Path: auditPath, Limit: spotDetailAuditLimit})
+	if err != nil {
+		return nil, err
+	}
+	d.AuditEvents = make([]admin.AuditEvent, 0, len(events))
+	for _, e := range events {
+		var uid, email, reqID *string
+		if e.AdminUserID.Valid {
+			s := uuid.UUID(e.AdminUserID.Bytes).String()
+			uid = &s
+		}
+		if e.Email.Valid {
+			s := e.Email.String
+			email = &s
+		}
+		if e.RequestID.Valid {
+			s := e.RequestID.String
+			reqID = &s
+		}
+		d.AuditEvents = append(d.AuditEvents, admin.AuditEvent{
+			ID:          e.ID,
+			AdminUserID: uid,
+			Email:       email,
+			AuthMethod:  e.AuthMethod,
+			Method:      e.Method,
+			Path:        e.Path,
+			Status:      int(e.Status),
+			ClientIP:    e.ClientIp,
+			RequestID:   reqID,
+			CreatedAt:   e.CreatedAt.UTC(),
+		})
+	}
+
+	return d, nil
 }

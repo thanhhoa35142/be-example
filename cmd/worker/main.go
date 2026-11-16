@@ -204,7 +204,9 @@ func main() {
 	var weatherProvider weather.Provider
 	switch cfg.WeatherProvider {
 	case "weatherkit":
-		weatherProvider = &weather.WeatherKit{}
+		// The WeatherKit client is a stub — fail fast instead of letting the
+		// refresh job error on every cell at runtime.
+		log.Fatal("WEATHER_PROVIDER=weatherkit is not implemented yet; use open-meteo")
 	default:
 		weatherProvider = weather.NewOpenMeteo(httpx.NewClient(httpx.Policy{
 			Name: "open-meteo", RatePerSec: 5, Burst: 10,
@@ -303,13 +305,20 @@ func main() {
 			return err
 		}
 
+		// An admin "run this pack" request (POST /v1/admin/ingest/packs/:slug/run)
+		// arrives via the job schedule claim and overrides the -pack flag.
+		slugFilter := *packSlug
+		if requested := requestedPackSlug(ctx); requested != "" {
+			slugFilter = requested
+		}
+
 		var todo []int
 		for i := range packs {
-			if *packSlug != "" && packs[i].Slug != *packSlug {
+			if slugFilter != "" && packs[i].Slug != slugFilter {
 				continue
 			}
 
-			if *packSlug == "" && packs[i].ExtractFetchedAt != nil &&
+			if slugFilter == "" && packs[i].ExtractFetchedAt != nil &&
 				packs[i].LastImportAt != nil &&
 				!packs[i].ExtractFetchedAt.After(*packs[i].LastImportAt) {
 				continue
@@ -576,8 +585,7 @@ func main() {
 					"weather", stats.WeatherForecasts, "scores", stats.SpotScores,
 					"events", stats.Events, "crowd_reports", stats.CrowdReports,
 					"job_runs", stats.JobRuns, "deliveries", stats.AlertDeliveries,
-					"payloads_scrubbed", stats.PayloadsScrubbed,
-					"admin_sessions", stats.AdminSessions)
+					"payloads_scrubbed", stats.PayloadsScrubbed)
 				return nil
 			},
 		},
@@ -613,9 +621,22 @@ func main() {
 	logger.Info("worker stopped")
 }
 
+// requestedPackKey carries the per-pack ingest slug claimed from the job
+// schedule into the job function's context.
+type requestedPackKey struct{}
+
+func requestedPackSlug(ctx context.Context) string {
+	s, _ := ctx.Value(requestedPackKey{}).(string)
+	return s
+}
+
 func runJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, adminSvc *admin.Service, j job) {
-	run := func() {
-		_, _ = executeJob(ctx, pool, logger, adminSvc, j)
+	run := func(pack string) {
+		rctx := ctx
+		if pack != "" {
+			rctx = context.WithValue(ctx, requestedPackKey{}, pack)
+		}
+		_, _ = executeJob(rctx, pool, logger, adminSvc, j)
 	}
 
 	// Fallback interval when the schedule row is missing — without it the job
@@ -639,7 +660,7 @@ func runJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, adminS
 		}
 	}
 	if enabled {
-		run()
+		run("")
 	}
 
 	var timer *time.Timer
@@ -717,17 +738,17 @@ func runJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, adminS
 			timer.Reset(interval)
 			timerC = timer.C
 			if enabled {
-				run()
+				run("")
 			}
 			refreshSchedule(true)
 		case <-pollTicker.C:
 			refreshSchedule(true)
 
-			if requested, err := adminSvc.ClaimJobRunRequest(ctx, j.name); err != nil {
+			if pack, requested, err := adminSvc.ClaimJobRunRequest(ctx, j.name); err != nil {
 				logger.Error("job run request check failed", "job", j.name, "error", err)
 			} else if requested {
-				logger.Info("job run requested from admin console", "job", j.name)
-				run()
+				logger.Info("job run requested from admin console", "job", j.name, "pack", pack)
+				run(pack)
 			}
 		}
 	}

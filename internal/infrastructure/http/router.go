@@ -47,6 +47,7 @@ type Handlers struct {
 	Events          *EventsHandler
 	Digest          *DigestHandler
 	Share           *ShareHandler
+	Weather         *WeatherHandler
 }
 
 func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error) {
@@ -129,6 +130,9 @@ func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error
 		}
 		if h.Recommendations != nil {
 			v1.GET("/recommendations", cacheGet(10*time.Minute, true, RecNormalize), h.Recommendations.List)
+		}
+		if h.Weather != nil {
+			v1.GET("/weather/nearby", cacheGet(15*time.Minute, false, NearbyNormalize), h.Weather.Nearby)
 		}
 		if h.Devices != nil {
 			v1.POST("/devices", h.Devices.Register)
@@ -221,13 +225,18 @@ func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error
 			admin.POST("/auth/login", h.AdminAuth.Login)
 			admin.POST("/auth/totp", h.AdminAuth.TOTP)
 			admin.POST("/auth/enroll", h.AdminAuth.Enroll)
+			admin.POST("/auth/refresh", h.AdminAuth.Refresh)
+			admin.POST("/auth/logout", h.AdminAuth.Logout)
 
 			authed.GET("/auth/me", h.AdminAuth.Me)
-			authed.POST("/auth/logout", h.AdminAuth.Logout)
 			authed.POST("/auth/password", h.AdminAuth.Password)
 			authed.POST("/auth/recovery-codes", h.AdminAuth.RecoveryCodes)
 			authed.GET("/auth/sessions", h.AdminAuth.Sessions)
 			authed.POST("/auth/sessions/revoke-others", h.AdminAuth.RevokeOtherSessions)
+
+			authed.GET("/users", h.AdminAuth.ListUsers)
+			authed.POST("/users", h.AdminAuth.CreateUser)
+			authed.PATCH("/users/:email", h.AdminAuth.UpdateUser)
 		}
 		if h.GoAuth != nil {
 			authed.GET("/integrations/google/connect", h.GoAuth.Connect)
@@ -261,9 +270,21 @@ func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error
 			authed.GET("/city-packs/:id", h.Admin.CityPackDetail)
 			authed.PATCH("/city-packs/:id", h.Admin.UpdateCityPack)
 			authed.GET("/spots", h.Admin.Spots)
+			authed.GET("/spots/:id", h.Admin.SpotDetail)
 			authed.PATCH("/spots/:id", h.Admin.UpdateSpot)
 			authed.GET("/reports", h.Admin.Reports)
+			authed.GET("/reports/history", h.Admin.SpotReportsHistory)
+			authed.GET("/reports/:id", h.Admin.SpotReportDetail)
 			authed.PATCH("/reports/:id", h.Admin.ModerateReport)
+			authed.GET("/crowd-reports", h.Admin.CrowdReports)
+			authed.GET("/score-feedbacks", h.Admin.ScoreFeedbacks)
+			authed.GET("/devices", h.Admin.Devices)
+			authed.GET("/devices/:id", h.Admin.DeviceDetail)
+			authed.GET("/alert-deliveries", h.Admin.AlertDeliveries)
+			authed.GET("/apple-notifications", h.Admin.AppleNotifications)
+			authed.GET("/providers/health", h.Admin.ProviderHealth)
+			authed.GET("/ingest/features", h.Admin.IngestFeatures)
+			authed.POST("/ingest/packs/:slug/run", h.Admin.RunPackIngest)
 			authed.GET("/scoring-config", h.Admin.ScoringConfigs)
 			authed.POST("/scoring-config", h.Admin.CreateScoringConfig)
 			authed.POST("/scoring-config/:version/activate", h.Admin.ActivateScoringConfig)

@@ -15,6 +15,7 @@ type Config struct {
 	Port                   string
 	MCPPort                string
 	DatabaseURL            string
+	MCPRODatabaseURL       string
 	RedisURL               string
 	WeatherProvider        string
 	WeatherH3Res           int
@@ -30,11 +31,10 @@ type Config struct {
 
 	AppEnv string
 
-	AppStoreBundleID     string
-	AppStoreAllowSandbox bool
-	// AppStorePlusProductIDs is the APPSTORE_PLUS_PRODUCT_IDS allowlist —
-	// comma-separated product IDs that may grant Plus.
+	AppStoreBundleID       string
+	AppStoreAllowSandbox   bool
 	AppStorePlusProductIDs []string
+	AdminCookieSecure      bool
 
 	AppleAppIDs   []string
 	AppStoreAppID string
@@ -52,10 +52,11 @@ type Config struct {
 
 	MFASecretKeys       string
 	MFASecretKeysCLI    string
+	AdminJWTSecret      string
 	AdminAllowedOrigins []string
 	MFAChallengeTTL     time.Duration
-	MFASessionTTL       time.Duration
-	MFASessionIdleTTL   time.Duration
+	AdminAccessTTL      time.Duration
+	AdminRefreshTTL     time.Duration
 	MFAMaxFailures      int
 	MFALockoutTTL       time.Duration
 
@@ -76,11 +77,11 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	mfaSessionTTL, err := getEnvDuration("MFA_SESSION_TTL", 12*time.Hour)
+	adminAccessTTL, err := getEnvDuration("ADMIN_ACCESS_TTL", 15*time.Minute)
 	if err != nil {
 		return Config{}, err
 	}
-	mfaSessionIdleTTL, err := getEnvDuration("MFA_SESSION_IDLE_TTL", 30*time.Minute)
+	adminRefreshTTL, err := getEnvDuration("ADMIN_REFRESH_TTL", 30*24*time.Hour)
 	if err != nil {
 		return Config{}, err
 	}
@@ -88,26 +89,20 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	// Sandbox IAP receipts are only accepted outside production by default —
-	// a free sandbox "purchase" must never grant production Plus. Enable
-	// explicitly via APPSTORE_ALLOW_SANDBOX=true for the App Review window.
 	appEnv := os.Getenv("APP_ENV")
 	sandboxDefault := "true"
 	if appEnv == "production" {
 		sandboxDefault = "false"
 	}
 	cfg := Config{
-		Port:              getEnv("PORT", "8080"),
-		MCPPort:           getEnv("MCP_PORT", "8081"),
-		DatabaseURL:       os.Getenv("DATABASE_URL"),
-		RedisURL:          os.Getenv("REDIS_URL"),
-		WeatherProvider:   getEnv("WEATHER_PROVIDER", "open-meteo"),
-		WeatherH3Res:      getEnvInt("WEATHER_H3_RES", 6),
-		WeatherDailyLimit: getEnvInt("WEATHER_DAILY_LIMIT", 9000),
-		// OPEN_METEO_URL points at a self-hosted instance for the Actions
-		// weather-refresh job; OPEN_METEO_MODELS selects the model set
-		// (e.g. "gfs_global" — required there since best_match needs the
-		// full domain set). Empty models keeps public-API behavior.
+		Port:                   getEnv("PORT", "8080"),
+		MCPPort:                getEnv("MCP_PORT", "8081"),
+		DatabaseURL:            os.Getenv("DATABASE_URL"),
+		MCPRODatabaseURL:       os.Getenv("MCP_RO_DATABASE_URL"),
+		RedisURL:               os.Getenv("REDIS_URL"),
+		WeatherProvider:        getEnv("WEATHER_PROVIDER", "open-meteo"),
+		WeatherH3Res:           getEnvInt("WEATHER_H3_RES", 6),
+		WeatherDailyLimit:      getEnvInt("WEATHER_DAILY_LIMIT", 9000),
 		WeatherOpenMeteoURL:    getEnv("OPEN_METEO_URL", ""),
 		WeatherOpenMeteoModels: getEnv("OPEN_METEO_MODELS", ""),
 		RunMigrations:          getEnv("RUN_MIGRATIONS", "true") != "false",
@@ -121,6 +116,7 @@ func Load() (Config, error) {
 		AppStoreBundleID:       os.Getenv("APPSTORE_BUNDLE_ID"),
 		AppStoreAllowSandbox:   getEnv("APPSTORE_ALLOW_SANDBOX", sandboxDefault) != "false",
 		AppStorePlusProductIDs: splitList(os.Getenv("APPSTORE_PLUS_PRODUCT_IDS")),
+		AdminCookieSecure:      getEnv("ADMIN_COOKIE_SECURE", "true") != "false",
 		AppleAppIDs:            splitList(os.Getenv("APPLE_APP_IDS")),
 		AppStoreAppID:          strings.TrimSpace(os.Getenv("APPSTORE_APP_ID")),
 
@@ -137,10 +133,11 @@ func Load() (Config, error) {
 
 		MFASecretKeys:       os.Getenv("MFA_SECRET_KEYS"),
 		MFASecretKeysCLI:    os.Getenv("MFA_SECRET_KEYS_CLI"),
+		AdminJWTSecret:      os.Getenv("ADMIN_JWT_SECRET"),
 		AdminAllowedOrigins: splitList(os.Getenv("ADMIN_ALLOWED_ORIGINS")),
 		MFAChallengeTTL:     mfaChallengeTTL,
-		MFASessionTTL:       mfaSessionTTL,
-		MFASessionIdleTTL:   mfaSessionIdleTTL,
+		AdminAccessTTL:      adminAccessTTL,
+		AdminRefreshTTL:     adminRefreshTTL,
 		MFAMaxFailures:      getEnvInt("MFA_MAX_FAILURES", 5),
 		MFALockoutTTL:       mfaLockoutTTL,
 

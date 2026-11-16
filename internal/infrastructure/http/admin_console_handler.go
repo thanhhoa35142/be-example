@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/thanhhoa35142/be-example/internal/modules/admin"
+	"github.com/thanhhoa35142/be-example/internal/platform/cache"
 	"github.com/thanhhoa35142/be-example/internal/platform/httpx"
 )
 
@@ -89,9 +90,13 @@ func (h *AdminHandler) UpdateCityPack(c *gin.Context) {
 		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Invalid body", "expected {\"status\": \"draft|beta|live|retired\"}")
 		return
 	}
-	if err := h.svc.SetCityPackStatus(c.Request.Context(), id, req.Status); err != nil {
+	changed, err := h.svc.SetCityPackStatus(c.Request.Context(), id, req.Status)
+	if err != nil {
 		h.writeConsoleError(c, err)
 		return
+	}
+	if changed {
+		h.bumpPublicCache(c)
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"status": req.Status}})
 }
@@ -111,27 +116,64 @@ func (h *AdminHandler) Spots(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"items": spots}})
 }
 
-type spotActionRequest struct {
-	Action string `json:"action"`
+func (h *AdminHandler) SpotDetail(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidID, "Invalid id", "expected a UUID")
+		return
+	}
+	detail, err := h.svc.SpotDetail(c.Request.Context(), id)
+	if err != nil {
+		h.writeConsoleError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": detail})
 }
 
+type spotPatchRequest struct {
+	Action   string     `json:"action"`
+	TargetID *uuid.UUID `json:"targetId"`
+	Name     *string    `json:"name"`
+	Curated  *bool      `json:"curated"`
+}
+
+// UpdateSpot handles both status actions (hide/restore/approve/merge/
+// unmerge) and field edits (name, curated) on PATCH /v1/admin/spots/:id.
 func (h *AdminHandler) UpdateSpot(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidID, "Invalid id", "expected a UUID")
 		return
 	}
-	var req spotActionRequest
+	var req spotPatchRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Invalid body", "expected {\"action\": \"hide|restore\"}")
+		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Invalid body",
+			"expected {\"action\":\"hide|restore|approve|merge|unmerge\"} or {\"name\":...} or {\"curated\":...}")
 		return
 	}
-	status, err := h.svc.SetSpotVisibility(c.Request.Context(), id, req.Action)
+	result, err := h.svc.UpdateSpot(c.Request.Context(), id, admin.SpotPatch{
+		Action: req.Action, TargetID: req.TargetID, Name: req.Name, Curated: req.Curated,
+	})
 	if err != nil {
-		h.writeConsoleError(c, err)
+		h.writeOpsError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": gin.H{"status": status}})
+	if result.Changed {
+		h.bumpPublicCache(c)
+	}
+	c.JSON(http.StatusOK, gin.H{"data": result})
+}
+
+// bumpPublicCache invalidates the public read caches (spot lists/details,
+// forecasts) after an admin mutation that changes what users see. Best-effort:
+// a Redis failure must not fail the mutation itself.
+func (h *AdminHandler) bumpPublicCache(c *gin.Context) {
+	if h.rdb == nil {
+		return
+	}
+	ctx := c.Request.Context()
+	_ = cache.Bump(ctx, h.rdb)
+	_ = cache.BumpWeather(ctx, h.rdb)
 }
 
 func (h *AdminHandler) writeConsoleError(c *gin.Context, err error) {
@@ -139,7 +181,7 @@ func (h *AdminHandler) writeConsoleError(c *gin.Context, err error) {
 	case errors.Is(err, admin.ErrInvalidPlanLimit):
 		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Invalid plan limit", err.Error())
 	case errors.Is(err, admin.ErrInvalidSpotAction):
-		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Invalid action", "expected hide or restore")
+		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Invalid action", "expected hide, restore, approve, merge or unmerge")
 	case errors.Is(err, admin.ErrInvalidSpotQuery):
 		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidQuery, "Invalid query", err.Error())
 	case errors.Is(err, admin.ErrPlanLimitNotFound):

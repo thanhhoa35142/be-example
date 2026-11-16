@@ -43,23 +43,6 @@ type TAdminRecoveryCode struct {
 	UsedAt      pgtype.Timestamptz `json:"used_at"`
 }
 
-type TAdminSession struct {
-	ID          uuid.UUID `json:"id"`
-	TokenHash   []byte    `json:"token_hash"`
-	AdminUserID uuid.UUID `json:"admin_user_id"`
-	UserAgent   string    `json:"user_agent"`
-	Ip          string    `json:"ip"`
-	CreatedAt   time.Time `json:"created_at"`
-	ExpiresAt   time.Time `json:"expires_at"`
-	LastSeenAt  time.Time `json:"last_seen_at"`
-}
-
-type TAdminTotpUsed struct {
-	AdminUserID uuid.UUID `json:"admin_user_id"`
-	Step        int64     `json:"step"`
-	UsedAt      time.Time `json:"used_at"`
-}
-
 type TAdminUser struct {
 	ID              uuid.UUID          `json:"id"`
 	Email           string             `json:"email"`
@@ -72,6 +55,7 @@ type TAdminUser struct {
 	LockedUntil     pgtype.Timestamptz `json:"locked_until"`
 	CreatedAt       time.Time          `json:"created_at"`
 	UpdatedAt       time.Time          `json:"updated_at"`
+	AuthEpoch       int64              `json:"auth_epoch"`
 }
 
 type TAlertDelivery struct {
@@ -447,12 +431,13 @@ type TWeeklyDigest struct {
 }
 
 type TWorkerJobSchedule struct {
-	Job             string             `json:"job"`
-	IntervalSeconds int32              `json:"interval_seconds"`
-	Enabled         bool               `json:"enabled"`
-	OffsetSeconds   int32              `json:"offset_seconds"`
-	UpdatedAt       time.Time          `json:"updated_at"`
-	RunRequestedAt  pgtype.Timestamptz `json:"run_requested_at"`
+	Job              string             `json:"job"`
+	IntervalSeconds  int32              `json:"interval_seconds"`
+	Enabled          bool               `json:"enabled"`
+	OffsetSeconds    int32              `json:"offset_seconds"`
+	UpdatedAt        time.Time          `json:"updated_at"`
+	RunRequestedAt   pgtype.Timestamptz `json:"run_requested_at"`
+	RunRequestedPack pgtype.Text        `json:"run_requested_pack"`
 }
 
 type TmpAreaID struct {

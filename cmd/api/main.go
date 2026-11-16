@@ -31,7 +31,9 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/modules/reports"
 	"github.com/thanhhoa35142/be-example/internal/modules/spots"
 	"github.com/thanhhoa35142/be-example/internal/modules/traffic"
+	"github.com/thanhhoa35142/be-example/internal/modules/weather"
 	"github.com/thanhhoa35142/be-example/internal/platform/config"
+	"github.com/thanhhoa35142/be-example/internal/platform/httpx"
 	platformlog "github.com/thanhhoa35142/be-example/internal/platform/log"
 	"github.com/thanhhoa35142/be-example/internal/platform/ratelimit"
 )
@@ -124,19 +126,31 @@ func main() {
 		if err != nil || len(key) != 32 {
 			log.Fatalf("MFA_SECRET_KEYS must be 64 hex chars (32 bytes)")
 		}
-		// Login challenges live in Redis (TTL-expiring, single-use). If Redis
-		// was unreachable at boot, fall back to process memory so logins keep
-		// working — challenges are then not shared across instances.
+		var jwtKey []byte
+		if cfg.AdminJWTSecret != "" {
+			jwtKey, err = hex.DecodeString(cfg.AdminJWTSecret)
+			if err != nil || len(jwtKey) != 32 {
+				log.Fatalf("ADMIN_JWT_SECRET must be 64 hex chars (32 bytes)")
+			}
+		}
+		// Login challenges and refresh tokens live in Redis (TTL-expiring,
+		// single-use). If Redis was unreachable at boot, fall back to process
+		// memory so logins keep working — sessions are then not shared across
+		// instances and are lost on restart.
 		var challengeStore adminauth.ChallengeStore = adminauth.NewMemoryChallengeStore()
+		var refreshStore adminauth.RefreshStore = adminauth.NewMemoryRefreshStore()
+		var replayStore adminauth.ReplayStore = adminauth.NewMemoryReplayStore()
 		if rdb != nil && redisHealthy {
 			challengeStore = persistence.NewAdminAuthChallengeStore(rdb)
+			refreshStore = persistence.NewAdminAuthRefreshStore(rdb)
+			replayStore = persistence.NewAdminAuthReplayStore(rdb)
 		} else {
-			logger.Warn("admin auth challenges are in-memory (REDIS_URL unset or Redis down at boot); lost on restart, not shared across instances")
+			logger.Warn("admin auth state is in-memory (REDIS_URL unset or Redis down at boot); lost on restart, not shared across instances")
 		}
-		authSvc, err := adminauth.NewService(persistence.NewAdminAuthRepo(queries), challengeStore, key, adminauth.Config{
+		authSvc, err := adminauth.NewService(persistence.NewAdminAuthRepo(queries), challengeStore, refreshStore, replayStore, key, jwtKey, adminauth.Config{
 			ChallengeTTL: cfg.MFAChallengeTTL,
-			SessionTTL:   cfg.MFASessionTTL,
-			IdleTTL:      cfg.MFASessionIdleTTL,
+			AccessTTL:    cfg.AdminAccessTTL,
+			RefreshTTL:   cfg.AdminRefreshTTL,
 			MaxFailures:  cfg.MFAMaxFailures,
 			Lockout:      cfg.MFALockoutTTL,
 		})
@@ -144,6 +158,7 @@ func main() {
 			log.Fatalf("admin auth: %v", err)
 		}
 		adminAuthHandler = infrahttp.NewAdminAuthHandler(authSvc, limiterFor(authFail, "authfail"))
+		infrahttp.SetAdminCookieSecure(cfg.AdminCookieSecure)
 	} else {
 		logger.Warn("MFA_SECRET_KEYS unset: admin account login disabled, MFA_SECRET_KEYS_CLI bearer only")
 	}
@@ -198,6 +213,11 @@ func main() {
 			AppleAppIDs:   cfg.AppleAppIDs,
 			AppStoreAppID: cfg.AppStoreAppID,
 		}),
+		// Near-me forecasts call the weather provider live; OPEN_METEO_URL
+		// selects public API vs self-host, empty = public default.
+		Weather: infrahttp.NewWeatherHandler(weather.NewOpenMeteo(httpx.NewClient(httpx.Policy{
+			Name: "open-meteo-nearby", RatePerSec: 5, Burst: 10,
+		}), cfg.WeatherOpenMeteoURL, cfg.WeatherOpenMeteoModels)),
 	}, infrahttp.Options{
 		TrustedProxies:      cfg.TrustedProxies,
 		MaxBodyBytes:        cfg.MaxBodyBytes,

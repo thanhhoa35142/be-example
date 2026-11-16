@@ -19,17 +19,6 @@ type Repository interface {
 	ConfirmTOTP(ctx context.Context, id uuid.UUID, sealedSecret []byte) error
 	ResetTOTP(ctx context.Context, id uuid.UUID) error
 	SetDisabled(ctx context.Context, id uuid.UUID, disabled bool) error
-
-	CreateSession(ctx context.Context, tokenHash []byte, userID uuid.UUID, userAgent, ip string, expiresAt time.Time) (*Session, error)
-	SessionByToken(ctx context.Context, tokenHash []byte) (*Session, *User, error)
-	TouchSession(ctx context.Context, sessionID uuid.UUID) error
-	DeleteSession(ctx context.Context, tokenHash []byte) error
-	ListSessions(ctx context.Context, userID uuid.UUID) ([]Session, error)
-	RevokeOtherSessions(ctx context.Context, userID uuid.UUID, keepTokenHash []byte) error
-
 	ReplaceRecoveryCodes(ctx context.Context, userID uuid.UUID, hashes [][]byte) error
 	ConsumeRecoveryCode(ctx context.Context, userID uuid.UUID, codeHash []byte) (bool, error)
-	TryUsedTOTP(ctx context.Context, userID uuid.UUID, step int64) (bool, error)
-	DeleteTOTPUsed(ctx context.Context, userID uuid.UUID) error
-	PruneTOTPUsed(ctx context.Context) error
 }

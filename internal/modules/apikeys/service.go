@@ -163,10 +163,6 @@ func (s *Service) Revoke(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
-func (s *Service) Grants(ctx context.Context, id uuid.UUID) ([]Grant, error) {
-	return s.repo.GrantsForKey(ctx, id)
-}
-
 func (s *Service) AddGrant(ctx context.Context, id uuid.UUID, g Grant) error {
 	if err := validateGrant(g); err != nil {
 		return err

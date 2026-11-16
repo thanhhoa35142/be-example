@@ -12,7 +12,14 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/platform/ratelimit"
 )
 
-const AdminSessionCookie = "ph_admin_session"
+// Two HttpOnly cookies carry the admin session: a short-lived JWT access
+// token for API calls and a long-lived single-use refresh token. MFA only
+// gates login; the refresh token keeps the browser signed in across
+// access-token expiry and browser restarts.
+const (
+	AdminAccessCookie  = "ph_admin_access"
+	AdminRefreshCookie = "ph_admin_refresh"
+)
 
 const AdminCSRFHeader = "X-Pickhour-Admin"
 
@@ -41,36 +48,58 @@ func (h *AdminAuthHandler) denyFailed(c *gin.Context) bool {
 
 func (h *AdminAuthHandler) hitFailed(c *gin.Context) { h.failed.Hit(c.ClientIP()) }
 
-func setSessionCookie(c *gin.Context, token string, ttl time.Duration) {
+// adminCookieSecure controls the Secure flag on the admin cookies.
+// Browsers drop Secure cookies sent over plain HTTP, which silently kills
+// sessions — set ADMIN_COOKIE_SECURE=false only for HTTP dev/staging.
+var adminCookieSecure = true
+
+// SetAdminCookieSecure configures the session cookie Secure flag at boot.
+func SetAdminCookieSecure(secure bool) { adminCookieSecure = secure }
+
+func adminCookie(name, value string, ttl time.Duration) *http.Cookie {
 	// Lax, not Strict: the Google OAuth callback is a cross-site top-level GET
 	// and Strict would withhold the cookie, breaking account linking. Lax
 	// still blocks cookie-bearing cross-site POSTs, and mutations additionally
 	// require the X-Pickhour-Admin header + Origin check.
-	http.SetCookie(c.Writer, &http.Cookie{
-		Name:     AdminSessionCookie,
-		Value:    token,
+	return &http.Cookie{
+		Name:     name,
+		Value:    value,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   adminCookieSecure,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(ttl / time.Second),
-	})
+	}
 }
 
-func clearSessionCookie(c *gin.Context) {
-	http.SetCookie(c.Writer, &http.Cookie{
-		Name:     AdminSessionCookie,
-		Value:    "",
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   -1,
-	})
+func (h *AdminAuthHandler) setAuthCookies(c *gin.Context, pair *adminauth.TokenPair) {
+	http.SetCookie(c.Writer, adminCookie(AdminAccessCookie, pair.Access, h.svc.AccessTTL()))
+	http.SetCookie(c.Writer, adminCookie(AdminRefreshCookie, pair.Refresh, h.svc.RefreshTTL()))
 }
 
-func sessionToken(c *gin.Context) string {
-	v, err := c.Cookie(AdminSessionCookie)
+// clearAccessCookie drops only the access token. The middleware uses this on
+// auth failure so an expired access token never destroys the refresh cookie —
+// the client refreshes instead of re-authenticating.
+func clearAccessCookie(c *gin.Context) {
+	http.SetCookie(c.Writer, adminCookie(AdminAccessCookie, "", -time.Second))
+}
+
+// clearAuthCookies drops both credentials (logout, dead refresh token).
+func clearAuthCookies(c *gin.Context) {
+	http.SetCookie(c.Writer, adminCookie(AdminAccessCookie, "", -time.Second))
+	http.SetCookie(c.Writer, adminCookie(AdminRefreshCookie, "", -time.Second))
+}
+
+func accessToken(c *gin.Context) string {
+	v, err := c.Cookie(AdminAccessCookie)
+	if err != nil {
+		return ""
+	}
+	return v
+}
+
+func refreshToken(c *gin.Context) string {
+	v, err := c.Cookie(AdminRefreshCookie)
 	if err != nil {
 		return ""
 	}
@@ -150,7 +179,7 @@ func (h *AdminAuthHandler) TOTP(c *gin.Context) {
 		return
 	}
 	ua, ip := clientMeta(c)
-	res, _, raw, err := h.svc.ConfirmCode(c.Request.Context(), req.Challenge, req.Code, ua, ip)
+	res, pair, err := h.svc.ConfirmCode(c.Request.Context(), req.Challenge, req.Code, ua, ip)
 	if err != nil {
 		if errors.Is(err, adminauth.ErrInvalidCode) || errors.Is(err, adminauth.ErrInvalidCredentials) {
 			h.hitFailed(c)
@@ -158,7 +187,7 @@ func (h *AdminAuthHandler) TOTP(c *gin.Context) {
 		writeAuthError(c, err)
 		return
 	}
-	setSessionCookie(c, raw, h.svc.SessionTTL())
+	h.setAuthCookies(c, pair)
 	c.Set("adminUserID", res.User.ID)
 	c.JSON(http.StatusOK, gin.H{"data": res})
 }
@@ -173,7 +202,7 @@ func (h *AdminAuthHandler) Enroll(c *gin.Context) {
 		return
 	}
 	ua, ip := clientMeta(c)
-	res, _, raw, err := h.svc.ConfirmEnroll(c.Request.Context(), req.Challenge, req.Code, ua, ip)
+	res, pair, err := h.svc.ConfirmEnroll(c.Request.Context(), req.Challenge, req.Code, ua, ip)
 	if err != nil {
 		if errors.Is(err, adminauth.ErrInvalidCode) {
 			h.hitFailed(c)
@@ -181,13 +210,32 @@ func (h *AdminAuthHandler) Enroll(c *gin.Context) {
 		writeAuthError(c, err)
 		return
 	}
-	setSessionCookie(c, raw, h.svc.SessionTTL())
+	h.setAuthCookies(c, pair)
 	c.Set("adminUserID", res.User.ID)
 	c.JSON(http.StatusOK, gin.H{"data": res})
 }
 
+// Refresh rotates the refresh-token cookie into a new access+refresh pair.
+// It is public (no access auth) and single-use: replayed or concurrent
+// refreshes fail and the client must log in again.
+func (h *AdminAuthHandler) Refresh(c *gin.Context) {
+	if h.denyFailed(c) {
+		return
+	}
+	ua, ip := clientMeta(c)
+	pair, user, err := h.svc.RefreshSession(c.Request.Context(), refreshToken(c), ua, ip)
+	if err != nil {
+		clearAuthCookies(c)
+		writeAuthError(c, err)
+		return
+	}
+	h.setAuthCookies(c, pair)
+	c.Set("adminUserID", user.ID.String())
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"user": adminauth.UserInfo{ID: user.ID.String(), Email: user.Email}}})
+}
+
 func (h *AdminAuthHandler) Me(c *gin.Context) {
-	_, user, err := h.svc.Me(c.Request.Context(), sessionToken(c))
+	_, user, err := h.svc.Me(c.Request.Context(), accessToken(c))
 	if err != nil {
 		writeAuthError(c, err)
 		return
@@ -195,14 +243,16 @@ func (h *AdminAuthHandler) Me(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"user": adminauth.UserInfo{ID: user.ID.String(), Email: user.Email}}})
 }
 
+// Logout revokes the refresh session. It is public so an expired access
+// token can still end the session; the access JWT dies on its own TTL.
 func (h *AdminAuthHandler) Logout(c *gin.Context) {
-	_ = h.svc.Logout(c.Request.Context(), sessionToken(c))
-	clearSessionCookie(c)
+	_ = h.svc.Logout(c.Request.Context(), refreshToken(c))
+	clearAuthCookies(c)
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"status": "ok"}})
 }
 
 func (h *AdminAuthHandler) RecoveryCodes(c *gin.Context) {
-	codes, err := h.svc.RegenerateRecoveryCodes(c.Request.Context(), sessionToken(c))
+	codes, err := h.svc.RegenerateRecoveryCodes(c.Request.Context(), accessToken(c))
 	if err != nil {
 		writeAuthError(c, err)
 		return
@@ -211,7 +261,7 @@ func (h *AdminAuthHandler) RecoveryCodes(c *gin.Context) {
 }
 
 func (h *AdminAuthHandler) Sessions(c *gin.Context) {
-	items, err := h.svc.Sessions(c.Request.Context(), sessionToken(c))
+	items, err := h.svc.Sessions(c.Request.Context(), refreshToken(c))
 	if err != nil {
 		writeAuthError(c, err)
 		return
@@ -220,7 +270,7 @@ func (h *AdminAuthHandler) Sessions(c *gin.Context) {
 }
 
 func (h *AdminAuthHandler) RevokeOtherSessions(c *gin.Context) {
-	if err := h.svc.RevokeOtherSessions(c.Request.Context(), sessionToken(c)); err != nil {
+	if err := h.svc.RevokeOtherSessions(c.Request.Context(), refreshToken(c)); err != nil {
 		writeAuthError(c, err)
 		return
 	}
@@ -242,7 +292,7 @@ func (h *AdminAuthHandler) Password(c *gin.Context) {
 		httpx.WriteProblem(c, http.StatusBadRequest, httpx.CodeInvalidBody, "Invalid body", "expected currentPassword + newPassword")
 		return
 	}
-	err := h.svc.ChangePassword(c.Request.Context(), sessionToken(c), req.CurrentPassword, req.NewPassword)
+	err := h.svc.ChangePassword(c.Request.Context(), accessToken(c), refreshToken(c), req.CurrentPassword, req.NewPassword)
 	switch {
 	case err == nil:
 		c.JSON(http.StatusOK, gin.H{"data": gin.H{"status": "ok"}})

@@ -27,20 +27,8 @@ func mapAdminUser(row TAdminUser) *adminauth.User {
 		LastLoginAt:     tsPtr(row.LastLoginAt),
 		FailedAttempts:  int(row.FailedAttempts),
 		LockedUntil:     tsPtr(row.LockedUntil),
+		AuthEpoch:       row.AuthEpoch,
 		CreatedAt:       row.CreatedAt.UTC(),
-	}
-}
-
-func mapAdminSession(row TAdminSession) *adminauth.Session {
-	return &adminauth.Session{
-		ID:         row.ID,
-		TokenHash:  row.TokenHash,
-		UserID:     row.AdminUserID,
-		UserAgent:  row.UserAgent,
-		IP:         row.Ip,
-		CreatedAt:  row.CreatedAt.UTC(),
-		ExpiresAt:  row.ExpiresAt.UTC(),
-		LastSeenAt: row.LastSeenAt.UTC(),
 	}
 }
 
@@ -117,73 +105,6 @@ func (r *AdminAuthRepo) SetDisabled(ctx context.Context, id uuid.UUID, disabled 
 	return r.q.SetAdminUserDisabled(ctx, SetAdminUserDisabledParams{ID: id, Disabled: disabled})
 }
 
-func (r *AdminAuthRepo) CreateSession(ctx context.Context, tokenHash []byte, userID uuid.UUID, userAgent, ip string, expiresAt time.Time) (*adminauth.Session, error) {
-	row, err := r.q.CreateAdminSession(ctx, CreateAdminSessionParams{
-		TokenHash:   tokenHash,
-		AdminUserID: userID,
-		UserAgent:   userAgent,
-		Ip:          ip,
-		ExpiresAt:   expiresAt.UTC(),
-	})
-	if err != nil {
-		return nil, err
-	}
-	return mapAdminSession(row), nil
-}
-
-func (r *AdminAuthRepo) SessionByToken(ctx context.Context, tokenHash []byte) (*adminauth.Session, *adminauth.User, error) {
-	row, err := r.q.GetAdminSessionByTokenHash(ctx, tokenHash)
-	if err != nil {
-		return nil, nil, err
-	}
-	return &adminauth.Session{
-			ID:         row.ID,
-			TokenHash:  row.TokenHash,
-			UserID:     row.AdminUserID,
-			UserAgent:  row.UserAgent,
-			IP:         row.Ip,
-			CreatedAt:  row.CreatedAt.UTC(),
-			ExpiresAt:  row.ExpiresAt.UTC(),
-			LastSeenAt: row.LastSeenAt.UTC(),
-		}, &adminauth.User{
-			ID:              row.AdminUserID,
-			Email:           row.UserEmail,
-			DisabledAt:      tsPtr(row.UserDisabledAt),
-			TotpConfirmedAt: tsPtr(row.UserTotpConfirmedAt),
-		}, nil
-}
-
-func (r *AdminAuthRepo) TouchSession(ctx context.Context, sessionID uuid.UUID) error {
-	return r.q.TouchAdminSession(ctx, sessionID)
-}
-
-func (r *AdminAuthRepo) DeleteSession(ctx context.Context, tokenHash []byte) error {
-	return r.q.DeleteAdminSession(ctx, tokenHash)
-}
-
-func (r *AdminAuthRepo) ListSessions(ctx context.Context, userID uuid.UUID) ([]adminauth.Session, error) {
-	rows, err := r.q.ListAdminSessions(ctx, userID)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]adminauth.Session, 0, len(rows))
-	for _, row := range rows {
-		out = append(out, *mapAdminSession(row))
-	}
-	return out, nil
-}
-
-func (r *AdminAuthRepo) RevokeOtherSessions(ctx context.Context, userID uuid.UUID, keepTokenHash []byte) error {
-	var keep []byte
-	if keepTokenHash != nil {
-		keep = keepTokenHash
-	}
-	return r.q.RevokeOtherAdminSessions(ctx, RevokeOtherAdminSessionsParams{
-		AdminUserID:   userID,
-		KeepTokenHash: keep,
-	})
-}
-
 func (r *AdminAuthRepo) ReplaceRecoveryCodes(ctx context.Context, userID uuid.UUID, hashes [][]byte) error {
 	if len(hashes) == 0 {
 		return r.q.DeleteAdminRecoveryCodes(ctx, userID)
@@ -203,20 +124,4 @@ func (r *AdminAuthRepo) ConsumeRecoveryCode(ctx context.Context, userID uuid.UUI
 		CodeHash:    codeHash,
 	})
 	return n > 0, err
-}
-
-func (r *AdminAuthRepo) TryUsedTOTP(ctx context.Context, userID uuid.UUID, step int64) (bool, error) {
-	n, err := r.q.TryInsertAdminTOTPStep(ctx, TryInsertAdminTOTPStepParams{
-		AdminUserID: userID,
-		Step:        step,
-	})
-	return n > 0, err
-}
-
-func (r *AdminAuthRepo) DeleteTOTPUsed(ctx context.Context, userID uuid.UUID) error {
-	return r.q.DeleteAdminTOTPUsedForUser(ctx, userID)
-}
-
-func (r *AdminAuthRepo) PruneTOTPUsed(ctx context.Context) error {
-	return r.q.PruneAdminTOTPUsed(ctx)
 }

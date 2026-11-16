@@ -195,14 +195,14 @@ func AdminAuth(token string, sessions SessionAuthenticator, failed ratelimit.Che
 			c.Abort()
 			return
 		}
-		cookie, err := c.Cookie(AdminSessionCookie)
+		cookie, err := c.Cookie(AdminAccessCookie)
 		if err != nil {
 			cookie = ""
 		}
 		sess, user, err := sessions.Authenticate(c.Request.Context(), cookie)
 		if err != nil {
 
-			clearSessionCookie(c)
+			clearAccessCookie(c)
 			httpx.WriteProblem(c, http.StatusUnauthorized, httpx.CodeUnauthorized, "Unauthorized", "")
 			c.Abort()
 			return

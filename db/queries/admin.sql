@@ -230,16 +230,27 @@ ORDER BY day DESC;
 -- ---- admin console: run-now, plan limits, city packs, spot lookup ----
 
 -- name: RequestJobRun :one
+-- A generic run request clears any pending per-pack request so a stale pack
+-- slug can never leak into an unrelated run.
 UPDATE t_worker_job_schedules
-SET run_requested_at = now()
+SET run_requested_at = now(), run_requested_pack = NULL
 WHERE job = $1
 RETURNING *;
 
--- name: ClaimJobRunRequest :execrows
--- Atomic claim: with several worker replicas only one sees rows = 1.
+-- name: RequestJobRunForPack :one
 UPDATE t_worker_job_schedules
-SET run_requested_at = NULL
-WHERE job = $1 AND run_requested_at IS NOT NULL;
+SET run_requested_at = now(), run_requested_pack = $2
+WHERE job = $1
+RETURNING *;
+
+-- name: ClaimJobRunRequest :one
+-- Atomic claim: with several worker replicas only one sees a row. Returns the
+-- requested pack slug (NULL for a generic run); pgx.ErrNoRows means nothing
+-- was requested.
+UPDATE t_worker_job_schedules
+SET run_requested_at = NULL, run_requested_pack = NULL
+WHERE job = $1 AND run_requested_at IS NOT NULL
+RETURNING run_requested_pack;
 
 -- name: ListPlanLimits :many
 SELECT plan, feature, limit_value
@@ -339,3 +350,227 @@ UPDATE t_spots
 SET status = sqlc.arg('status'), status_reason = sqlc.narg('reason'),
     status_changed_at = now(), updated_at = now()
 WHERE id = sqlc.arg('id') AND status = ANY(sqlc.arg('from_statuses')::text[]);
+
+-- name: GetAdminSpotByID :one
+SELECT s.id, s.city_pack_id, s.kind, s.name, s.names,
+       ST_X(s.geom::geometry)::float8 AS lon,
+       ST_Y(s.geom::geometry)::float8 AS lat,
+       ST_AsGeoJSON(s.area)::json AS area_geojson,
+       s.country, s.city, s.tz, s.cell_id, s.status, s.status_reason,
+       s.status_changed_at, s.quality, s.attrs, s.curated,
+       s.merged_into, s.last_verified_at, s.created_at, s.updated_at,
+       p.slug AS pack_slug, p.name AS pack_name,
+       m.name AS merged_into_name
+FROM t_spots s
+JOIN t_city_packs p ON p.id = s.city_pack_id
+LEFT JOIN t_spots m ON m.id = s.merged_into
+WHERE s.id = $1;
+
+-- name: ListAdminSpotTransitions :many
+SELECT from_status, to_status, changed_at
+FROM t_state_transitions
+WHERE entity = 'spot' AND entity_id = $1
+ORDER BY changed_at DESC, id DESC
+LIMIT $2;
+
+-- name: ListAdminSpotScores :many
+SELECT ts_hour, score, confidence, cap_reason, reasons, computed_at
+FROM t_spot_scores
+WHERE spot_id = $1
+ORDER BY ts_hour DESC
+LIMIT $2;
+
+-- name: ListAdminSpotAuditEvents :many
+SELECT e.id, e.admin_user_id, u.email, e.auth_method, e.method, e.path,
+       e.status, e.client_ip, e.request_id, e.created_at
+FROM t_admin_audit_events e
+LEFT JOIN t_admin_users u ON u.id = e.admin_user_id
+WHERE e.path = $1
+ORDER BY e.id DESC
+LIMIT $2;
+
+-- name: SetJobScheduleEnabled :one
+UPDATE t_worker_job_schedules
+SET enabled = $2, updated_at = now()
+WHERE job = $1
+RETURNING *;
+
+-- ---- admin console: moderation history, ops lists, provider health ----
+
+-- name: ListSpotReportsAdmin :many
+-- Full report history (any status), newest first. Keyset on
+-- (created_at, id) DESC — same cursor shape as the pending list.
+SELECT r.id, r.spot_id, s.name AS spot_name, r.device_id, r.type, r.issue_code,
+       r.status, r.reviewed_at, r.created_at
+FROM t_spot_reports r
+JOIN t_spots s ON s.id = r.spot_id
+WHERE (sqlc.narg('status')::text IS NULL OR r.status = sqlc.narg('status'))
+  AND (sqlc.narg('type')::text IS NULL OR r.type = sqlc.narg('type'))
+  AND (sqlc.narg('spot_id')::uuid IS NULL OR r.spot_id = sqlc.narg('spot_id'))
+  AND (sqlc.narg('from_ts')::timestamptz IS NULL OR r.created_at >= sqlc.narg('from_ts'))
+  AND (sqlc.narg('to_ts')::timestamptz IS NULL OR r.created_at < sqlc.narg('to_ts'))
+  AND (sqlc.narg('before_ts')::timestamptz IS NULL
+       OR (r.created_at, r.id) < (sqlc.narg('before_ts')::timestamptz, sqlc.narg('before_id')::uuid))
+ORDER BY r.created_at DESC, r.id DESC
+LIMIT $1;
+
+-- name: GetSpotReportAdmin :one
+SELECT r.id, r.spot_id, s.name AS spot_name, r.device_id, r.type, r.issue_code,
+       r.status, r.reviewed_at, r.created_at
+FROM t_spot_reports r
+JOIN t_spots s ON s.id = r.spot_id
+WHERE r.id = $1;
+
+-- name: ListCrowdReportsAdmin :many
+SELECT cr.id, cr.spot_id, s.name AS spot_name, cr.device_id, cr.level,
+       cr.local_dow, cr.local_hour, cr.created_at
+FROM t_crowd_reports cr
+JOIN t_spots s ON s.id = cr.spot_id
+WHERE (sqlc.narg('spot_id')::uuid IS NULL OR cr.spot_id = sqlc.narg('spot_id'))
+  AND (sqlc.narg('device_id')::uuid IS NULL OR cr.device_id = sqlc.narg('device_id'))
+  AND (sqlc.narg('level')::smallint IS NULL OR cr.level = sqlc.narg('level'))
+  AND (sqlc.narg('from_ts')::timestamptz IS NULL OR cr.created_at >= sqlc.narg('from_ts'))
+  AND (sqlc.narg('to_ts')::timestamptz IS NULL OR cr.created_at < sqlc.narg('to_ts'))
+  AND (sqlc.narg('before_ts')::timestamptz IS NULL
+       OR (cr.created_at, cr.id) < (sqlc.narg('before_ts')::timestamptz, sqlc.narg('before_id')::uuid))
+ORDER BY cr.created_at DESC, cr.id DESC
+LIMIT $1;
+
+-- name: ListScoreFeedbacksAdmin :many
+SELECT f.id, f.spot_id, s.name AS spot_name, f.ts_hour, f.device_id, f.verdict,
+       f.created_at
+FROM t_score_feedbacks f
+JOIN t_spots s ON s.id = f.spot_id
+WHERE (sqlc.narg('spot_id')::uuid IS NULL OR f.spot_id = sqlc.narg('spot_id'))
+  AND (sqlc.narg('device_id')::uuid IS NULL OR f.device_id = sqlc.narg('device_id'))
+  AND (sqlc.narg('verdict')::smallint IS NULL OR f.verdict = sqlc.narg('verdict'))
+  AND (sqlc.narg('from_ts')::timestamptz IS NULL OR f.created_at >= sqlc.narg('from_ts'))
+  AND (sqlc.narg('to_ts')::timestamptz IS NULL OR f.created_at < sqlc.narg('to_ts'))
+  AND (sqlc.narg('before_ts')::timestamptz IS NULL
+       OR (f.created_at, f.id) < (sqlc.narg('before_ts')::timestamptz, sqlc.narg('before_id')::uuid))
+ORDER BY f.created_at DESC, f.id DESC
+LIMIT $1;
+
+-- name: ListAdminDevices :many
+SELECT d.id, d.apns_env, d.push_status, d.locale, d.tz, d.app_version,
+       d.created_at, d.last_seen_at, d.deleted_at,
+       (SELECT count(*) FROM t_device_subscriptions ds
+         WHERE ds.device_id = d.id)::bigint AS subscriptions
+FROM t_devices d
+WHERE (sqlc.narg('id')::uuid IS NULL OR d.id = sqlc.narg('id'))
+  AND (sqlc.narg('push_status')::text IS NULL OR d.push_status = sqlc.narg('push_status'))
+  AND (sqlc.arg('include_deleted')::bool OR d.deleted_at IS NULL)
+  AND (sqlc.narg('before_ts')::timestamptz IS NULL
+       OR (d.created_at, d.id) < (sqlc.narg('before_ts')::timestamptz, sqlc.narg('before_id')::uuid))
+ORDER BY d.created_at DESC, d.id DESC
+LIMIT $1;
+
+-- name: GetAdminDevice :one
+SELECT id, apns_env, push_status, locale, tz, app_version, prefs,
+       attest_key_id, created_at, last_seen_at, deleted_at
+FROM t_devices
+WHERE id = $1;
+
+-- name: ListAdminDeviceSubscriptions :many
+SELECT ds.original_transaction_id, ds.linked_at,
+       s.product_id, s.status, s.environment, s.ownership, s.is_trial,
+       s.auto_renew, s.expires_at, s.grace_expires_at, s.revoked_at,
+       s.last_signed_date
+FROM t_device_subscriptions ds
+JOIN t_subscriptions s ON s.original_transaction_id = ds.original_transaction_id
+WHERE ds.device_id = $1
+ORDER BY ds.linked_at DESC;
+
+-- name: ListAlertDeliveriesAdmin :many
+-- Dead-lettered pushes included: status filter covers claimed/sent/failed/dead.
+SELECT d.rule_id, d.window_start, d.status, d.attempts, d.claimed_at, d.sent_at,
+       d.apns_status, d.last_error, r.device_id, r.spot_id
+FROM t_alert_deliveries d
+JOIN t_alert_rules r ON r.id = d.rule_id
+WHERE (sqlc.narg('status')::text IS NULL OR d.status = sqlc.narg('status'))
+  AND (sqlc.narg('rule_id')::uuid IS NULL OR d.rule_id = sqlc.narg('rule_id'))
+  AND (sqlc.narg('device_id')::uuid IS NULL OR r.device_id = sqlc.narg('device_id'))
+  AND (sqlc.narg('apns_status')::int IS NULL OR d.apns_status = sqlc.narg('apns_status'))
+  AND (sqlc.narg('from_ts')::timestamptz IS NULL OR d.window_start >= sqlc.narg('from_ts'))
+  AND (sqlc.narg('to_ts')::timestamptz IS NULL OR d.window_start < sqlc.narg('to_ts'))
+  AND (sqlc.narg('before_ts')::timestamptz IS NULL
+       OR (d.window_start, d.rule_id) < (sqlc.narg('before_ts')::timestamptz, sqlc.narg('before_id')::uuid))
+ORDER BY d.window_start DESC, d.rule_id DESC
+LIMIT $1;
+
+-- name: ListAppleNotificationsAdmin :many
+SELECT notification_uuid, type, subtype, original_transaction_id, signed_date,
+       environment, status, attempts, last_error, received_at, processed_at
+FROM t_apple_notifications
+WHERE (sqlc.narg('status')::text IS NULL OR status = sqlc.narg('status'))
+  AND (sqlc.narg('type')::text IS NULL OR type = sqlc.narg('type'))
+  AND (sqlc.narg('environment')::text IS NULL OR environment = sqlc.narg('environment'))
+  AND (sqlc.narg('txn')::text IS NULL OR original_transaction_id = sqlc.narg('txn'))
+  AND (sqlc.narg('from_ts')::timestamptz IS NULL OR received_at >= sqlc.narg('from_ts'))
+  AND (sqlc.narg('to_ts')::timestamptz IS NULL OR received_at < sqlc.narg('to_ts'))
+  AND (sqlc.narg('before_ts')::timestamptz IS NULL
+       OR (received_at, notification_uuid) < (sqlc.narg('before_ts')::timestamptz, sqlc.narg('before_id')::uuid))
+ORDER BY received_at DESC, notification_uuid DESC
+LIMIT $1;
+
+-- name: ListProviderQuotas :many
+SELECT provider, day, used, updated_at
+FROM t_provider_quotas
+WHERE day >= $1
+ORDER BY day DESC, provider;
+
+-- name: ListRecentJobRuns :many
+SELECT id, job, city_pack_id, started_at, finished_at, status,
+       rows_affected, error, stats
+FROM t_job_runs
+WHERE job = $1
+ORDER BY id DESC
+LIMIT $2;
+
+-- name: ListIngestFeaturesAdmin :many
+-- Raw OSM feature layer, newest sightings first. The keyset cursor spans
+-- (seen_at, source, source_id) so ties inside one run stay stable.
+SELECT f.pack_id, p.slug AS pack_slug, f.source, f.source_id, f.role, f.kind,
+       f.amenity, f.quality, f.exclude_reason, f.version, f.run_id, f.seen_at
+FROM t_ingest_features f
+JOIN t_city_packs p ON p.id = f.pack_id
+WHERE (sqlc.narg('pack_slug')::text IS NULL OR p.slug = sqlc.narg('pack_slug'))
+  AND (sqlc.narg('role')::text IS NULL OR f.role = sqlc.narg('role'))
+  AND (sqlc.narg('source')::text IS NULL OR f.source = sqlc.narg('source'))
+  AND (sqlc.narg('run_id')::bigint IS NULL OR f.run_id = sqlc.narg('run_id'))
+  AND (sqlc.narg('before_ts')::timestamptz IS NULL
+       OR (f.seen_at, f.source, f.source_id) <
+          (sqlc.narg('before_ts')::timestamptz, sqlc.narg('before_source')::text, sqlc.narg('before_source_id')::text))
+ORDER BY f.seen_at DESC, f.source DESC, f.source_id DESC
+LIMIT $1;
+
+-- name: GetCityPackBySlug :one
+SELECT id, slug, status FROM t_city_packs WHERE slug = $1;
+
+-- ---- admin console: spot lifecycle ----
+
+-- name: AdminSetSpotCurated :execrows
+UPDATE t_spots SET curated = $2, updated_at = now()
+WHERE id = $1 AND curated IS DISTINCT FROM $2;
+
+-- name: AdminUpdateSpotName :execrows
+UPDATE t_spots SET name = $2, updated_at = now()
+WHERE id = $1 AND name IS DISTINCT FROM $2;
+
+-- name: GetSpotPackAndStatus :one
+SELECT city_pack_id, status, merged_into FROM t_spots WHERE id = $1;
+
+-- name: AdminMergeSpot :execrows
+-- Merge is ingest-owned in spirit but the column pair is simple: mark the row
+-- merged and point it at the surviving spot. The merged_pair CHECK keeps the
+-- two columns consistent in one statement.
+UPDATE t_spots SET status = 'merged', merged_into = $2,
+    status_reason = 'merged_by_admin', status_changed_at = now(), updated_at = now()
+WHERE id = $1 AND status <> 'merged' AND merged_into IS NULL;
+
+-- name: AdminUnmergeSpot :execrows
+-- Back to pending (not the unknowable previous status) so the next ingest
+-- run re-evaluates the spot from its sources.
+UPDATE t_spots SET status = 'pending', merged_into = NULL, status_reason = NULL,
+    status_changed_at = now(), updated_at = now()
+WHERE id = $1 AND status = 'merged' AND merged_into IS NOT NULL;
