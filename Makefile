@@ -31,6 +31,9 @@ worker: ## Run the background worker
 mcp: ## Run the MCP server (Streamable HTTP on :8081/mcp)
 	go run ./cmd/mcp
 
+mcp-ro: ## Create/update the mcp_ro read-only DB role for MCP db_query
+	./scripts/mcp-ro-setup.sh
+
 keyctl: ## Build the API-key CLI
 	go build -o bin/keyctl ./cmd/keyctl
 
