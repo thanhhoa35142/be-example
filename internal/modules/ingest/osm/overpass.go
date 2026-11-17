@@ -23,7 +23,7 @@ func overpassQuery(b Bounds) string {
 	return fmt.Sprintf(`[out:json][timeout:180];(
   nwr["leisure"~"^(park|picnic_table|playground|firepit|dog_park)$"]%s;
   nwr["natural"="beach"]%s;
-  nwr["tourism"~"^(picnic_site|camp_site)$"]%s;
+  nwr["tourism"="picnic_site"]%s;
   nwr["amenity"~"^(toilets|drinking_water|bbq|shelter|parking|bicycle_parking)$"]%s;
 );out geom;`, bbox, bbox, bbox, bbox)
 }
