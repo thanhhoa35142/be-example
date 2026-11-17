@@ -2,21 +2,24 @@ name: weather-refresh
 
 # Self-hosted Open-Meteo weather refresh (docs/WEATHER_SELFHOST_PROPOSAL.md).
 # Each run: spin up an ephemeral Postgres, restore the slim picnic_ci dump
-# from the `weather-test-db` release, sync GFS/GEFS + DEM from the
-# open-data bucket, serve the forecast API locally, then run
+# from the private Backblaze B2 bucket (picnic_ci.dump), sync GFS/GEFS +
+# DEM from the open-data bucket, serve the forecast API locally, then run
 # `worker -job weather.refresh` against the ephemeral DB.
 #
-# Phase 2 status: workflow_dispatch ONLY — no schedule yet. Enable the
-# cron below after measuring real GFS publication lag on the bucket.
-# GFS runs at 00/06/12/18 UTC; candidate cron (delay ~3-4h):
-#   schedule:
-#     - cron: "30 3,9,15,21 * * *"
+# Schedule enabled after gfs-lag-probe measurements (2026-11-15/16):
+# gefs05 precipitation_probability is the bottleneck, landing ~6.7h
+# after each GFS cycle (00/06/12/18 UTC), with one observed outlier
+# >7.5h. Cron runs ~80min after the typical landing (~00:42/06:42/
+# 12:42/18:42 UTC):
+#   cron: "0 2,8,14,20 * * *"   -> 02:00, 08:00, 14:00, 20:00 UTC
 #
 # Prod path (later): point DATABASE_URL at the prod DB over Tailscale
 # (tag:ci -> tcp:5432 ACL, secret TS_AUTHKEY + PROD_DATABASE_URL), and
 # disable this ephemeral-DB path via the `target` input.
 
 on:
+  schedule:
+    - cron: "0 2,8,14,20 * * *"
   workflow_dispatch:
     inputs:
       target:
@@ -62,9 +65,11 @@ jobs:
           --health-retries 10
 
     env:
-      MODELS: ${{ inputs.models }}
-      API_MODELS: ${{ inputs.api_models }}
-      PAST_DAYS: ${{ inputs.past_days }}
+      # `inputs` is empty on schedule events — fall back to the
+      # workflow_dispatch defaults so cron runs get the same config.
+      MODELS: ${{ inputs.models || 'ncep_gfs013,ncep_gefs025,ncep_gefs05' }}
+      API_MODELS: ${{ inputs.api_models || 'gfs_global' }}
+      PAST_DAYS: ${{ inputs.past_days || '2' }}
       VARS: "temperature_2m,relative_humidity_2m,dew_point_2m,wind_u_component_10m,wind_v_component_10m,precipitation,precipitation_probability,cloud_cover,uv_index,shortwave_radiation"
       IMAGE: ghcr.io/open-meteo/open-meteo:latest
       DATABASE_URL: postgres://postgres:test@localhost:5432/picnic?sslmode=disable
@@ -81,9 +86,16 @@ jobs:
         run: go build -o /tmp/worker ./cmd/worker
 
       - name: Download test DB dump
+        # picnic_ci.dump lives in a private B2 bucket — the repo is public,
+        # so dumps must not go through public releases/artifacts.
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release download weather-test-db -p picnic_ci.dump -R ${{ github.repository }} --clobber --dir /tmp
+          AWS_ACCESS_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+          AWS_DEFAULT_REGION: us-west-005
+        run: >-
+          aws s3 cp "s3://${{ secrets.B2_BUCKET_NAME }}/picnic_ci.dump"
+          /tmp/picnic_ci.dump
+          --endpoint-url "${{ secrets.B2_ENDPOINT }}"
 
       - name: Restore dump
         run: |

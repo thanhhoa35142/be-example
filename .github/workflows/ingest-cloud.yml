@@ -201,8 +201,9 @@ jobs:
           # in the dump (schema_migrations says they exist; -T would drop
           # them and break ingest on the restored DB).
           #
-          # The artifact is uploaded to a PUBLIC repo, so every table that
-          # can hold credentials or user-generated data must be excluded
+          # Dumps go to the private B2 bucket (secrets B2_*), never to
+          # public artifacts — every table that can hold credentials or
+          # user-generated data must be excluded
           # with --exclude-table-data (schema stays, rows don't):
           #   admin auth: t_admin_users/sessions/google_tokens/
           #     recovery_codes/totp_used/audit_events
@@ -240,14 +241,24 @@ jobs:
             -f /out/pickhour-cloud.dump
           ls -lh pickhour-cloud.dump
 
+      - name: Upload dump to B2
+        # Private bucket — the repo is public, so the dump must not be
+        # exposed via artifacts or releases.
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+          AWS_DEFAULT_REGION: us-west-005
+        run: >-
+          aws s3 cp pickhour-cloud.dump
+          "s3://${{ secrets.B2_BUCKET_NAME }}/pickhour-cloud.dump"
+          --endpoint-url "${{ secrets.B2_ENDPOINT }}"
+
       - uses: actions/upload-artifact@v4
         with:
           name: pickhour-cloud-dump
-          path: |
-            pickhour-cloud.dump
-            ingest-summary.md
+          path: ingest-summary.md
           retention-days: 30
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: Fail on pack failures
         run: |
