@@ -1,7 +1,7 @@
-# Perf-test stack: same services as docker-compose.yml but sized for a
-# ~3 vCPU / 6 GB VM (GitHub runner is 4c/16GB — limits keep numbers
-# comparable to the target box; absolute values still skew because the
-# load generator shares the host).
+# Perf-test stack, run locally: same services as docker-compose.yml but
+# sized for the ~3 vCPU / 6 GB prod VPS (limits keep numbers comparable to
+# that box; absolute values still skew because the k6 load generator shares
+# the host).
 #
 # Usage:
 #   docker compose -f docker-compose.perf.yml up -d          # stack only
