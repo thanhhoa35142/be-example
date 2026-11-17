@@ -17,3 +17,6 @@ perf/out/
 
 # Local ingest extracts (multi-GB runtime data)
 /data/
+
+# Keep spec/roadmap/notes docs local-only (not on remote)
+docs/*.md
