@@ -104,4 +104,5 @@ type UpsertWeatherHourlyParams struct {
 	Cloud      pgtype.Int2   `json:"cloud"`
 	Provider   string        `json:"provider"`
 	FetchedAt  time.Time     `json:"fetched_at"`
+	PrecipMm   pgtype.Float4 `json:"precip_mm"`
 }

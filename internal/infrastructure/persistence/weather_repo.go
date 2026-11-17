@@ -67,6 +67,7 @@ func (r *WeatherRepo) ReplaceRows(ctx context.Context, cellID int64, from, to ti
 			PrecipProb: i2(row.PrecipProb), Wind: f4(row.WindKmh),
 			Uv: f4(row.UV), Cloud: i2(row.Cloud),
 			Provider: row.Provider, FetchedAt: row.FetchedAt,
+			PrecipMm: f4(row.PrecipMM),
 		}
 	}
 	if _, err := q.UpsertWeatherHourly(ctx, params); err != nil {

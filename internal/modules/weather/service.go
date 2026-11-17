@@ -18,6 +18,13 @@ const ForecastDays = 8
 
 const retentionDays = 14
 
+// PastHours of history a refresh asks the provider for (and may rewrite).
+// Rows older than that are never touched by a refresh; they are removed only
+// by retention (retentionDays here, and the purge job). The wet-grass
+// estimate needs recent past precipitation, which a forecast-only refresh
+// would otherwise only have as the last forecast made before each hour.
+const PastHours = 48
+
 const maxConcurrentFetches = 8
 
 type Service struct {
@@ -90,24 +97,13 @@ func (s *Service) Refresh(ctx context.Context) (Stats, error) {
 				fail(err)
 				return nil
 			}
-			points, err := s.provider.Forecast(gctx, lat, lng, now, to)
+			points, err := s.provider.Forecast(gctx, lat, lng, now.Add(-PastHours*time.Hour), to)
 			if err != nil {
 				fail(err)
 				return nil
 			}
-			rows := make([]Row, 0, len(points))
-			for _, p := range points {
-				if p.TS.Before(now) || p.TS.After(to) {
-					continue
-				}
-				rows = append(rows, Row{
-					CellID: cellID, TS: p.TS.UTC(),
-					TempC: p.TempC, FeelsLikeC: p.FeelsLikeC, PrecipProb: p.PrecipProb,
-					WindKmh: p.WindKmh, UV: p.UV, Cloud: p.Cloud,
-					Provider: s.provider.Name(), FetchedAt: fetchedAt,
-				})
-			}
-			if err := s.repo.ReplaceRows(gctx, cellID, now, to, rows); err != nil {
+			rows, replaceFrom := buildRows(cellID, points, now, to, s.provider.Name(), fetchedAt)
+			if err := s.repo.ReplaceRows(gctx, cellID, replaceFrom, to, rows); err != nil {
 				fail(err)
 				return nil
 			}
@@ -131,4 +127,52 @@ func (s *Service) Refresh(ctx context.Context) (Stats, error) {
 		return st, err
 	}
 	return st, nil
+}
+
+// buildRows turns provider points into rows for one cell and returns where
+// the replace window starts.
+//
+// Hours in [now, to] are the forecast and are always replaced, exactly as
+// before. Past hours (at most PastHours back) are written only as the
+// unbroken run of hours with data ending at now-1h, and the replace window
+// starts at the oldest of them. A provider that returns no past hours, or
+// returns them as nulls (e.g. a self-hosted instance synced with too few
+// --past-days), therefore leaves the stored history untouched: the window
+// then starts at now, as it always did.
+func buildRows(cellID int64, points []Point, now, to time.Time, provider string, fetchedAt time.Time) ([]Row, time.Time) {
+	pastFrom := now.Add(-PastHours * time.Hour)
+	toRow := func(p Point) Row {
+		return Row{
+			CellID: cellID, TS: p.TS.UTC(),
+			TempC: p.TempC, FeelsLikeC: p.FeelsLikeC, PrecipProb: p.PrecipProb, PrecipMM: p.PrecipMM,
+			WindKmh: p.WindKmh, UV: p.UV, Cloud: p.Cloud,
+			Provider: provider, FetchedAt: fetchedAt,
+		}
+	}
+
+	rows := make([]Row, 0, len(points))
+	past := make(map[time.Time]Point)
+	for _, p := range points {
+		ts := p.TS.UTC()
+		switch {
+		case ts.After(to) || ts.Before(pastFrom):
+		case ts.Before(now):
+			if ts.Truncate(time.Hour).Equal(ts) && p.hasData() {
+				past[ts] = p
+			}
+		default:
+			rows = append(rows, toRow(p))
+		}
+	}
+
+	replaceFrom := now
+	for ts := now.Add(-time.Hour); !ts.Before(pastFrom); ts = ts.Add(-time.Hour) {
+		p, ok := past[ts]
+		if !ok {
+			break
+		}
+		rows = append(rows, toRow(p))
+		replaceFrom = ts
+	}
+	return rows, replaceFrom
 }

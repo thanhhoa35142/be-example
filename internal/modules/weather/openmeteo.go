@@ -45,6 +45,7 @@ type openMeteoRaw struct {
 		Temperature2m            []json.RawMessage `json:"temperature_2m"`
 		ApparentTemperature      []json.RawMessage `json:"apparent_temperature"`
 		PrecipitationProbability []json.RawMessage `json:"precipitation_probability"`
+		Precipitation            []json.RawMessage `json:"precipitation"`
 		WindSpeed10m             []json.RawMessage `json:"wind_speed_10m"`
 		UVIndex                  []json.RawMessage `json:"uv_index"`
 		CloudCover               []json.RawMessage `json:"cloud_cover"`
@@ -55,7 +56,7 @@ func (o *OpenMeteo) Forecast(ctx context.Context, lat, lng float64, from, to tim
 	q := url.Values{
 		"latitude":           {strconv.FormatFloat(lat, 'f', 4, 64)},
 		"longitude":          {strconv.FormatFloat(lng, 'f', 4, 64)},
-		"hourly":             {"temperature_2m,apparent_temperature,precipitation_probability,wind_speed_10m,uv_index,cloud_cover"},
+		"hourly":             {"temperature_2m,apparent_temperature,precipitation_probability,precipitation,wind_speed_10m,uv_index,cloud_cover"},
 		"timezone":           {"UTC"},
 		"start_date":         {from.UTC().Format("2006-01-02")},
 		"end_date":           {to.UTC().Format("2006-01-02")},
@@ -99,6 +100,7 @@ func (o *OpenMeteo) Forecast(ctx context.Context, lat, lng float64, from, to tim
 			TempC:      jsonFloat(raw.Hourly.Temperature2m, i),
 			FeelsLikeC: jsonFloat(raw.Hourly.ApparentTemperature, i),
 			PrecipProb: jsonInt(raw.Hourly.PrecipitationProbability, i),
+			PrecipMM:   nonNegative(jsonFloat(raw.Hourly.Precipitation, i)),
 			WindKmh:    jsonFloat(raw.Hourly.WindSpeed10m, i),
 			UV:         jsonFloat(raw.Hourly.UVIndex, i),
 			Cloud:      jsonInt(raw.Hourly.CloudCover, i),
@@ -116,6 +118,15 @@ func jsonFloat(arr []json.RawMessage, i int) *float64 {
 		return nil
 	}
 	return &v
+}
+
+// nonNegative drops impossible negative amounts (the column has a >= 0
+// check; one bad value must not fail the whole cell's insert).
+func nonNegative(v *float64) *float64 {
+	if v == nil || *v < 0 {
+		return nil
+	}
+	return v
 }
 
 func jsonInt(arr []json.RawMessage, i int) *int {

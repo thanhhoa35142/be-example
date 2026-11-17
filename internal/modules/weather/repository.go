@@ -11,6 +11,7 @@ type Row struct {
 	TempC      *float64
 	FeelsLikeC *float64
 	PrecipProb *int
+	PrecipMM   *float64
 	WindKmh    *float64
 	UV         *float64
 	Cloud      *int
