@@ -46,7 +46,7 @@ func ClientFromEnv() (*Client, error) {
 	}
 	bundleID := os.Getenv("APNS_BUNDLE_ID")
 	if bundleID == "" {
-		bundleID = "com.example.MyApp"
+		bundleID = "app.pickhour"
 	}
 	return newClient(Config{
 		KeyID: keyID, TeamID: teamID, KeyPEM: keyPEM, BundleID: bundleID,
