@@ -627,6 +627,16 @@ func RecNormalize(v url.Values) {
 	canonicalizeFilterParams(v)
 }
 
+// NearbyNormalize rounds coordinates to ~1.1km for the cache key. Unlike
+// canonGeo this intentionally loses precision: the forecast granularity is
+// coarser than that anyway, and it keeps exact user positions out of Redis.
+func NearbyNormalize(v url.Values) {
+	keepOnly(v, "lat", "lng")
+	round2 := func(f float64) float64 { return math.Round(f*100) / 100 }
+	canon1(v, "lat", canonFloat(round2))
+	canon1(v, "lng", canonFloat(round2))
+}
+
 func DropQueryParams(v url.Values) {
 	for k := range v {
 		delete(v, k)

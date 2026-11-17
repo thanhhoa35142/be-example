@@ -47,7 +47,7 @@ func openService() (*adminauth.Service, func(), error) {
 		}
 		pcancel()
 	}
-	svc, err := adminauth.NewService(persistence.NewAdminAuthRepo(persistence.New(pool)), store, nil, adminauth.DefaultConfig())
+	svc, err := adminauth.NewService(persistence.NewAdminAuthRepo(persistence.New(pool)), store, adminauth.NewMemoryRefreshStore(), adminauth.NewMemoryReplayStore(), nil, nil, adminauth.DefaultConfig())
 	if err != nil {
 		cleanup()
 		return nil, nil, err

@@ -35,8 +35,10 @@ var jobScheduleLimits = map[string]jobScheduleLimit{
 	"crowd.refresh":          {min: 60 * 60, max: 30 * 24 * 60 * 60, desc: "Refresh provider crowd estimates"},
 	"crowd.aggregate":        {min: 60, max: 24 * 60 * 60, desc: "Aggregate community crowd reports"},
 	"scoring.recompute":      {min: 5 * 60, max: 6 * 60 * 60, desc: "Recompute spot scores for the forecast window"},
+	"getaways.refresh":       {min: 15 * 60, max: 24 * 60 * 60, desc: "Refresh the city weather outlook behind Getaways"},
 	"alerts.evaluate":        {min: 60, max: 60 * 60, desc: "Evaluate alert rules and queue notifications"},
 	"digest.weekly":          {min: 15 * 60, max: 60 * 60, desc: "Send scheduled digest notifications"},
+	"nudge.goodday":          {min: 5 * 60, max: 60 * 60, desc: "Send good-day pushes to users who have gone quiet"},
 	"holidays.refresh":       {min: 24 * 60 * 60, max: 30 * 24 * 60 * 60, desc: "Refresh the public-holiday calendar"},
 	"retention.purge":        {min: 60 * 60, max: 30 * 24 * 60 * 60, desc: "Delete expired job runs, events and reports"},
 	"ingest.osm":             {min: 60 * 60, max: 7 * 24 * 60 * 60, desc: "Import OSM city packs"},
@@ -157,6 +159,10 @@ func (s *Service) JobRun(ctx context.Context, id int64) (JobRun, error) {
 	return s.repo.GetJobRun(ctx, id)
 }
 
+func (s *Service) JobRunsForJob(ctx context.Context, job string, limit int) ([]JobRun, error) {
+	return s.repo.ListJobRunsForJob(ctx, job, clampLimit(limit))
+}
+
 func (s *Service) RecordAudit(ctx context.Context, e AuditEvent) error {
 	return s.repo.InsertAuditEvent(ctx, e)
 }
@@ -225,6 +231,21 @@ func (s *Service) UpdateJobSchedule(ctx context.Context, job string, intervalSec
 		return JobSchedule{}, err
 	}
 	schedule, err := s.repo.UpdateJobSchedule(ctx, job, intervalSeconds)
+	if err != nil {
+		return JobSchedule{}, err
+	}
+	schedule.MinIntervalSeconds = limits.min
+	schedule.MaxIntervalSeconds = limits.max
+	schedule.Description = limits.desc
+	return schedule, nil
+}
+
+func (s *Service) SetJobScheduleEnabled(ctx context.Context, job string, enabled bool) (JobSchedule, error) {
+	limits, ok := jobScheduleLimits[job]
+	if !ok {
+		return JobSchedule{}, ErrJobScheduleNotFound
+	}
+	schedule, err := s.repo.SetJobScheduleEnabled(ctx, job, enabled)
 	if err != nil {
 		return JobSchedule{}, err
 	}

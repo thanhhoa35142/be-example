@@ -31,8 +31,8 @@ worker: ## Run the background worker
 mcp: ## Run the MCP server (Streamable HTTP on :8081/mcp)
 	go run ./cmd/mcp
 
-keyctl: ## Build the API-key CLI
-	go build -o bin/keyctl ./cmd/keyctl
+mcp-ro: ## Create/update the mcp_ro read-only DB role for MCP db_query
+	./scripts/mcp-ro-setup.sh
 
 dev: db-up ## Hot-reload dev mode (requires air)
 	air
@@ -40,7 +40,7 @@ dev: db-up ## Hot-reload dev mode (requires air)
 build: ## Build binary
 	go build -o bin/api ./cmd/api
 
-test: ## Run unit tests
+test: ## Run tests (integration tests need TEST_DATABASE_URL / REDIS_TEST_URL)
 	go test ./...
 
 lint: ## golangci-lint + gofmt check

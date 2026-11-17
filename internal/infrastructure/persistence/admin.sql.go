@@ -120,6 +120,48 @@ func (q *Queries) AdminEventNameCounts(ctx context.Context, arg AdminEventNameCo
 	return items, nil
 }
 
+const adminMergeSpot = `-- name: AdminMergeSpot :execrows
+UPDATE t_spots SET status = 'merged', merged_into = $2,
+    status_reason = 'merged_by_admin', status_changed_at = now(), updated_at = now()
+WHERE id = $1 AND status <> 'merged' AND merged_into IS NULL
+`
+
+type AdminMergeSpotParams struct {
+	ID         uuid.UUID   `json:"id"`
+	MergedInto pgtype.UUID `json:"merged_into"`
+}
+
+// Merge is ingest-owned in spirit but the column pair is simple: mark the row
+// merged and point it at the surviving spot. The merged_pair CHECK keeps the
+// two columns consistent in one statement.
+func (q *Queries) AdminMergeSpot(ctx context.Context, arg AdminMergeSpotParams) (int64, error) {
+	result, err := q.db.Exec(ctx, adminMergeSpot, arg.ID, arg.MergedInto)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const adminSetSpotCurated = `-- name: AdminSetSpotCurated :execrows
+
+UPDATE t_spots SET curated = $2, updated_at = now()
+WHERE id = $1 AND curated IS DISTINCT FROM $2
+`
+
+type AdminSetSpotCuratedParams struct {
+	ID      uuid.UUID `json:"id"`
+	Curated bool      `json:"curated"`
+}
+
+// ---- admin console: spot lifecycle ----
+func (q *Queries) AdminSetSpotCurated(ctx context.Context, arg AdminSetSpotCuratedParams) (int64, error) {
+	result, err := q.db.Exec(ctx, adminSetSpotCurated, arg.ID, arg.Curated)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const adminSetSpotStatus = `-- name: AdminSetSpotStatus :execrows
 UPDATE t_spots
 SET status = $1, status_reason = $2,
@@ -143,6 +185,40 @@ func (q *Queries) AdminSetSpotStatus(ctx context.Context, arg AdminSetSpotStatus
 		arg.ID,
 		arg.FromStatuses,
 	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const adminUnmergeSpot = `-- name: AdminUnmergeSpot :execrows
+UPDATE t_spots SET status = 'pending', merged_into = NULL, status_reason = NULL,
+    status_changed_at = now(), updated_at = now()
+WHERE id = $1 AND status = 'merged' AND merged_into IS NOT NULL
+`
+
+// Back to pending (not the unknowable previous status) so the next ingest
+// run re-evaluates the spot from its sources.
+func (q *Queries) AdminUnmergeSpot(ctx context.Context, id uuid.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, adminUnmergeSpot, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const adminUpdateSpotName = `-- name: AdminUpdateSpotName :execrows
+UPDATE t_spots SET name = $2, updated_at = now()
+WHERE id = $1 AND name IS DISTINCT FROM $2
+`
+
+type AdminUpdateSpotNameParams struct {
+	ID   uuid.UUID   `json:"id"`
+	Name pgtype.Text `json:"name"`
+}
+
+func (q *Queries) AdminUpdateSpotName(ctx context.Context, arg AdminUpdateSpotNameParams) (int64, error) {
+	result, err := q.db.Exec(ctx, adminUpdateSpotName, arg.ID, arg.Name)
 	if err != nil {
 		return 0, err
 	}
@@ -186,19 +262,21 @@ func (q *Queries) AlertDeliveryStatusCounts(ctx context.Context, arg AlertDelive
 	return items, nil
 }
 
-const claimJobRunRequest = `-- name: ClaimJobRunRequest :execrows
+const claimJobRunRequest = `-- name: ClaimJobRunRequest :one
 UPDATE t_worker_job_schedules
-SET run_requested_at = NULL
+SET run_requested_at = NULL, run_requested_pack = NULL
 WHERE job = $1 AND run_requested_at IS NOT NULL
+RETURNING run_requested_pack
 `
 
-// Atomic claim: with several worker replicas only one sees rows = 1.
-func (q *Queries) ClaimJobRunRequest(ctx context.Context, job string) (int64, error) {
-	result, err := q.db.Exec(ctx, claimJobRunRequest, job)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+// Atomic claim: with several worker replicas only one sees a row. Returns the
+// requested pack slug (NULL for a generic run); pgx.ErrNoRows means nothing
+// was requested.
+func (q *Queries) ClaimJobRunRequest(ctx context.Context, job string) (pgtype.Text, error) {
+	row := q.db.QueryRow(ctx, claimJobRunRequest, job)
+	var run_requested_pack pgtype.Text
+	err := row.Scan(&run_requested_pack)
+	return run_requested_pack, err
 }
 
 const closeSpotForReport = `-- name: CloseSpotForReport :execrows
@@ -564,6 +642,140 @@ func (q *Queries) GetAdminCityPack(ctx context.Context, id uuid.UUID) (GetAdminC
 	return i, err
 }
 
+const getAdminDevice = `-- name: GetAdminDevice :one
+SELECT id, apns_env, push_status, locale, tz, app_version, prefs,
+       attest_key_id, created_at, last_seen_at, deleted_at
+FROM t_devices
+WHERE id = $1
+`
+
+type GetAdminDeviceRow struct {
+	ID          uuid.UUID          `json:"id"`
+	ApnsEnv     pgtype.Text        `json:"apns_env"`
+	PushStatus  string             `json:"push_status"`
+	Locale      pgtype.Text        `json:"locale"`
+	Tz          pgtype.Text        `json:"tz"`
+	AppVersion  pgtype.Text        `json:"app_version"`
+	Prefs       []byte             `json:"prefs"`
+	AttestKeyID pgtype.Text        `json:"attest_key_id"`
+	CreatedAt   time.Time          `json:"created_at"`
+	LastSeenAt  pgtype.Timestamptz `json:"last_seen_at"`
+	DeletedAt   pgtype.Timestamptz `json:"deleted_at"`
+}
+
+func (q *Queries) GetAdminDevice(ctx context.Context, id uuid.UUID) (GetAdminDeviceRow, error) {
+	row := q.db.QueryRow(ctx, getAdminDevice, id)
+	var i GetAdminDeviceRow
+	err := row.Scan(
+		&i.ID,
+		&i.ApnsEnv,
+		&i.PushStatus,
+		&i.Locale,
+		&i.Tz,
+		&i.AppVersion,
+		&i.Prefs,
+		&i.AttestKeyID,
+		&i.CreatedAt,
+		&i.LastSeenAt,
+		&i.DeletedAt,
+	)
+	return i, err
+}
+
+const getAdminSpotByID = `-- name: GetAdminSpotByID :one
+SELECT s.id, s.city_pack_id, s.kind, s.name, s.names,
+       ST_X(s.geom::geometry)::float8 AS lon,
+       ST_Y(s.geom::geometry)::float8 AS lat,
+       ST_AsGeoJSON(s.area)::json AS area_geojson,
+       s.country, s.city, s.tz, s.cell_id, s.status, s.status_reason,
+       s.status_changed_at, s.quality, s.attrs, s.curated,
+       s.merged_into, s.last_verified_at, s.created_at, s.updated_at,
+       p.slug AS pack_slug, p.name AS pack_name,
+       m.name AS merged_into_name
+FROM t_spots s
+JOIN t_city_packs p ON p.id = s.city_pack_id
+LEFT JOIN t_spots m ON m.id = s.merged_into
+WHERE s.id = $1
+`
+
+type GetAdminSpotByIDRow struct {
+	ID              uuid.UUID          `json:"id"`
+	CityPackID      uuid.UUID          `json:"city_pack_id"`
+	Kind            string             `json:"kind"`
+	Name            pgtype.Text        `json:"name"`
+	Names           []byte             `json:"names"`
+	Lon             float64            `json:"lon"`
+	Lat             float64            `json:"lat"`
+	AreaGeojson     []byte             `json:"area_geojson"`
+	Country         string             `json:"country"`
+	City            pgtype.Text        `json:"city"`
+	Tz              string             `json:"tz"`
+	CellID          int64              `json:"cell_id"`
+	Status          string             `json:"status"`
+	StatusReason    pgtype.Text        `json:"status_reason"`
+	StatusChangedAt pgtype.Timestamptz `json:"status_changed_at"`
+	Quality         pgtype.Int2        `json:"quality"`
+	Attrs           []byte             `json:"attrs"`
+	Curated         bool               `json:"curated"`
+	MergedInto      pgtype.UUID        `json:"merged_into"`
+	LastVerifiedAt  pgtype.Timestamptz `json:"last_verified_at"`
+	CreatedAt       time.Time          `json:"created_at"`
+	UpdatedAt       time.Time          `json:"updated_at"`
+	PackSlug        string             `json:"pack_slug"`
+	PackName        string             `json:"pack_name"`
+	MergedIntoName  pgtype.Text        `json:"merged_into_name"`
+}
+
+func (q *Queries) GetAdminSpotByID(ctx context.Context, id uuid.UUID) (GetAdminSpotByIDRow, error) {
+	row := q.db.QueryRow(ctx, getAdminSpotByID, id)
+	var i GetAdminSpotByIDRow
+	err := row.Scan(
+		&i.ID,
+		&i.CityPackID,
+		&i.Kind,
+		&i.Name,
+		&i.Names,
+		&i.Lon,
+		&i.Lat,
+		&i.AreaGeojson,
+		&i.Country,
+		&i.City,
+		&i.Tz,
+		&i.CellID,
+		&i.Status,
+		&i.StatusReason,
+		&i.StatusChangedAt,
+		&i.Quality,
+		&i.Attrs,
+		&i.Curated,
+		&i.MergedInto,
+		&i.LastVerifiedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.PackSlug,
+		&i.PackName,
+		&i.MergedIntoName,
+	)
+	return i, err
+}
+
+const getCityPackBySlug = `-- name: GetCityPackBySlug :one
+SELECT id, slug, status FROM t_city_packs WHERE slug = $1
+`
+
+type GetCityPackBySlugRow struct {
+	ID     uuid.UUID `json:"id"`
+	Slug   string    `json:"slug"`
+	Status string    `json:"status"`
+}
+
+func (q *Queries) GetCityPackBySlug(ctx context.Context, slug string) (GetCityPackBySlugRow, error) {
+	row := q.db.QueryRow(ctx, getCityPackBySlug, slug)
+	var i GetCityPackBySlugRow
+	err := row.Scan(&i.ID, &i.Slug, &i.Status)
+	return i, err
+}
+
 const getCityPackStatus = `-- name: GetCityPackStatus :one
 SELECT status, last_import_at FROM t_city_packs WHERE id = $1
 `
@@ -605,7 +817,7 @@ func (q *Queries) GetJobRun(ctx context.Context, id int64) (TJobRun, error) {
 }
 
 const getJobSchedule = `-- name: GetJobSchedule :one
-SELECT job, interval_seconds, enabled, offset_seconds, updated_at, run_requested_at
+SELECT job, interval_seconds, enabled, offset_seconds, updated_at, run_requested_at, run_requested_pack
 FROM t_worker_job_schedules
 WHERE job = $1
 `
@@ -620,6 +832,61 @@ func (q *Queries) GetJobSchedule(ctx context.Context, job string) (TWorkerJobSch
 		&i.OffsetSeconds,
 		&i.UpdatedAt,
 		&i.RunRequestedAt,
+		&i.RunRequestedPack,
+	)
+	return i, err
+}
+
+const getSpotPackAndStatus = `-- name: GetSpotPackAndStatus :one
+SELECT city_pack_id, status, merged_into FROM t_spots WHERE id = $1
+`
+
+type GetSpotPackAndStatusRow struct {
+	CityPackID uuid.UUID   `json:"city_pack_id"`
+	Status     string      `json:"status"`
+	MergedInto pgtype.UUID `json:"merged_into"`
+}
+
+func (q *Queries) GetSpotPackAndStatus(ctx context.Context, id uuid.UUID) (GetSpotPackAndStatusRow, error) {
+	row := q.db.QueryRow(ctx, getSpotPackAndStatus, id)
+	var i GetSpotPackAndStatusRow
+	err := row.Scan(&i.CityPackID, &i.Status, &i.MergedInto)
+	return i, err
+}
+
+const getSpotReportAdmin = `-- name: GetSpotReportAdmin :one
+SELECT r.id, r.spot_id, s.name AS spot_name, r.device_id, r.type, r.issue_code,
+       r.status, r.reviewed_at, r.created_at
+FROM t_spot_reports r
+JOIN t_spots s ON s.id = r.spot_id
+WHERE r.id = $1
+`
+
+type GetSpotReportAdminRow struct {
+	ID         uuid.UUID          `json:"id"`
+	SpotID     uuid.UUID          `json:"spot_id"`
+	SpotName   pgtype.Text        `json:"spot_name"`
+	DeviceID   uuid.UUID          `json:"device_id"`
+	Type       string             `json:"type"`
+	IssueCode  pgtype.Text        `json:"issue_code"`
+	Status     string             `json:"status"`
+	ReviewedAt pgtype.Timestamptz `json:"reviewed_at"`
+	CreatedAt  time.Time          `json:"created_at"`
+}
+
+func (q *Queries) GetSpotReportAdmin(ctx context.Context, id uuid.UUID) (GetSpotReportAdminRow, error) {
+	row := q.db.QueryRow(ctx, getSpotReportAdmin, id)
+	var i GetSpotReportAdminRow
+	err := row.Scan(
+		&i.ID,
+		&i.SpotID,
+		&i.SpotName,
+		&i.DeviceID,
+		&i.Type,
+		&i.IssueCode,
+		&i.Status,
+		&i.ReviewedAt,
+		&i.CreatedAt,
 	)
 	return i, err
 }
@@ -905,6 +1172,617 @@ func (q *Queries) ListAdminCityPacks(ctx context.Context) ([]ListAdminCityPacksR
 	return items, nil
 }
 
+const listAdminDeviceSubscriptions = `-- name: ListAdminDeviceSubscriptions :many
+SELECT ds.original_transaction_id, ds.linked_at,
+       s.product_id, s.status, s.environment, s.ownership, s.is_trial,
+       s.auto_renew, s.expires_at, s.grace_expires_at, s.revoked_at,
+       s.last_signed_date
+FROM t_device_subscriptions ds
+JOIN t_subscriptions s ON s.original_transaction_id = ds.original_transaction_id
+WHERE ds.device_id = $1
+ORDER BY ds.linked_at DESC
+`
+
+type ListAdminDeviceSubscriptionsRow struct {
+	OriginalTransactionID string             `json:"original_transaction_id"`
+	LinkedAt              time.Time          `json:"linked_at"`
+	ProductID             string             `json:"product_id"`
+	Status                string             `json:"status"`
+	Environment           string             `json:"environment"`
+	Ownership             string             `json:"ownership"`
+	IsTrial               bool               `json:"is_trial"`
+	AutoRenew             bool               `json:"auto_renew"`
+	ExpiresAt             pgtype.Timestamptz `json:"expires_at"`
+	GraceExpiresAt        pgtype.Timestamptz `json:"grace_expires_at"`
+	RevokedAt             pgtype.Timestamptz `json:"revoked_at"`
+	LastSignedDate        time.Time          `json:"last_signed_date"`
+}
+
+func (q *Queries) ListAdminDeviceSubscriptions(ctx context.Context, deviceID uuid.UUID) ([]ListAdminDeviceSubscriptionsRow, error) {
+	rows, err := q.db.Query(ctx, listAdminDeviceSubscriptions, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListAdminDeviceSubscriptionsRow{}
+	for rows.Next() {
+		var i ListAdminDeviceSubscriptionsRow
+		if err := rows.Scan(
+			&i.OriginalTransactionID,
+			&i.LinkedAt,
+			&i.ProductID,
+			&i.Status,
+			&i.Environment,
+			&i.Ownership,
+			&i.IsTrial,
+			&i.AutoRenew,
+			&i.ExpiresAt,
+			&i.GraceExpiresAt,
+			&i.RevokedAt,
+			&i.LastSignedDate,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAdminDevices = `-- name: ListAdminDevices :many
+SELECT d.id, d.apns_env, d.push_status, d.locale, d.tz, d.app_version,
+       d.created_at, d.last_seen_at, d.deleted_at,
+       (SELECT count(*) FROM t_device_subscriptions ds
+         WHERE ds.device_id = d.id)::bigint AS subscriptions
+FROM t_devices d
+WHERE ($2::uuid IS NULL OR d.id = $2)
+  AND ($3::text IS NULL OR d.push_status = $3)
+  AND ($4::bool OR d.deleted_at IS NULL)
+  AND ($5::timestamptz IS NULL
+       OR (d.created_at, d.id) < ($5::timestamptz, $6::uuid))
+ORDER BY d.created_at DESC, d.id DESC
+LIMIT $1
+`
+
+type ListAdminDevicesParams struct {
+	Limit          int32              `json:"limit"`
+	ID             pgtype.UUID        `json:"id"`
+	PushStatus     pgtype.Text        `json:"push_status"`
+	IncludeDeleted bool               `json:"include_deleted"`
+	BeforeTs       pgtype.Timestamptz `json:"before_ts"`
+	BeforeID       pgtype.UUID        `json:"before_id"`
+}
+
+type ListAdminDevicesRow struct {
+	ID            uuid.UUID          `json:"id"`
+	ApnsEnv       pgtype.Text        `json:"apns_env"`
+	PushStatus    string             `json:"push_status"`
+	Locale        pgtype.Text        `json:"locale"`
+	Tz            pgtype.Text        `json:"tz"`
+	AppVersion    pgtype.Text        `json:"app_version"`
+	CreatedAt     time.Time          `json:"created_at"`
+	LastSeenAt    pgtype.Timestamptz `json:"last_seen_at"`
+	DeletedAt     pgtype.Timestamptz `json:"deleted_at"`
+	Subscriptions int64              `json:"subscriptions"`
+}
+
+func (q *Queries) ListAdminDevices(ctx context.Context, arg ListAdminDevicesParams) ([]ListAdminDevicesRow, error) {
+	rows, err := q.db.Query(ctx, listAdminDevices,
+		arg.Limit,
+		arg.ID,
+		arg.PushStatus,
+		arg.IncludeDeleted,
+		arg.BeforeTs,
+		arg.BeforeID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListAdminDevicesRow{}
+	for rows.Next() {
+		var i ListAdminDevicesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ApnsEnv,
+			&i.PushStatus,
+			&i.Locale,
+			&i.Tz,
+			&i.AppVersion,
+			&i.CreatedAt,
+			&i.LastSeenAt,
+			&i.DeletedAt,
+			&i.Subscriptions,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAdminSpotAuditEvents = `-- name: ListAdminSpotAuditEvents :many
+SELECT e.id, e.admin_user_id, u.email, e.auth_method, e.method, e.path,
+       e.status, e.client_ip, e.request_id, e.created_at
+FROM t_admin_audit_events e
+LEFT JOIN t_admin_users u ON u.id = e.admin_user_id
+WHERE e.path = $1
+ORDER BY e.id DESC
+LIMIT $2
+`
+
+type ListAdminSpotAuditEventsParams struct {
+	Path  string `json:"path"`
+	Limit int32  `json:"limit"`
+}
+
+type ListAdminSpotAuditEventsRow struct {
+	ID          int64       `json:"id"`
+	AdminUserID pgtype.UUID `json:"admin_user_id"`
+	Email       pgtype.Text `json:"email"`
+	AuthMethod  string      `json:"auth_method"`
+	Method      string      `json:"method"`
+	Path        string      `json:"path"`
+	Status      int32       `json:"status"`
+	ClientIp    string      `json:"client_ip"`
+	RequestID   pgtype.Text `json:"request_id"`
+	CreatedAt   time.Time   `json:"created_at"`
+}
+
+func (q *Queries) ListAdminSpotAuditEvents(ctx context.Context, arg ListAdminSpotAuditEventsParams) ([]ListAdminSpotAuditEventsRow, error) {
+	rows, err := q.db.Query(ctx, listAdminSpotAuditEvents, arg.Path, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListAdminSpotAuditEventsRow{}
+	for rows.Next() {
+		var i ListAdminSpotAuditEventsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.AdminUserID,
+			&i.Email,
+			&i.AuthMethod,
+			&i.Method,
+			&i.Path,
+			&i.Status,
+			&i.ClientIp,
+			&i.RequestID,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAdminSpotScores = `-- name: ListAdminSpotScores :many
+SELECT ts_hour, score, confidence, cap_reason, reasons, computed_at
+FROM t_spot_scores
+WHERE spot_id = $1
+ORDER BY ts_hour DESC
+LIMIT $2
+`
+
+type ListAdminSpotScoresParams struct {
+	SpotID uuid.UUID `json:"spot_id"`
+	Limit  int32     `json:"limit"`
+}
+
+type ListAdminSpotScoresRow struct {
+	TsHour     time.Time   `json:"ts_hour"`
+	Score      int16       `json:"score"`
+	Confidence int16       `json:"confidence"`
+	CapReason  pgtype.Text `json:"cap_reason"`
+	Reasons    []byte      `json:"reasons"`
+	ComputedAt time.Time   `json:"computed_at"`
+}
+
+func (q *Queries) ListAdminSpotScores(ctx context.Context, arg ListAdminSpotScoresParams) ([]ListAdminSpotScoresRow, error) {
+	rows, err := q.db.Query(ctx, listAdminSpotScores, arg.SpotID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListAdminSpotScoresRow{}
+	for rows.Next() {
+		var i ListAdminSpotScoresRow
+		if err := rows.Scan(
+			&i.TsHour,
+			&i.Score,
+			&i.Confidence,
+			&i.CapReason,
+			&i.Reasons,
+			&i.ComputedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAdminSpotTransitions = `-- name: ListAdminSpotTransitions :many
+SELECT from_status, to_status, changed_at
+FROM t_state_transitions
+WHERE entity = 'spot' AND entity_id = $1
+ORDER BY changed_at DESC, id DESC
+LIMIT $2
+`
+
+type ListAdminSpotTransitionsParams struct {
+	EntityID string `json:"entity_id"`
+	Limit    int32  `json:"limit"`
+}
+
+type ListAdminSpotTransitionsRow struct {
+	FromStatus pgtype.Text `json:"from_status"`
+	ToStatus   string      `json:"to_status"`
+	ChangedAt  time.Time   `json:"changed_at"`
+}
+
+func (q *Queries) ListAdminSpotTransitions(ctx context.Context, arg ListAdminSpotTransitionsParams) ([]ListAdminSpotTransitionsRow, error) {
+	rows, err := q.db.Query(ctx, listAdminSpotTransitions, arg.EntityID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListAdminSpotTransitionsRow{}
+	for rows.Next() {
+		var i ListAdminSpotTransitionsRow
+		if err := rows.Scan(&i.FromStatus, &i.ToStatus, &i.ChangedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAlertDeliveriesAdmin = `-- name: ListAlertDeliveriesAdmin :many
+SELECT d.rule_id, d.window_start, d.status, d.attempts, d.claimed_at, d.sent_at,
+       d.apns_status, d.last_error, r.device_id, r.spot_id
+FROM t_alert_deliveries d
+JOIN t_alert_rules r ON r.id = d.rule_id
+WHERE ($2::text IS NULL OR d.status = $2)
+  AND ($3::uuid IS NULL OR d.rule_id = $3)
+  AND ($4::uuid IS NULL OR r.device_id = $4)
+  AND ($5::int IS NULL OR d.apns_status = $5)
+  AND ($6::timestamptz IS NULL OR d.window_start >= $6)
+  AND ($7::timestamptz IS NULL OR d.window_start < $7)
+  AND ($8::timestamptz IS NULL
+       OR (d.window_start, d.rule_id) < ($8::timestamptz, $9::uuid))
+ORDER BY d.window_start DESC, d.rule_id DESC
+LIMIT $1
+`
+
+type ListAlertDeliveriesAdminParams struct {
+	Limit      int32              `json:"limit"`
+	Status     pgtype.Text        `json:"status"`
+	RuleID     pgtype.UUID        `json:"rule_id"`
+	DeviceID   pgtype.UUID        `json:"device_id"`
+	ApnsStatus pgtype.Int4        `json:"apns_status"`
+	FromTs     pgtype.Timestamptz `json:"from_ts"`
+	ToTs       pgtype.Timestamptz `json:"to_ts"`
+	BeforeTs   pgtype.Timestamptz `json:"before_ts"`
+	BeforeID   pgtype.UUID        `json:"before_id"`
+}
+
+type ListAlertDeliveriesAdminRow struct {
+	RuleID      uuid.UUID          `json:"rule_id"`
+	WindowStart time.Time          `json:"window_start"`
+	Status      string             `json:"status"`
+	Attempts    int16              `json:"attempts"`
+	ClaimedAt   time.Time          `json:"claimed_at"`
+	SentAt      pgtype.Timestamptz `json:"sent_at"`
+	ApnsStatus  pgtype.Int4        `json:"apns_status"`
+	LastError   pgtype.Text        `json:"last_error"`
+	DeviceID    uuid.UUID          `json:"device_id"`
+	SpotID      pgtype.UUID        `json:"spot_id"`
+}
+
+// Dead-lettered pushes included: status filter covers claimed/sent/failed/dead.
+func (q *Queries) ListAlertDeliveriesAdmin(ctx context.Context, arg ListAlertDeliveriesAdminParams) ([]ListAlertDeliveriesAdminRow, error) {
+	rows, err := q.db.Query(ctx, listAlertDeliveriesAdmin,
+		arg.Limit,
+		arg.Status,
+		arg.RuleID,
+		arg.DeviceID,
+		arg.ApnsStatus,
+		arg.FromTs,
+		arg.ToTs,
+		arg.BeforeTs,
+		arg.BeforeID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListAlertDeliveriesAdminRow{}
+	for rows.Next() {
+		var i ListAlertDeliveriesAdminRow
+		if err := rows.Scan(
+			&i.RuleID,
+			&i.WindowStart,
+			&i.Status,
+			&i.Attempts,
+			&i.ClaimedAt,
+			&i.SentAt,
+			&i.ApnsStatus,
+			&i.LastError,
+			&i.DeviceID,
+			&i.SpotID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAppleNotificationsAdmin = `-- name: ListAppleNotificationsAdmin :many
+SELECT notification_uuid, type, subtype, original_transaction_id, signed_date,
+       environment, status, attempts, last_error, received_at, processed_at
+FROM t_apple_notifications
+WHERE ($2::text IS NULL OR status = $2)
+  AND ($3::text IS NULL OR type = $3)
+  AND ($4::text IS NULL OR environment = $4)
+  AND ($5::text IS NULL OR original_transaction_id = $5)
+  AND ($6::timestamptz IS NULL OR received_at >= $6)
+  AND ($7::timestamptz IS NULL OR received_at < $7)
+  AND ($8::timestamptz IS NULL
+       OR (received_at, notification_uuid) < ($8::timestamptz, $9::uuid))
+ORDER BY received_at DESC, notification_uuid DESC
+LIMIT $1
+`
+
+type ListAppleNotificationsAdminParams struct {
+	Limit       int32              `json:"limit"`
+	Status      pgtype.Text        `json:"status"`
+	Type        pgtype.Text        `json:"type"`
+	Environment pgtype.Text        `json:"environment"`
+	Txn         pgtype.Text        `json:"txn"`
+	FromTs      pgtype.Timestamptz `json:"from_ts"`
+	ToTs        pgtype.Timestamptz `json:"to_ts"`
+	BeforeTs    pgtype.Timestamptz `json:"before_ts"`
+	BeforeID    pgtype.UUID        `json:"before_id"`
+}
+
+type ListAppleNotificationsAdminRow struct {
+	NotificationUuid      uuid.UUID          `json:"notification_uuid"`
+	Type                  string             `json:"type"`
+	Subtype               pgtype.Text        `json:"subtype"`
+	OriginalTransactionID pgtype.Text        `json:"original_transaction_id"`
+	SignedDate            time.Time          `json:"signed_date"`
+	Environment           string             `json:"environment"`
+	Status                string             `json:"status"`
+	Attempts              int16              `json:"attempts"`
+	LastError             pgtype.Text        `json:"last_error"`
+	ReceivedAt            time.Time          `json:"received_at"`
+	ProcessedAt           pgtype.Timestamptz `json:"processed_at"`
+}
+
+func (q *Queries) ListAppleNotificationsAdmin(ctx context.Context, arg ListAppleNotificationsAdminParams) ([]ListAppleNotificationsAdminRow, error) {
+	rows, err := q.db.Query(ctx, listAppleNotificationsAdmin,
+		arg.Limit,
+		arg.Status,
+		arg.Type,
+		arg.Environment,
+		arg.Txn,
+		arg.FromTs,
+		arg.ToTs,
+		arg.BeforeTs,
+		arg.BeforeID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListAppleNotificationsAdminRow{}
+	for rows.Next() {
+		var i ListAppleNotificationsAdminRow
+		if err := rows.Scan(
+			&i.NotificationUuid,
+			&i.Type,
+			&i.Subtype,
+			&i.OriginalTransactionID,
+			&i.SignedDate,
+			&i.Environment,
+			&i.Status,
+			&i.Attempts,
+			&i.LastError,
+			&i.ReceivedAt,
+			&i.ProcessedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCrowdReportsAdmin = `-- name: ListCrowdReportsAdmin :many
+SELECT cr.id, cr.spot_id, s.name AS spot_name, cr.device_id, cr.level,
+       cr.local_dow, cr.local_hour, cr.created_at
+FROM t_crowd_reports cr
+JOIN t_spots s ON s.id = cr.spot_id
+WHERE ($2::uuid IS NULL OR cr.spot_id = $2)
+  AND ($3::uuid IS NULL OR cr.device_id = $3)
+  AND ($4::smallint IS NULL OR cr.level = $4)
+  AND ($5::timestamptz IS NULL OR cr.created_at >= $5)
+  AND ($6::timestamptz IS NULL OR cr.created_at < $6)
+  AND ($7::timestamptz IS NULL
+       OR (cr.created_at, cr.id) < ($7::timestamptz, $8::uuid))
+ORDER BY cr.created_at DESC, cr.id DESC
+LIMIT $1
+`
+
+type ListCrowdReportsAdminParams struct {
+	Limit    int32              `json:"limit"`
+	SpotID   pgtype.UUID        `json:"spot_id"`
+	DeviceID pgtype.UUID        `json:"device_id"`
+	Level    pgtype.Int2        `json:"level"`
+	FromTs   pgtype.Timestamptz `json:"from_ts"`
+	ToTs     pgtype.Timestamptz `json:"to_ts"`
+	BeforeTs pgtype.Timestamptz `json:"before_ts"`
+	BeforeID pgtype.UUID        `json:"before_id"`
+}
+
+type ListCrowdReportsAdminRow struct {
+	ID        uuid.UUID   `json:"id"`
+	SpotID    uuid.UUID   `json:"spot_id"`
+	SpotName  pgtype.Text `json:"spot_name"`
+	DeviceID  uuid.UUID   `json:"device_id"`
+	Level     int16       `json:"level"`
+	LocalDow  int16       `json:"local_dow"`
+	LocalHour int16       `json:"local_hour"`
+	CreatedAt time.Time   `json:"created_at"`
+}
+
+func (q *Queries) ListCrowdReportsAdmin(ctx context.Context, arg ListCrowdReportsAdminParams) ([]ListCrowdReportsAdminRow, error) {
+	rows, err := q.db.Query(ctx, listCrowdReportsAdmin,
+		arg.Limit,
+		arg.SpotID,
+		arg.DeviceID,
+		arg.Level,
+		arg.FromTs,
+		arg.ToTs,
+		arg.BeforeTs,
+		arg.BeforeID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListCrowdReportsAdminRow{}
+	for rows.Next() {
+		var i ListCrowdReportsAdminRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.SpotID,
+			&i.SpotName,
+			&i.DeviceID,
+			&i.Level,
+			&i.LocalDow,
+			&i.LocalHour,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listIngestFeaturesAdmin = `-- name: ListIngestFeaturesAdmin :many
+SELECT f.pack_id, p.slug AS pack_slug, f.source, f.source_id, f.role, f.kind,
+       f.amenity, f.quality, f.exclude_reason, f.version, f.run_id, f.seen_at
+FROM t_ingest_features f
+JOIN t_city_packs p ON p.id = f.pack_id
+WHERE ($2::text IS NULL OR p.slug = $2)
+  AND ($3::text IS NULL OR f.role = $3)
+  AND ($4::text IS NULL OR f.source = $4)
+  AND ($5::bigint IS NULL OR f.run_id = $5)
+  AND ($6::timestamptz IS NULL
+       OR (f.seen_at, f.source, f.source_id) <
+          ($6::timestamptz, $7::text, $8::text))
+ORDER BY f.seen_at DESC, f.source DESC, f.source_id DESC
+LIMIT $1
+`
+
+type ListIngestFeaturesAdminParams struct {
+	Limit          int32              `json:"limit"`
+	PackSlug       pgtype.Text        `json:"pack_slug"`
+	Role           pgtype.Text        `json:"role"`
+	Source         pgtype.Text        `json:"source"`
+	RunID          pgtype.Int8        `json:"run_id"`
+	BeforeTs       pgtype.Timestamptz `json:"before_ts"`
+	BeforeSource   pgtype.Text        `json:"before_source"`
+	BeforeSourceID pgtype.Text        `json:"before_source_id"`
+}
+
+type ListIngestFeaturesAdminRow struct {
+	PackID        uuid.UUID   `json:"pack_id"`
+	PackSlug      string      `json:"pack_slug"`
+	Source        string      `json:"source"`
+	SourceID      string      `json:"source_id"`
+	Role          string      `json:"role"`
+	Kind          pgtype.Text `json:"kind"`
+	Amenity       pgtype.Text `json:"amenity"`
+	Quality       pgtype.Int2 `json:"quality"`
+	ExcludeReason pgtype.Text `json:"exclude_reason"`
+	Version       pgtype.Int4 `json:"version"`
+	RunID         pgtype.Int8 `json:"run_id"`
+	SeenAt        time.Time   `json:"seen_at"`
+}
+
+// Raw OSM feature layer, newest sightings first. The keyset cursor spans
+// (seen_at, source, source_id) so ties inside one run stay stable.
+func (q *Queries) ListIngestFeaturesAdmin(ctx context.Context, arg ListIngestFeaturesAdminParams) ([]ListIngestFeaturesAdminRow, error) {
+	rows, err := q.db.Query(ctx, listIngestFeaturesAdmin,
+		arg.Limit,
+		arg.PackSlug,
+		arg.Role,
+		arg.Source,
+		arg.RunID,
+		arg.BeforeTs,
+		arg.BeforeSource,
+		arg.BeforeSourceID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListIngestFeaturesAdminRow{}
+	for rows.Next() {
+		var i ListIngestFeaturesAdminRow
+		if err := rows.Scan(
+			&i.PackID,
+			&i.PackSlug,
+			&i.Source,
+			&i.SourceID,
+			&i.Role,
+			&i.Kind,
+			&i.Amenity,
+			&i.Quality,
+			&i.ExcludeReason,
+			&i.Version,
+			&i.RunID,
+			&i.SeenAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listJobRuns = `-- name: ListJobRuns :many
 SELECT id, job, started_at, finished_at, status, rows_affected, error
 FROM t_job_runs
@@ -959,7 +1837,7 @@ func (q *Queries) ListJobRuns(ctx context.Context, arg ListJobRunsParams) ([]Lis
 }
 
 const listJobSchedules = `-- name: ListJobSchedules :many
-SELECT job, interval_seconds, enabled, offset_seconds, updated_at, run_requested_at
+SELECT job, interval_seconds, enabled, offset_seconds, updated_at, run_requested_at, run_requested_pack
 FROM t_worker_job_schedules
 ORDER BY job
 `
@@ -980,6 +1858,7 @@ func (q *Queries) ListJobSchedules(ctx context.Context) ([]TWorkerJobSchedule, e
 			&i.OffsetSeconds,
 			&i.UpdatedAt,
 			&i.RunRequestedAt,
+			&i.RunRequestedPack,
 		); err != nil {
 			return nil, err
 		}
@@ -1070,6 +1949,156 @@ func (q *Queries) ListPlanLimits(ctx context.Context) ([]TPlanLimit, error) {
 	return items, nil
 }
 
+const listProviderQuotas = `-- name: ListProviderQuotas :many
+SELECT provider, day, used, updated_at
+FROM t_provider_quotas
+WHERE day >= $1
+ORDER BY day DESC, provider
+`
+
+func (q *Queries) ListProviderQuotas(ctx context.Context, day pgtype.Date) ([]TProviderQuota, error) {
+	rows, err := q.db.Query(ctx, listProviderQuotas, day)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []TProviderQuota{}
+	for rows.Next() {
+		var i TProviderQuota
+		if err := rows.Scan(
+			&i.Provider,
+			&i.Day,
+			&i.Used,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRecentJobRuns = `-- name: ListRecentJobRuns :many
+SELECT id, job, city_pack_id, started_at, finished_at, status,
+       rows_affected, error, stats
+FROM t_job_runs
+WHERE job = $1
+ORDER BY id DESC
+LIMIT $2
+`
+
+type ListRecentJobRunsParams struct {
+	Job   string `json:"job"`
+	Limit int32  `json:"limit"`
+}
+
+func (q *Queries) ListRecentJobRuns(ctx context.Context, arg ListRecentJobRunsParams) ([]TJobRun, error) {
+	rows, err := q.db.Query(ctx, listRecentJobRuns, arg.Job, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []TJobRun{}
+	for rows.Next() {
+		var i TJobRun
+		if err := rows.Scan(
+			&i.ID,
+			&i.Job,
+			&i.CityPackID,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.Status,
+			&i.RowsAffected,
+			&i.Error,
+			&i.Stats,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listScoreFeedbacksAdmin = `-- name: ListScoreFeedbacksAdmin :many
+SELECT f.id, f.spot_id, s.name AS spot_name, f.ts_hour, f.device_id, f.verdict,
+       f.created_at
+FROM t_score_feedbacks f
+JOIN t_spots s ON s.id = f.spot_id
+WHERE ($2::uuid IS NULL OR f.spot_id = $2)
+  AND ($3::uuid IS NULL OR f.device_id = $3)
+  AND ($4::smallint IS NULL OR f.verdict = $4)
+  AND ($5::timestamptz IS NULL OR f.created_at >= $5)
+  AND ($6::timestamptz IS NULL OR f.created_at < $6)
+  AND ($7::timestamptz IS NULL
+       OR (f.created_at, f.id) < ($7::timestamptz, $8::uuid))
+ORDER BY f.created_at DESC, f.id DESC
+LIMIT $1
+`
+
+type ListScoreFeedbacksAdminParams struct {
+	Limit    int32              `json:"limit"`
+	SpotID   pgtype.UUID        `json:"spot_id"`
+	DeviceID pgtype.UUID        `json:"device_id"`
+	Verdict  pgtype.Int2        `json:"verdict"`
+	FromTs   pgtype.Timestamptz `json:"from_ts"`
+	ToTs     pgtype.Timestamptz `json:"to_ts"`
+	BeforeTs pgtype.Timestamptz `json:"before_ts"`
+	BeforeID pgtype.UUID        `json:"before_id"`
+}
+
+type ListScoreFeedbacksAdminRow struct {
+	ID        uuid.UUID   `json:"id"`
+	SpotID    uuid.UUID   `json:"spot_id"`
+	SpotName  pgtype.Text `json:"spot_name"`
+	TsHour    time.Time   `json:"ts_hour"`
+	DeviceID  uuid.UUID   `json:"device_id"`
+	Verdict   int16       `json:"verdict"`
+	CreatedAt time.Time   `json:"created_at"`
+}
+
+func (q *Queries) ListScoreFeedbacksAdmin(ctx context.Context, arg ListScoreFeedbacksAdminParams) ([]ListScoreFeedbacksAdminRow, error) {
+	rows, err := q.db.Query(ctx, listScoreFeedbacksAdmin,
+		arg.Limit,
+		arg.SpotID,
+		arg.DeviceID,
+		arg.Verdict,
+		arg.FromTs,
+		arg.ToTs,
+		arg.BeforeTs,
+		arg.BeforeID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListScoreFeedbacksAdminRow{}
+	for rows.Next() {
+		var i ListScoreFeedbacksAdminRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.SpotID,
+			&i.SpotName,
+			&i.TsHour,
+			&i.DeviceID,
+			&i.Verdict,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listScoringConfigs = `-- name: ListScoringConfigs :many
 SELECT version, weights, thresholds, active_from
 FROM t_scoring_configs
@@ -1090,6 +2119,88 @@ func (q *Queries) ListScoringConfigs(ctx context.Context) ([]TScoringConfig, err
 			&i.Weights,
 			&i.Thresholds,
 			&i.ActiveFrom,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSpotReportsAdmin = `-- name: ListSpotReportsAdmin :many
+
+SELECT r.id, r.spot_id, s.name AS spot_name, r.device_id, r.type, r.issue_code,
+       r.status, r.reviewed_at, r.created_at
+FROM t_spot_reports r
+JOIN t_spots s ON s.id = r.spot_id
+WHERE ($2::text IS NULL OR r.status = $2)
+  AND ($3::text IS NULL OR r.type = $3)
+  AND ($4::uuid IS NULL OR r.spot_id = $4)
+  AND ($5::timestamptz IS NULL OR r.created_at >= $5)
+  AND ($6::timestamptz IS NULL OR r.created_at < $6)
+  AND ($7::timestamptz IS NULL
+       OR (r.created_at, r.id) < ($7::timestamptz, $8::uuid))
+ORDER BY r.created_at DESC, r.id DESC
+LIMIT $1
+`
+
+type ListSpotReportsAdminParams struct {
+	Limit    int32              `json:"limit"`
+	Status   pgtype.Text        `json:"status"`
+	Type     pgtype.Text        `json:"type"`
+	SpotID   pgtype.UUID        `json:"spot_id"`
+	FromTs   pgtype.Timestamptz `json:"from_ts"`
+	ToTs     pgtype.Timestamptz `json:"to_ts"`
+	BeforeTs pgtype.Timestamptz `json:"before_ts"`
+	BeforeID pgtype.UUID        `json:"before_id"`
+}
+
+type ListSpotReportsAdminRow struct {
+	ID         uuid.UUID          `json:"id"`
+	SpotID     uuid.UUID          `json:"spot_id"`
+	SpotName   pgtype.Text        `json:"spot_name"`
+	DeviceID   uuid.UUID          `json:"device_id"`
+	Type       string             `json:"type"`
+	IssueCode  pgtype.Text        `json:"issue_code"`
+	Status     string             `json:"status"`
+	ReviewedAt pgtype.Timestamptz `json:"reviewed_at"`
+	CreatedAt  time.Time          `json:"created_at"`
+}
+
+// ---- admin console: moderation history, ops lists, provider health ----
+// Full report history (any status), newest first. Keyset on
+// (created_at, id) DESC — same cursor shape as the pending list.
+func (q *Queries) ListSpotReportsAdmin(ctx context.Context, arg ListSpotReportsAdminParams) ([]ListSpotReportsAdminRow, error) {
+	rows, err := q.db.Query(ctx, listSpotReportsAdmin,
+		arg.Limit,
+		arg.Status,
+		arg.Type,
+		arg.SpotID,
+		arg.FromTs,
+		arg.ToTs,
+		arg.BeforeTs,
+		arg.BeforeID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListSpotReportsAdminRow{}
+	for rows.Next() {
+		var i ListSpotReportsAdminRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.SpotID,
+			&i.SpotName,
+			&i.DeviceID,
+			&i.Type,
+			&i.IssueCode,
+			&i.Status,
+			&i.ReviewedAt,
+			&i.CreatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -1207,12 +2318,14 @@ func (q *Queries) ReportTypeCounts(ctx context.Context, arg ReportTypeCountsPara
 const requestJobRun = `-- name: RequestJobRun :one
 
 UPDATE t_worker_job_schedules
-SET run_requested_at = now()
+SET run_requested_at = now(), run_requested_pack = NULL
 WHERE job = $1
-RETURNING job, interval_seconds, enabled, offset_seconds, updated_at, run_requested_at
+RETURNING job, interval_seconds, enabled, offset_seconds, updated_at, run_requested_at, run_requested_pack
 `
 
 // ---- admin console: run-now, plan limits, city packs, spot lookup ----
+// A generic run request clears any pending per-pack request so a stale pack
+// slug can never leak into an unrelated run.
 func (q *Queries) RequestJobRun(ctx context.Context, job string) (TWorkerJobSchedule, error) {
 	row := q.db.QueryRow(ctx, requestJobRun, job)
 	var i TWorkerJobSchedule
@@ -1223,6 +2336,34 @@ func (q *Queries) RequestJobRun(ctx context.Context, job string) (TWorkerJobSche
 		&i.OffsetSeconds,
 		&i.UpdatedAt,
 		&i.RunRequestedAt,
+		&i.RunRequestedPack,
+	)
+	return i, err
+}
+
+const requestJobRunForPack = `-- name: RequestJobRunForPack :one
+UPDATE t_worker_job_schedules
+SET run_requested_at = now(), run_requested_pack = $2
+WHERE job = $1
+RETURNING job, interval_seconds, enabled, offset_seconds, updated_at, run_requested_at, run_requested_pack
+`
+
+type RequestJobRunForPackParams struct {
+	Job              string      `json:"job"`
+	RunRequestedPack pgtype.Text `json:"run_requested_pack"`
+}
+
+func (q *Queries) RequestJobRunForPack(ctx context.Context, arg RequestJobRunForPackParams) (TWorkerJobSchedule, error) {
+	row := q.db.QueryRow(ctx, requestJobRunForPack, arg.Job, arg.RunRequestedPack)
+	var i TWorkerJobSchedule
+	err := row.Scan(
+		&i.Job,
+		&i.IntervalSeconds,
+		&i.Enabled,
+		&i.OffsetSeconds,
+		&i.UpdatedAt,
+		&i.RunRequestedAt,
+		&i.RunRequestedPack,
 	)
 	return i, err
 }
@@ -1400,6 +2541,33 @@ func (q *Queries) SearchAdminSpots(ctx context.Context, arg SearchAdminSpotsPara
 	return items, nil
 }
 
+const setJobScheduleEnabled = `-- name: SetJobScheduleEnabled :one
+UPDATE t_worker_job_schedules
+SET enabled = $2, updated_at = now()
+WHERE job = $1
+RETURNING job, interval_seconds, enabled, offset_seconds, updated_at, run_requested_at, run_requested_pack
+`
+
+type SetJobScheduleEnabledParams struct {
+	Job     string `json:"job"`
+	Enabled bool   `json:"enabled"`
+}
+
+func (q *Queries) SetJobScheduleEnabled(ctx context.Context, arg SetJobScheduleEnabledParams) (TWorkerJobSchedule, error) {
+	row := q.db.QueryRow(ctx, setJobScheduleEnabled, arg.Job, arg.Enabled)
+	var i TWorkerJobSchedule
+	err := row.Scan(
+		&i.Job,
+		&i.IntervalSeconds,
+		&i.Enabled,
+		&i.OffsetSeconds,
+		&i.UpdatedAt,
+		&i.RunRequestedAt,
+		&i.RunRequestedPack,
+	)
+	return i, err
+}
+
 const startJobRun = `-- name: StartJobRun :one
 INSERT INTO t_job_runs (job, started_at, status)
 VALUES ($1, now(), 'running')
@@ -1465,7 +2633,7 @@ const updateJobSchedule = `-- name: UpdateJobSchedule :one
 UPDATE t_worker_job_schedules
 SET interval_seconds = $2, updated_at = now()
 WHERE job = $1
-RETURNING job, interval_seconds, enabled, offset_seconds, updated_at, run_requested_at
+RETURNING job, interval_seconds, enabled, offset_seconds, updated_at, run_requested_at, run_requested_pack
 `
 
 type UpdateJobScheduleParams struct {
@@ -1483,6 +2651,7 @@ func (q *Queries) UpdateJobSchedule(ctx context.Context, arg UpdateJobSchedulePa
 		&i.OffsetSeconds,
 		&i.UpdatedAt,
 		&i.RunRequestedAt,
+		&i.RunRequestedPack,
 	)
 	return i, err
 }

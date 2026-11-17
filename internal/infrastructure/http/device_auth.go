@@ -1,6 +1,7 @@
 package http
 
 import (
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -58,6 +59,11 @@ func deviceAuthCheck(c *gin.Context, svc *devices.Service, id uuid.UUID) {
 		httpx.WriteProblem(c, http.StatusUnauthorized, httpx.CodeUnauthorized,
 			"Device authentication required", "send the device secret in "+DeviceTokenHeader)
 		return
+	}
+	// Activity signal for the good-day push (last_seen_at). Best effort: it
+	// must never fail or slow the request.
+	if err := svc.Touch(c.Request.Context(), id); err != nil {
+		slog.WarnContext(c.Request.Context(), "device touch failed", "device", id, "error", err)
 	}
 	c.Next()
 }

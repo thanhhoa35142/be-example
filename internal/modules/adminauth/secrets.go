@@ -19,8 +19,8 @@ import (
 
 type Config struct {
 	ChallengeTTL time.Duration
-	SessionTTL   time.Duration
-	IdleTTL      time.Duration
+	AccessTTL    time.Duration
+	RefreshTTL   time.Duration
 	MaxFailures  int
 	Lockout      time.Duration
 }
@@ -28,8 +28,8 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		ChallengeTTL: 5 * time.Minute,
-		SessionTTL:   12 * time.Hour,
-		IdleTTL:      30 * time.Minute,
+		AccessTTL:    15 * time.Minute,
+		RefreshTTL:   30 * 24 * time.Hour,
 		MaxFailures:  5,
 		Lockout:      15 * time.Minute,
 	}
@@ -108,8 +108,6 @@ func NewTOTPSecret(issuer, account string) (secret, url string, err error) {
 	return key.Secret(), key.URL(), nil
 }
 
-// TOTPURL rebuilds the otpauth URL for an existing secret — used when a
-// pending enroll challenge is reused and the secret must be shown again.
 func TOTPURL(issuer, account, secretB32 string) string {
 	v := url.Values{}
 	v.Set("secret", secretB32)

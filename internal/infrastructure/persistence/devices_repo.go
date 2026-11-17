@@ -80,6 +80,11 @@ func (r *DevicesRepo) SecretHash(ctx context.Context, id uuid.UUID) (string, err
 	return r.q.GetDeviceSecretHash(ctx, id)
 }
 
+// Touch bumps last_seen_at, at most once per hour per device (see the query).
+func (r *DevicesRepo) Touch(ctx context.Context, id uuid.UUID) error {
+	return r.q.TouchDevice(ctx, id)
+}
+
 func (r *DevicesRepo) Exists(ctx context.Context, id uuid.UUID) (bool, error) {
 	_, err := r.q.GetActiveDevice(ctx, id)
 	if errors.Is(err, pgx.ErrNoRows) {

@@ -7,7 +7,6 @@ package persistence
 
 import (
 	"context"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -48,42 +47,6 @@ func (q *Queries) ConsumeAdminRecoveryCode(ctx context.Context, arg ConsumeAdmin
 	return result.RowsAffected(), nil
 }
 
-const createAdminSession = `-- name: CreateAdminSession :one
-INSERT INTO t_admin_sessions (token_hash, admin_user_id, user_agent, ip, expires_at)
-VALUES ($1, $2, $3, $4, $5)
-RETURNING id, token_hash, admin_user_id, user_agent, ip, created_at, expires_at, last_seen_at
-`
-
-type CreateAdminSessionParams struct {
-	TokenHash   []byte    `json:"token_hash"`
-	AdminUserID uuid.UUID `json:"admin_user_id"`
-	UserAgent   string    `json:"user_agent"`
-	Ip          string    `json:"ip"`
-	ExpiresAt   time.Time `json:"expires_at"`
-}
-
-func (q *Queries) CreateAdminSession(ctx context.Context, arg CreateAdminSessionParams) (TAdminSession, error) {
-	row := q.db.QueryRow(ctx, createAdminSession,
-		arg.TokenHash,
-		arg.AdminUserID,
-		arg.UserAgent,
-		arg.Ip,
-		arg.ExpiresAt,
-	)
-	var i TAdminSession
-	err := row.Scan(
-		&i.ID,
-		&i.TokenHash,
-		&i.AdminUserID,
-		&i.UserAgent,
-		&i.Ip,
-		&i.CreatedAt,
-		&i.ExpiresAt,
-		&i.LastSeenAt,
-	)
-	return i, err
-}
-
 const deleteAdminRecoveryCodes = `-- name: DeleteAdminRecoveryCodes :exec
 DELETE FROM t_admin_recovery_codes WHERE admin_user_id = $1
 `
@@ -93,79 +56,8 @@ func (q *Queries) DeleteAdminRecoveryCodes(ctx context.Context, adminUserID uuid
 	return err
 }
 
-const deleteAdminSession = `-- name: DeleteAdminSession :exec
-DELETE FROM t_admin_sessions WHERE token_hash = $1
-`
-
-func (q *Queries) DeleteAdminSession(ctx context.Context, tokenHash []byte) error {
-	_, err := q.db.Exec(ctx, deleteAdminSession, tokenHash)
-	return err
-}
-
-const deleteAdminTOTPUsedForUser = `-- name: DeleteAdminTOTPUsedForUser :exec
-DELETE FROM t_admin_totp_used WHERE admin_user_id = $1
-`
-
-func (q *Queries) DeleteAdminTOTPUsedForUser(ctx context.Context, adminUserID uuid.UUID) error {
-	_, err := q.db.Exec(ctx, deleteAdminTOTPUsedForUser, adminUserID)
-	return err
-}
-
-const deleteExpiredAdminSessions = `-- name: DeleteExpiredAdminSessions :execrows
-DELETE FROM t_admin_sessions WHERE expires_at < now() - interval '1 day'
-`
-
-func (q *Queries) DeleteExpiredAdminSessions(ctx context.Context) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteExpiredAdminSessions)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
-const getAdminSessionByTokenHash = `-- name: GetAdminSessionByTokenHash :one
-SELECT s.id, s.token_hash, s.admin_user_id, s.user_agent, s.ip, s.created_at, s.expires_at, s.last_seen_at, u.email AS user_email, u.disabled_at AS user_disabled_at,
-       u.totp_confirmed_at AS user_totp_confirmed_at
-FROM t_admin_sessions s
-JOIN t_admin_users u ON u.id = s.admin_user_id
-WHERE s.token_hash = $1
-`
-
-type GetAdminSessionByTokenHashRow struct {
-	ID                  uuid.UUID          `json:"id"`
-	TokenHash           []byte             `json:"token_hash"`
-	AdminUserID         uuid.UUID          `json:"admin_user_id"`
-	UserAgent           string             `json:"user_agent"`
-	Ip                  string             `json:"ip"`
-	CreatedAt           time.Time          `json:"created_at"`
-	ExpiresAt           time.Time          `json:"expires_at"`
-	LastSeenAt          time.Time          `json:"last_seen_at"`
-	UserEmail           string             `json:"user_email"`
-	UserDisabledAt      pgtype.Timestamptz `json:"user_disabled_at"`
-	UserTotpConfirmedAt pgtype.Timestamptz `json:"user_totp_confirmed_at"`
-}
-
-func (q *Queries) GetAdminSessionByTokenHash(ctx context.Context, tokenHash []byte) (GetAdminSessionByTokenHashRow, error) {
-	row := q.db.QueryRow(ctx, getAdminSessionByTokenHash, tokenHash)
-	var i GetAdminSessionByTokenHashRow
-	err := row.Scan(
-		&i.ID,
-		&i.TokenHash,
-		&i.AdminUserID,
-		&i.UserAgent,
-		&i.Ip,
-		&i.CreatedAt,
-		&i.ExpiresAt,
-		&i.LastSeenAt,
-		&i.UserEmail,
-		&i.UserDisabledAt,
-		&i.UserTotpConfirmedAt,
-	)
-	return i, err
-}
-
 const getAdminUserByEmail = `-- name: GetAdminUserByEmail :one
-SELECT id, email, password_hash, totp_secret, totp_confirmed_at, disabled_at, last_login_at, failed_attempts, locked_until, created_at, updated_at FROM t_admin_users WHERE email = $1
+SELECT id, email, password_hash, totp_secret, totp_confirmed_at, disabled_at, last_login_at, failed_attempts, locked_until, created_at, updated_at, auth_epoch FROM t_admin_users WHERE email = $1
 `
 
 func (q *Queries) GetAdminUserByEmail(ctx context.Context, email string) (TAdminUser, error) {
@@ -183,12 +75,13 @@ func (q *Queries) GetAdminUserByEmail(ctx context.Context, email string) (TAdmin
 		&i.LockedUntil,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.AuthEpoch,
 	)
 	return i, err
 }
 
 const getAdminUserByID = `-- name: GetAdminUserByID :one
-SELECT id, email, password_hash, totp_secret, totp_confirmed_at, disabled_at, last_login_at, failed_attempts, locked_until, created_at, updated_at FROM t_admin_users WHERE id = $1
+SELECT id, email, password_hash, totp_secret, totp_confirmed_at, disabled_at, last_login_at, failed_attempts, locked_until, created_at, updated_at, auth_epoch FROM t_admin_users WHERE id = $1
 `
 
 func (q *Queries) GetAdminUserByID(ctx context.Context, id uuid.UUID) (TAdminUser, error) {
@@ -206,6 +99,7 @@ func (q *Queries) GetAdminUserByID(ctx context.Context, id uuid.UUID) (TAdminUse
 		&i.LockedUntil,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.AuthEpoch,
 	)
 	return i, err
 }
@@ -228,7 +122,7 @@ func (q *Queries) InsertAdminRecoveryCodes(ctx context.Context, arg InsertAdminR
 const insertAdminUser = `-- name: InsertAdminUser :one
 INSERT INTO t_admin_users (email, password_hash)
 VALUES ($1, $2)
-RETURNING id, email, password_hash, totp_secret, totp_confirmed_at, disabled_at, last_login_at, failed_attempts, locked_until, created_at, updated_at
+RETURNING id, email, password_hash, totp_secret, totp_confirmed_at, disabled_at, last_login_at, failed_attempts, locked_until, created_at, updated_at, auth_epoch
 `
 
 type InsertAdminUserParams struct {
@@ -251,43 +145,9 @@ func (q *Queries) InsertAdminUser(ctx context.Context, arg InsertAdminUserParams
 		&i.LockedUntil,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.AuthEpoch,
 	)
 	return i, err
-}
-
-const listAdminSessions = `-- name: ListAdminSessions :many
-SELECT id, token_hash, admin_user_id, user_agent, ip, created_at, expires_at, last_seen_at FROM t_admin_sessions
-WHERE admin_user_id = $1
-ORDER BY last_seen_at DESC
-`
-
-func (q *Queries) ListAdminSessions(ctx context.Context, adminUserID uuid.UUID) ([]TAdminSession, error) {
-	rows, err := q.db.Query(ctx, listAdminSessions, adminUserID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []TAdminSession{}
-	for rows.Next() {
-		var i TAdminSession
-		if err := rows.Scan(
-			&i.ID,
-			&i.TokenHash,
-			&i.AdminUserID,
-			&i.UserAgent,
-			&i.Ip,
-			&i.CreatedAt,
-			&i.ExpiresAt,
-			&i.LastSeenAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
 }
 
 const listAdminUsers = `-- name: ListAdminUsers :many
@@ -328,15 +188,6 @@ func (q *Queries) ListAdminUsers(ctx context.Context) ([]ListAdminUsersRow, erro
 	return items, nil
 }
 
-const pruneAdminTOTPUsed = `-- name: PruneAdminTOTPUsed :exec
-DELETE FROM t_admin_totp_used WHERE used_at < now() - interval '10 minutes'
-`
-
-func (q *Queries) PruneAdminTOTPUsed(ctx context.Context) error {
-	_, err := q.db.Exec(ctx, pruneAdminTOTPUsed)
-	return err
-}
-
 const recordAdminAuthFailure = `-- name: RecordAdminAuthFailure :exec
 UPDATE t_admin_users
 SET failed_attempts = failed_attempts + 1,
@@ -374,7 +225,7 @@ func (q *Queries) ResetAdminAuthFailures(ctx context.Context, id uuid.UUID) erro
 
 const resetAdminUserTOTP = `-- name: ResetAdminUserTOTP :exec
 UPDATE t_admin_users
-SET totp_secret = NULL, totp_confirmed_at = NULL, updated_at = now()
+SET totp_secret = NULL, totp_confirmed_at = NULL, auth_epoch = auth_epoch + 1, updated_at = now()
 WHERE id = $1
 `
 
@@ -385,26 +236,11 @@ func (q *Queries) ResetAdminUserTOTP(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
-const revokeOtherAdminSessions = `-- name: RevokeOtherAdminSessions :exec
-DELETE FROM t_admin_sessions
-WHERE admin_user_id = $1
-  AND ($2::bytea IS NULL OR token_hash <> $2)
-`
-
-type RevokeOtherAdminSessionsParams struct {
-	AdminUserID   uuid.UUID `json:"admin_user_id"`
-	KeepTokenHash []byte    `json:"keep_token_hash"`
-}
-
-// keep_token_hash NULL revokes every session (used when disabling a user).
-func (q *Queries) RevokeOtherAdminSessions(ctx context.Context, arg RevokeOtherAdminSessionsParams) error {
-	_, err := q.db.Exec(ctx, revokeOtherAdminSessions, arg.AdminUserID, arg.KeepTokenHash)
-	return err
-}
-
 const setAdminUserDisabled = `-- name: SetAdminUserDisabled :exec
 UPDATE t_admin_users
-SET disabled_at = CASE WHEN $2::boolean THEN now() ELSE NULL END, updated_at = now()
+SET disabled_at = CASE WHEN $2::boolean THEN now() ELSE NULL END,
+    auth_epoch = auth_epoch + CASE WHEN $2::boolean THEN 1 ELSE 0 END,
+    updated_at = now()
 WHERE id = $1
 `
 
@@ -418,18 +254,6 @@ func (q *Queries) SetAdminUserDisabled(ctx context.Context, arg SetAdminUserDisa
 	return err
 }
 
-const touchAdminSession = `-- name: TouchAdminSession :exec
-UPDATE t_admin_sessions SET last_seen_at = now()
-WHERE id = $1 AND last_seen_at < now() - interval '60 seconds'
-`
-
-// Throttled idle refresh: only writes when last_seen_at is older than a
-// minute, so ordinary reads stay read-only.
-func (q *Queries) TouchAdminSession(ctx context.Context, id uuid.UUID) error {
-	_, err := q.db.Exec(ctx, touchAdminSession, id)
-	return err
-}
-
 const touchAdminUserLogin = `-- name: TouchAdminUserLogin :exec
 UPDATE t_admin_users SET last_login_at = now(), updated_at = now()
 WHERE id = $1
@@ -440,29 +264,9 @@ func (q *Queries) TouchAdminUserLogin(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
-const tryInsertAdminTOTPStep = `-- name: TryInsertAdminTOTPStep :execrows
-INSERT INTO t_admin_totp_used (admin_user_id, step)
-VALUES ($1, $2)
-ON CONFLICT DO NOTHING
-`
-
-type TryInsertAdminTOTPStepParams struct {
-	AdminUserID uuid.UUID `json:"admin_user_id"`
-	Step        int64     `json:"step"`
-}
-
-// 0 rows = this counter was already accepted (replay).
-func (q *Queries) TryInsertAdminTOTPStep(ctx context.Context, arg TryInsertAdminTOTPStepParams) (int64, error) {
-	result, err := q.db.Exec(ctx, tryInsertAdminTOTPStep, arg.AdminUserID, arg.Step)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
 const updateAdminUserPassword = `-- name: UpdateAdminUserPassword :exec
 UPDATE t_admin_users
-SET password_hash = $2, failed_attempts = 0, locked_until = NULL, updated_at = now()
+SET password_hash = $2, failed_attempts = 0, locked_until = NULL, auth_epoch = auth_epoch + 1, updated_at = now()
 WHERE id = $1
 `
 

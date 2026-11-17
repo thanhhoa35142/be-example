@@ -2,12 +2,10 @@ package persistence
 
 import (
 	"context"
-	"fmt"
 	"strconv"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/thanhhoa35142/be-example/internal/modules/geo"
@@ -103,10 +101,6 @@ func (r *IngestRepo) WithTx(ctx context.Context, packID uuid.UUID, dryRun bool, 
 type ingestStore struct {
 	q      *Queries
 	packID uuid.UUID
-}
-
-func NewIngestStoreTx(tx pgx.Tx, packID uuid.UUID) ingest.Store {
-	return &ingestStore{q: New(tx), packID: packID}
 }
 
 func (s *ingestStore) ClearRaw(ctx context.Context) error {
@@ -517,5 +511,3 @@ func strPtr(v interface{}) *string {
 	}
 	return &s
 }
-
-var _ = fmt.Sprintf

@@ -97,6 +97,14 @@ WITH digest AS (
     DELETE FROM t_events WHERE device_id = $1
 ), subs AS (
     DELETE FROM t_device_subscriptions WHERE device_id = $1
+), nudge_sub AS (
+    -- Good-day push: the home cell is location-derived, so it goes with the
+    -- device's data (the FK cascade never fires on a soft delete).
+    DELETE FROM t_nudge_subscriptions WHERE device_id = $1
+), nudge_del AS (
+    DELETE FROM t_nudge_deliveries WHERE device_id = $1
+), push_sends AS (
+    DELETE FROM t_push_sends WHERE device_id = $1
 )
 UPDATE t_devices SET
     deleted_at    = now(),
@@ -115,8 +123,8 @@ WHERE t_devices.id = $1 AND t_devices.deleted_at IS NULL
 
 // "Delete my data": the device is soft-deleted (the row is kept so anonymous
 // aggregates referencing it stay valid) while everything personal goes in the
-// same statement: weekly digest, alert rules (t_alert_deliveries cascade from
-// the rules), analytics events (t_events, device_id-keyed), subscription links
+// same statement: weekly digest, good-day push subscription/deliveries/send ledger, alert
+// rules (t_alert_deliveries cascade from the rules), analytics events (t_events, device_id-keyed), subscription links
 // (t_device_subscriptions), and the push token / attestation key / locale / tz /
 // app version / prefs on the device row.
 // Soft delete never fires the device FK cascades, hence the explicit deletes.
@@ -134,8 +142,13 @@ func (q *Queries) SoftDeleteDevice(ctx context.Context, id uuid.UUID) (int64, er
 const touchDevice = `-- name: TouchDevice :exec
 UPDATE t_devices SET last_seen_at = now()
 WHERE id = $1 AND deleted_at IS NULL
+  AND (last_seen_at IS NULL OR last_seen_at < now() - interval '1 hour')
 `
 
+// Called by the device-auth middleware on every authenticated request, so it
+// must stay cheap: at most one write per device per hour. The good-day push
+// reads last_seen_at to find users who went quiet (24 h threshold), so an
+// hour of slack is irrelevant to it.
 func (q *Queries) TouchDevice(ctx context.Context, id uuid.UUID) error {
 	_, err := q.db.Exec(ctx, touchDevice, id)
 	return err

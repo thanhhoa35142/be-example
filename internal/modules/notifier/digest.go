@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"time"
+	"strconv"
 
 	"github.com/thanhhoa35142/be-example/internal/modules/alerts"
 	"github.com/thanhhoa35142/be-example/internal/modules/digest"
@@ -21,12 +21,16 @@ type DigestPayload struct {
 	Score       int     `json:"score"`
 }
 
-const rfc3339 = "2006-01-02T15:04:05Z07:00"
-
-func buildDigestPayload(d digest.Delivery, locale string) DigestPayload {
-	title, body := digestCopy(locale, d)
+func buildDigestPayload(d digest.Delivery) DigestPayload {
 	return DigestPayload{
-		APS:         APSBody{Alert: AlertContent{Title: title, Body: body}, Sound: "default"},
+		APS: APSBody{
+			Alert: AlertContent{
+				TitleLocKey: locDigestTitle,
+				LocKey:      weekendDayKey(d.WindowStart, d.SpotTZ, locDigestSatBody, locDigestSunBody),
+				LocArgs:     []string{d.SpotName, strconv.Itoa(d.Score)},
+			},
+			Sound: "default",
+		},
 		Kind:        digest.Kind,
 		SpotID:      d.SpotID.String(),
 		WindowStart: d.WindowStart.UTC().Format(rfc3339),
@@ -35,75 +39,19 @@ func buildDigestPayload(d digest.Delivery, locale string) DigestPayload {
 	}
 }
 
-var weekdayNames = map[string][7]string{
-	"en": {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"},
-	"nl": {"Zondag", "Maandag", "Dinsdag", "Woensdag", "Donderdag", "Vrijdag", "Zaterdag"},
-}
-
-func digestCopy(locale string, d digest.Delivery) (title, body string) {
-	loc, err := time.LoadLocation(d.SpotTZ)
-	if err != nil {
-		loc = time.UTC
-	}
-	start, end := d.WindowStart.In(loc), d.WindowEnd.In(loc)
-	switch baseLang(locale) {
-	case "nl":
-		return "Je weekendpicknick",
-			fmt.Sprintf("%s %s uur bij %s ziet er het best uit (%d).",
-				weekdayNames["nl"][start.Weekday()], range24(start, end), d.SpotName, d.Score)
-	default:
-		return "Your weekend picnic",
-			fmt.Sprintf("%s %s at %s looks best (%d).",
-				weekdayNames["en"][start.Weekday()], range12(start, end), d.SpotName, d.Score)
-	}
-}
-
-func clock24(t time.Time) string {
-	if t.Minute() == 0 {
-		return fmt.Sprintf("%d", t.Hour())
-	}
-	return fmt.Sprintf("%d:%02d", t.Hour(), t.Minute())
-}
-
-func range24(s, e time.Time) string { return clock24(s) + "–" + clock24(e) }
-
-func clock12(t time.Time) (string, string) {
-	h := t.Hour() % 12
-	if h == 0 {
-		h = 12
-	}
-	m := "AM"
-	if t.Hour() >= 12 {
-		m = "PM"
-	}
-	if t.Minute() == 0 {
-		return fmt.Sprintf("%d", h), m
-	}
-	return fmt.Sprintf("%d:%02d", h, t.Minute()), m
-}
-
-func range12(s, e time.Time) string {
-	sc, sm := clock12(s)
-	ec, em := clock12(e)
-	if sm == em {
-		return sc + "–" + ec + " " + em
-	}
-	return sc + " " + sm + "–" + ec + " " + em
-}
-
 type DigestSender struct{ *Sender }
 
 func NewDigestSender(s *Sender) *DigestSender { return &DigestSender{s} }
 
 func (s *DigestSender) Send(ctx context.Context, d digest.Delivery) error {
-	token, env, locale, ok, err := s.tokens.DeviceAPNsToken(ctx, d.DeviceID)
+	token, env, _, ok, err := s.tokens.DeviceAPNsToken(ctx, d.DeviceID)
 	if err != nil {
 		return err
 	}
 	if !ok {
 		return alerts.ErrNoPushToken
 	}
-	body, err := json.Marshal(buildDigestPayload(d, locale))
+	body, err := json.Marshal(buildDigestPayload(d))
 	if err != nil {
 		return err
 	}
@@ -124,6 +72,7 @@ func (s *DigestSender) Send(ctx context.Context, d digest.Delivery) error {
 	if err != nil {
 		return errors.Join(fmt.Errorf("digest apns status %d", status), err)
 	}
+	s.recordSend(ctx, d.DeviceID, digest.Kind)
 	s.logger.InfoContext(ctx, "digest pushed", "device", d.DeviceID, "status", status)
 	return nil
 }

@@ -208,6 +208,17 @@ func (r *AdminRepo) UpdateJobSchedule(ctx context.Context, job string, intervalS
 	return jobScheduleFromRow(row), nil
 }
 
+func (r *AdminRepo) SetJobScheduleEnabled(ctx context.Context, job string, enabled bool) (admin.JobSchedule, error) {
+	row, err := r.q.SetJobScheduleEnabled(ctx, SetJobScheduleEnabledParams{Job: job, Enabled: enabled})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return admin.JobSchedule{}, admin.ErrJobScheduleNotFound
+	}
+	if err != nil {
+		return admin.JobSchedule{}, err
+	}
+	return jobScheduleFromRow(row), nil
+}
+
 func jobScheduleFromRow(row TWorkerJobSchedule) admin.JobSchedule {
 	return admin.JobSchedule{
 		Job:             row.Job,

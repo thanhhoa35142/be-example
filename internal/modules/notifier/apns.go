@@ -90,7 +90,26 @@ func newClient(cfg Config) (*Client, error) {
 	}, nil
 }
 
+// APNs priorities: 10 delivers immediately (alerts, digest); 5 lets the
+// system pick a power-friendly moment, which is what a passive notification
+// wants (Apple: priority 5 must be used for notifications that do not
+// interrupt the user).
+const (
+	priorityImmediate = "10"
+	priorityPassive   = "5"
+)
+
+// Send delivers an alert at priority 10.
 func (c *Client) Send(ctx context.Context, deviceToken, env, collapseID string, payload []byte) (int, error) {
+	return c.send(ctx, deviceToken, env, collapseID, payload, priorityImmediate)
+}
+
+// SendPassive delivers an alert at priority 5 (passive interruption level).
+func (c *Client) SendPassive(ctx context.Context, deviceToken, env, collapseID string, payload []byte) (int, error) {
+	return c.send(ctx, deviceToken, env, collapseID, payload, priorityPassive)
+}
+
+func (c *Client) send(ctx context.Context, deviceToken, env, collapseID string, payload []byte, priority string) (int, error) {
 	host := "https://api.push.apple.com"
 	if env == "sandbox" {
 		host = "https://api.sandbox.push.apple.com"
@@ -108,7 +127,7 @@ func (c *Client) Send(ctx context.Context, deviceToken, env, collapseID string, 
 	req.Header.Set("authorization", "bearer "+token)
 	req.Header.Set("apns-topic", c.bundleID)
 	req.Header.Set("apns-push-type", "alert")
-	req.Header.Set("apns-priority", "10")
+	req.Header.Set("apns-priority", priority)
 	if collapseID != "" {
 		req.Header.Set("apns-collapse-id", collapseID)
 	}

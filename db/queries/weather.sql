@@ -6,8 +6,8 @@ WHERE status = 'active';
 -- name: UpsertWeatherHourly :copyfrom
 INSERT INTO t_weather_hourly_forecasts (
     cell_id, ts, temp, feels_like, precip_prob, wind, uv, cloud,
-    provider, fetched_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);
+    provider, fetched_at, precip_mm
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);
 
 -- name: DeleteWeatherBefore :exec
 DELETE FROM t_weather_hourly_forecasts

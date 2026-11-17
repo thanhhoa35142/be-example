@@ -43,23 +43,6 @@ type TAdminRecoveryCode struct {
 	UsedAt      pgtype.Timestamptz `json:"used_at"`
 }
 
-type TAdminSession struct {
-	ID          uuid.UUID `json:"id"`
-	TokenHash   []byte    `json:"token_hash"`
-	AdminUserID uuid.UUID `json:"admin_user_id"`
-	UserAgent   string    `json:"user_agent"`
-	Ip          string    `json:"ip"`
-	CreatedAt   time.Time `json:"created_at"`
-	ExpiresAt   time.Time `json:"expires_at"`
-	LastSeenAt  time.Time `json:"last_seen_at"`
-}
-
-type TAdminTotpUsed struct {
-	AdminUserID uuid.UUID `json:"admin_user_id"`
-	Step        int64     `json:"step"`
-	UsedAt      time.Time `json:"used_at"`
-}
-
 type TAdminUser struct {
 	ID              uuid.UUID          `json:"id"`
 	Email           string             `json:"email"`
@@ -72,6 +55,7 @@ type TAdminUser struct {
 	LockedUntil     pgtype.Timestamptz `json:"locked_until"`
 	CreatedAt       time.Time          `json:"created_at"`
 	UpdatedAt       time.Time          `json:"updated_at"`
+	AuthEpoch       int64              `json:"auth_epoch"`
 }
 
 type TAlertDelivery struct {
@@ -134,6 +118,19 @@ type TAppleNotification struct {
 	LastError             pgtype.Text        `json:"last_error"`
 	ReceivedAt            time.Time          `json:"received_at"`
 	ProcessedAt           pgtype.Timestamptz `json:"processed_at"`
+}
+
+type TCityHourOutlook struct {
+	PackID        uuid.UUID   `json:"pack_id"`
+	TsHour        time.Time   `json:"ts_hour"`
+	LocalDate     pgtype.Date `json:"local_date"`
+	WeatherScore  int16       `json:"weather_score"`
+	RainShare     float32     `json:"rain_share"`
+	SpotsN        int32       `json:"spots_n"`
+	TopSpotID     pgtype.UUID `json:"top_spot_id"`
+	TopSpotScore  pgtype.Int2 `json:"top_spot_score"`
+	ConfigVersion int16       `json:"config_version"`
+	ComputedAt    time.Time   `json:"computed_at"`
 }
 
 type TCityPack struct {
@@ -262,6 +259,36 @@ type TJobRun struct {
 	Stats        []byte             `json:"stats"`
 }
 
+type TNudgeDelivery struct {
+	DeviceID    uuid.UUID          `json:"device_id"`
+	LocalDate   pgtype.Date        `json:"local_date"`
+	Slot        string             `json:"slot"`
+	TargetDate  pgtype.Date        `json:"target_date"`
+	SpotID      uuid.UUID          `json:"spot_id"`
+	WindowStart time.Time          `json:"window_start"`
+	WindowEnd   time.Time          `json:"window_end"`
+	Score       int16              `json:"score"`
+	Status      string             `json:"status"`
+	Attempts    int16              `json:"attempts"`
+	ClaimedAt   time.Time          `json:"claimed_at"`
+	SentAt      pgtype.Timestamptz `json:"sent_at"`
+	ApnsStatus  pgtype.Int4        `json:"apns_status"`
+	LastError   pgtype.Text        `json:"last_error"`
+}
+
+type TNudgeSubscription struct {
+	DeviceID      uuid.UUID          `json:"device_id"`
+	Enabled       bool               `json:"enabled"`
+	HomeCell      pgtype.Int8        `json:"home_cell"`
+	HomeSource    pgtype.Text        `json:"home_source"`
+	HomeUpdatedAt pgtype.Timestamptz `json:"home_updated_at"`
+	SendHour      int16              `json:"send_hour"`
+	Consent       string             `json:"consent"`
+	IgnoredStreak int16              `json:"ignored_streak"`
+	LastSentAt    pgtype.Timestamptz `json:"last_sent_at"`
+	CreatedAt     time.Time          `json:"created_at"`
+}
+
 type TPlanLimit struct {
 	Plan       string      `json:"plan"`
 	Feature    string      `json:"feature"`
@@ -273,6 +300,12 @@ type TProviderQuota struct {
 	Day       pgtype.Date `json:"day"`
 	Used      int32       `json:"used"`
 	UpdatedAt time.Time   `json:"updated_at"`
+}
+
+type TPushSend struct {
+	DeviceID uuid.UUID `json:"device_id"`
+	Kind     string    `json:"kind"`
+	SentAt   time.Time `json:"sent_at"`
 }
 
 type TScoreFeedback struct {
@@ -433,6 +466,7 @@ type TWeatherHourlyForecast struct {
 	Cloud      pgtype.Int2   `json:"cloud"`
 	Provider   string        `json:"provider"`
 	FetchedAt  time.Time     `json:"fetched_at"`
+	PrecipMm   pgtype.Float4 `json:"precip_mm"`
 }
 
 type TWeeklyDigest struct {
@@ -447,12 +481,13 @@ type TWeeklyDigest struct {
 }
 
 type TWorkerJobSchedule struct {
-	Job             string             `json:"job"`
-	IntervalSeconds int32              `json:"interval_seconds"`
-	Enabled         bool               `json:"enabled"`
-	OffsetSeconds   int32              `json:"offset_seconds"`
-	UpdatedAt       time.Time          `json:"updated_at"`
-	RunRequestedAt  pgtype.Timestamptz `json:"run_requested_at"`
+	Job              string             `json:"job"`
+	IntervalSeconds  int32              `json:"interval_seconds"`
+	Enabled          bool               `json:"enabled"`
+	OffsetSeconds    int32              `json:"offset_seconds"`
+	UpdatedAt        time.Time          `json:"updated_at"`
+	RunRequestedAt   pgtype.Timestamptz `json:"run_requested_at"`
+	RunRequestedPack pgtype.Text        `json:"run_requested_pack"`
 }
 
 type TmpAreaID struct {

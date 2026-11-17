@@ -3,10 +3,12 @@ package http
 import (
 	"errors"
 	"html/template"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -31,15 +33,63 @@ func NewShareHandler(svc *spots.Service, opts ShareOptions) *ShareHandler {
 
 type sharePage struct {
 	Title       string
+	OGTitle     string
 	Subtitle    string
 	Description string
 	HasScore    bool
 	Score       int
 	Tier        string
+	ScoreLabel  string
 	AppURL      template.URL
 	MapsURL     string
 	StoreURL    string
 	AppStoreID  string
+
+	// Planned-time variant (`?at=`): one hour of one spot, nothing else.
+	NoIndex   bool
+	HasAt     bool
+	AtLabel   string
+	Reasons   []string
+	OpenHint  bool
+	Canonical string
+}
+
+// shareAtMaxLen bounds the raw `at` value; a valid RFC3339 timestamp with
+// nanoseconds and an offset is 35 bytes.
+const shareAtMaxLen = 40
+
+// shareAtLayout is the one canonical `at` form: the UTC hour, no fraction.
+const shareAtLayout = "2006-01-02T15:04:05Z"
+
+// shareAtHorizon matches the scoring horizon (7 days of hourly scores).
+const shareAtHorizon = spots.ForecastDays * 24 * time.Hour
+
+// parseShareAt validates the `at` query value. ok is false for anything that
+// is not RFC3339, is before the current UTC hour, or is at/after the scoring
+// horizon. The result is truncated to the hour; canonical reports whether raw
+// already is the canonical string for that hour.
+func parseShareAt(raw string, now time.Time) (at time.Time, canonical, ok bool) {
+	if raw == "" || len(raw) > shareAtMaxLen {
+		return time.Time{}, false, false
+	}
+	t, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}, false, false
+	}
+	at = t.UTC().Truncate(time.Hour)
+	nowHour := now.UTC().Truncate(time.Hour)
+	if at.Before(nowHour) || !at.Before(nowHour.Add(shareAtHorizon)) {
+		return time.Time{}, false, false
+	}
+	return at, raw == at.Format(shareAtLayout), true
+}
+
+func shareURL(id uuid.UUID, at *time.Time) string {
+	u := "/s/" + id.String()
+	if at != nil {
+		u += "?" + url.Values{"at": {at.Format(shareAtLayout)}}.Encode()
+	}
+	return u
 }
 
 func (h *ShareHandler) Spot(c *gin.Context) {
@@ -48,12 +98,30 @@ func (h *ShareHandler) Spot(c *gin.Context) {
 		h.notFound(c)
 		return
 	}
+
+	rawAt, hasAtParam := c.GetQuery("at")
+	var at *time.Time
+	if hasAtParam {
+		if t, canonical, ok := parseShareAt(rawAt, time.Now()); ok {
+			if !canonical {
+				// One URL per spot-hour, so shared caches and link previews
+				// never see more than ~168 variants per spot. The redirect
+				// itself stays out of shared caches: its URL space (any
+				// minute, second, fraction or offset) is unbounded.
+				c.Header("Cache-Control", "private, max-age=300")
+				c.Redirect(http.StatusFound, shareURL(id, &t))
+				return
+			}
+			at = &t
+		}
+	}
+
 	detail, err := h.svc.Get(c.Request.Context(), id)
 	if err != nil {
 		var merged spots.MergedError
 		switch {
 		case errors.As(err, &merged):
-			c.Redirect(http.StatusMovedPermanently, "/s/"+merged.NewID.String())
+			c.Redirect(http.StatusMovedPermanently, shareURL(merged.NewID, at))
 		case errors.Is(err, spots.ErrNotFound):
 			h.notFound(c)
 		default:
@@ -68,23 +136,51 @@ func (h *ShareHandler) Spot(c *gin.Context) {
 		AppURL:     template.URL("pickhour://spot/" + id.String()),
 		MapsURL:    mapsURL(shareTitle(detail), detail.Lat, detail.Lon),
 		AppStoreID: h.opts.AppStoreAppID,
+		ScoreLabel: "Picnic score right now",
+		NoIndex:    hasAtParam,
 	}
+	page.OGTitle = page.Title
 	if h.opts.AppStoreAppID != "" {
 		page.StoreURL = "https://apps.apple.com/app/id" + h.opts.AppStoreAppID
 	}
 
-	if items, err := h.svc.List(c.Request.Context(), spots.ListQuery{IDs: []uuid.UUID{id}}); err == nil &&
+	q := spots.ListQuery{IDs: []uuid.UUID{id}}
+	if at != nil {
+		q.When = at
+	}
+	var snap *spots.ScoreSnapshot
+	if items, err := h.svc.List(c.Request.Context(), q); err == nil &&
 		len(items) == 1 && items[0].Score != nil && items[0].Score.Score != nil {
+		snap = items[0].Score
 		page.HasScore = true
-		page.Score = *items[0].Score.Score
+		page.Score = *snap.Score
 		page.Tier = scoreTier(page.Score)
 	}
-	page.Description = "See the best hour for a picnic here, with an hourly score from 0 to 100."
-	if page.HasScore {
-		page.Description = "Picnic score right now: " + strconv.Itoa(page.Score) + " (" + page.Tier + "). See the best hour in Pickhour."
+
+	if at != nil {
+		fillPlannedPage(&page, detail, *at, snap)
+		page.Canonical = shareURL(id, at)
+		// Only the uuid and our own formatted time go into this URL.
+		page.AppURL = template.URL("pickhour://spot/" + id.String() + "?" +
+			url.Values{"at": {at.Format(shareAtLayout)}}.Encode())
+	} else {
+		page.Description = "See the best hour for a picnic here, with an hourly score from 0 to 100."
+		if page.HasScore {
+			page.Description = "Picnic score right now: " + strconv.Itoa(page.Score) + " (" + page.Tier + "). See the best hour in Pickhour."
+		}
 	}
 
-	c.Header("Cache-Control", "public, max-age=300")
+	switch {
+	case hasAtParam && at == nil:
+		// Junk, past or out-of-horizon `at`: plain page, but keep these
+		// variants out of shared caches.
+		c.Header("Cache-Control", "private, max-age=300")
+	default:
+		c.Header("Cache-Control", "public, max-age=300")
+	}
+	if page.NoIndex {
+		c.Header("X-Robots-Tag", "noindex")
+	}
 	c.Status(http.StatusOK)
 	c.Header("Content-Type", "text/html; charset=utf-8")
 	if err := shareTemplate.Execute(c.Writer, page); err != nil {
@@ -162,6 +258,101 @@ func scoreTier(score int) string {
 	}
 }
 
+// fillPlannedPage renders the `?at=` variant: the planned hour in the spot's
+// timezone, that hour's score and up to 3 reasons. No other hours, days or
+// alternatives (FEATURE_PLAN_DECISION_PLANS_GRASS.md, decision 2).
+func fillPlannedPage(page *sharePage, d spots.SpotDetail, at time.Time, snap *spots.ScoreSnapshot) {
+	loc := time.UTC
+	if l, err := time.LoadLocation(d.TZ); err == nil && d.TZ != "" {
+		loc = l
+	}
+	local := at.In(loc)
+	page.HasAt = true
+	page.AtLabel = local.Format("Monday 2 January · 15:04")
+	page.ScoreLabel = "Picnic score at " + local.Format("15:04")
+	page.OGTitle = "Picnic on " + local.Format("Monday 2 Jan, 15:04") + " · " + page.Title
+
+	when := local.Format("Monday 2 January at 15:04")
+	if !page.HasScore {
+		page.Description = "Picnic planned for " + when + ". See the hourly forecast in Pickhour."
+		return
+	}
+	if snap != nil {
+		for _, r := range snap.Reasons {
+			if s := reasonText(r); s != "" {
+				page.Reasons = append(page.Reasons, s)
+			}
+			if len(page.Reasons) == 3 {
+				break
+			}
+		}
+	}
+	page.OpenHint = page.Score < 60 || (snap != nil && snap.CapReason != nil)
+	page.Description = "Picnic planned for " + when + ". Score for that hour: " +
+		strconv.Itoa(page.Score) + " (" + page.Tier + ")."
+	if len(page.Reasons) > 0 {
+		page.Description += " " + strings.Join(page.Reasons, " · ") + "."
+	}
+}
+
+// reasonText is the English text of a scoring reason code (the codes from
+// scoring.topReasons). The API itself only returns codes; this static page is
+// English-only, like the rest of its copy. Unknown codes render nothing.
+func reasonText(r spots.Reason) string {
+	num := func(k string) (string, bool) {
+		switch v := r.Params[k].(type) {
+		case float64:
+			return strconv.FormatFloat(math.Round(v), 'f', 0, 64), true
+		case int:
+			return strconv.Itoa(v), true
+		}
+		return "", false
+	}
+	switch r.Code {
+	case "cap.rain":
+		return "Rain expected"
+	case "cap.heat":
+		return "Too hot"
+	case "cap.cold":
+		return "Too cold"
+	case "cap.dark":
+		return "After dark"
+	case "cap.twilight":
+		return "Low light"
+	case "weather.rain_risk":
+		if p, ok := num("prob"); ok {
+			return p + "% chance of rain"
+		}
+		return "Chance of rain"
+	case "weather.hot":
+		if t, ok := num("temp"); ok {
+			return "Hot, " + t + "°C"
+		}
+		return "Hot"
+	case "weather.cold":
+		if t, ok := num("temp"); ok {
+			return "Cold, " + t + "°C"
+		}
+		return "Cold"
+	case "weather.clear":
+		if t, ok := num("temp"); ok {
+			return "Pleasant, " + t + "°C"
+		}
+		return "Pleasant weather"
+	case "crowd.low":
+		return "Quiet"
+	case "crowd.moderate":
+		return "Moderately busy"
+	case "crowd.high":
+		return "Busy"
+	case "amenity.well_equipped":
+		return "Well equipped"
+	case "fresh.recent":
+		return "Recently verified"
+	}
+	return ""
+}
+
 func mapsURL(name string, lat, lon float64) string {
 	q := url.Values{}
 	q.Set("ll", strconv.FormatFloat(lat, 'f', 6, 64)+","+strconv.FormatFloat(lon, 'f', 6, 64))
@@ -176,9 +367,11 @@ var shareTemplate = template.Must(template.New("share").Parse(`<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Title}} · Pickhour</title>
 <meta name="description" content="{{.Description}}">
+{{if .NoIndex}}<meta name="robots" content="noindex">{{end}}
+{{if .Canonical}}<link rel="canonical" href="{{.Canonical}}">{{end}}
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Pickhour">
-<meta property="og:title" content="{{.Title}}">
+<meta property="og:title" content="{{.OGTitle}}">
 <meta property="og:description" content="{{.Description}}">
 <meta name="twitter:card" content="summary">
 {{if .AppStoreID}}<meta name="apple-itunes-app" content="app-id={{.AppStoreID}}">{{end}}
@@ -196,6 +389,9 @@ h1 { font-size: 28px; line-height: 1.2; margin: 0; }
 .score b { font-size: 44px; line-height: 1; font-variant-numeric: tabular-nums; }
 .score span { color: var(--brand); font-weight: 600; }
 .score small { color: var(--text2); font-size: 15px; margin-left: auto; }
+.when { font-weight: 600; margin: 16px 0 0; }
+ul.reasons { margin: 12px 0 0; padding-left: 20px; }
+.hint { color: var(--text2); margin: 12px 0 0; }
 .actions { margin-top: 20px; display: grid; gap: 10px; }
 a.button { display: block; text-align: center; padding: 14px; border-radius: 12px; text-decoration: none; font-weight: 600; }
 a.primary { background: var(--brand); color: var(--surface); }
@@ -210,7 +406,10 @@ footer a { color: inherit; }
 <div class="panel">
 <h1>{{.Title}}</h1>
 {{if .Subtitle}}<p class="sub">{{.Subtitle}}</p>{{end}}
-{{if .HasScore}}<p class="score"><b>{{.Score}}</b><span>{{.Tier}}</span><small>Picnic score right now</small></p>{{end}}
+{{if .HasAt}}<p class="when">{{.AtLabel}}</p>{{end}}
+{{if .HasScore}}<p class="score"><b>{{.Score}}</b><span>{{.Tier}}</span><small>{{.ScoreLabel}}</small></p>{{end}}
+{{if .Reasons}}<ul class="reasons">{{range .Reasons}}<li>{{.}}</li>{{end}}</ul>{{end}}
+{{if .OpenHint}}<p class="hint">Open Pickhour to see better times.</p>{{end}}
 <div class="actions">
 <a class="button primary" href="{{.AppURL}}">Open in Pickhour</a>
 {{if .StoreURL}}<a class="button secondary" href="{{.StoreURL}}">Get the App</a>{{end}}

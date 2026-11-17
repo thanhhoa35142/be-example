@@ -182,6 +182,59 @@ paths:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
 
+  /v1/getaways:
+    get:
+      summary: Best cities for picnic weather on the chosen days
+      description: |
+        Ranks covered cities by picnic weather for 1-3 local days within the next 7.
+        Takes no coordinates; the app compares each city's `center` with its own position.
+        Public route: send `X-Device-ID` + `X-Device-Token` to be recognized as Plus, otherwise
+        the caller is Free and `limit` is clamped to 3. Any `tier` query parameter is ignored.
+        Cities with no 2-4 h window of good hours on any requested day are omitted. A day counts in `windowDays` only with at least 4 good hours. `weatherScore` is the city's weather score; `topSpot.score` is the named top spot's own (lower) total score. The response cache key includes the current UTC hour. Reason codes
+        `getaway.dry_day`, `getaway.long_window` (`hours`), then the first `weather.*` reason of the top spot.
+      parameters:
+        - name: start
+          in: query
+          required: false
+          description: >-
+            First local day, YYYY-MM-DD. Must satisfy today-1 <= start <= today+6 (UTC date of the server).
+            Default = the coming Saturday (UTC), or today on Saturday/Sunday.
+          schema: { type: string, format: date }
+        - name: days
+          in: query
+          required: false
+          description: Number of consecutive local days; start + days - 1 must not pass today+6.
+          schema: { type: integer, default: 2, minimum: 1, maximum: 3 }
+        - name: limit
+          in: query
+          required: false
+          description: Free is clamped to 3.
+          schema: { type: integer, default: 10, minimum: 1, maximum: 39 }
+        - name: X-Device-ID
+          in: header
+          required: false
+          schema: { type: string, format: uuid }
+        - name: X-Device-Token
+          in: header
+          required: false
+          description: Per-device secret issued at registration. Required together with X-Device-ID to be treated as Plus.
+          schema: { type: string }
+      responses:
+        "200":
+          description: Ranked cities (`items` is `[]` when none qualifies)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: "#/components/schemas/GetawayList" }
+        "400":
+          description: "`invalid_start`, `invalid_range` or `invalid_query`"
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
   /v1/devices:
     post:
       summary: Register or refresh a device
@@ -487,6 +540,62 @@ paths:
       responses:
         "204": { description: Deleted }
 
+  /v1/devices/{id}/nudge:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      summary: Opt in to / update the good-day push (Free and Plus)
+      description: >
+        The home coordinate is converted to an H3 res-7 cell and discarded; it is never stored or logged,
+        and no response contains it or the cell. First PUT requires consent; home may follow in a later PUT.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NudgeRequest" }
+      responses:
+        "200":
+          description: Saved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Nudge" }
+        "400":
+          description: invalid_body (bad shape, missing consent on first PUT, coordinate out of range, sendHour outside 7-10) or invalid_id
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "404":
+          description: Unknown device (not_found)
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+    get:
+      summary: Current good-day push subscription
+      responses:
+        "200":
+          description: Subscription
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Nudge" }
+        "404":
+          description: No subscription (not_found)
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+    delete:
+      summary: Opt out; removes the home cell and delivery history (idempotent)
+      responses:
+        "204": { description: Deleted, also when there was no subscription }
+
   /v1/devices/{id}/entitlement:
     get:
       summary: Resolved plan for a device
@@ -607,7 +716,7 @@ components:
         type: { type: string, example: "about:blank" }
         code:
           type: string
-          enum: [bad_request, invalid_id, invalid_bbox, bbox_too_large, invalid_when, invalid_query, invalid_body, invalid_report, not_found, merged_spot, conflict, rate_limited, plan_limit, payload_too_large, unauthorized, device_limit, account_mismatch, service_unavailable, internal_error]
+          enum: [bad_request, invalid_id, invalid_bbox, bbox_too_large, invalid_when, invalid_start, invalid_range, invalid_query, invalid_body, invalid_report, not_found, merged_spot, conflict, rate_limited, plan_limit, payload_too_large, unauthorized, device_limit, account_mismatch, service_unavailable, internal_error]
         title: { type: string }
         status: { type: integer }
         detail: { type: string }
@@ -784,6 +893,68 @@ components:
           type: array
           items: { $ref: "#/components/schemas/RecommendationItem" }
 
+    GetawayList:
+      type: object
+      required: [start, days, items, computedAt]
+      properties:
+        start: { type: string, format: date }
+        days: { type: integer, minimum: 1, maximum: 3 }
+        computedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Newest refresh time of the rows used; null when items is empty.
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/GetawayItem" }
+
+    GetawayItem:
+      type: object
+      required: [slug, name, country, tz, center, windowDays, bestDay, window, goodHours, dayScores, topSpot, reasons]
+      properties:
+        slug: { type: string }
+        name: { type: string }
+        country: { type: string, example: PT }
+        tz: { type: string, example: Europe/Lisbon }
+        center:
+          type: array
+          items: { type: number, format: double }
+          minItems: 2
+          maxItems: 2
+          description: "[lon, lat], a point inside the city boundary"
+        windowDays: { type: integer, description: Days of the range with a window and at least 4 good hours; the primary ranking key. }
+        bestDay: { type: string, format: date, description: Civil date in the city's tz. }
+        window:
+          type: object
+          required: [start, end, weatherScore]
+          properties:
+            start: { type: string, format: date-time }
+            end: { type: string, format: date-time }
+            weatherScore: { type: integer, minimum: 0, maximum: 100, description: Rounded mean city weather score of the window (not a spot's total score). }
+        goodHours: { type: integer, description: Hours scoring at least the good threshold on bestDay. }
+        dayScores:
+          type: array
+          items:
+            type: object
+            required: [date, weatherScore, goodHours]
+            properties:
+              date: { type: string, format: date }
+              weatherScore: { type: integer, nullable: true, description: City weather score of that day's window; null when it has no window. }
+              goodHours: { type: integer }
+        topSpot:
+          type: object
+          nullable: true
+          required: [id, name, score]
+          description: Best named spot in the window; null when it has none.
+          properties:
+            id: { type: string, format: uuid }
+            name: { type: string }
+            score: { type: integer, minimum: 0, maximum: 100, description: The spot's own total score at its best hour in the window; usually lower than window.weatherScore. }
+        reasons:
+          type: array
+          maxItems: 2
+          items: { $ref: "#/components/schemas/Reason" }
+
     DeviceRegister:
       type: object
       required: [id]
@@ -874,6 +1045,27 @@ components:
         enabled: { type: boolean }
         sendDow: { type: integer, minimum: 0, maximum: 6, description: "0 = Sunday" }
         sendHour: { type: integer, minimum: 0, maximum: 23, description: "device-local hour" }
+    NudgeRequest:
+      type: object
+      properties:
+        enabled: { type: boolean, description: "defaults to true on the first PUT" }
+        consent: { type: string, enum: [explicit, provisional], description: "required on the first PUT" }
+        sendHour: { type: integer, minimum: 7, maximum: 10, default: 8, description: "device-local hour" }
+        home:
+          type: object
+          description: optional (a PUT without it keeps the stored home); replaces the stored cell when present
+          required: [lat, lng, source]
+          properties:
+            lat: { type: number, minimum: -90, maximum: 90 }
+            lng: { type: number, minimum: -180, maximum: 180 }
+            source: { type: string, enum: [location, city] }
+    Nudge:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        sendHour: { type: integer, minimum: 7, maximum: 10 }
+        homeSet: { type: boolean }
+        homeUpdatedAt: { type: string, format: date-time, nullable: true, description: "always present; null until a home is set" }
     AlertRuleRequest:
       type: object
       required: [deviceId, minScore, daysMask, startLocal, endLocal, tz]

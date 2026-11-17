@@ -22,18 +22,23 @@ type PurgeStats struct {
 	CrowdReports     int64
 	JobRuns          int64
 	AlertDeliveries  int64
+	PushSends        int64
+	NudgeDeliveries  int64
 	PayloadsScrubbed int64
-	AdminSessions    int64
 }
 
 var (
-	weatherRetention   = 7 * 24 * time.Hour
-	scoreRetention     = 2 * 24 * time.Hour
-	eventRetention     = 90 * 24 * time.Hour
-	crowdReportMaxAge  = 180 * 24 * time.Hour
-	jobRunRetention    = 30 * 24 * time.Hour
-	deliveryRetention  = 30 * 24 * time.Hour
-	notificationMaxAge = 90 * 24 * time.Hour
+	weatherRetention  = 7 * 24 * time.Hour
+	scoreRetention    = 2 * 24 * time.Hour
+	eventRetention    = 90 * 24 * time.Hour
+	crowdReportMaxAge = 180 * 24 * time.Hour
+	jobRunRetention   = 30 * 24 * time.Hour
+	deliveryRetention = 30 * 24 * time.Hour
+	pushSendRetention = 30 * 24 * time.Hour
+	// Eligibility needs ~8 days of nudge deliveries (latest row, this week's
+	// weekend nudge); 30 days keeps the same window as the push ledger.
+	nudgeDeliveryRetention = 30 * 24 * time.Hour
+	notificationMaxAge     = 90 * 24 * time.Hour
 )
 
 func (r *RetentionRepo) Purge(ctx context.Context) (PurgeStats, error) {
@@ -85,10 +90,16 @@ func (r *RetentionRepo) Purge(ctx context.Context) (PurgeStats, error) {
 	}); err != nil {
 		return st, err
 	}
-
-	// Auth tables: expired sessions are tiny but unbounded without a sweep
-	// (login creates a row per session). Challenges live in Redis with TTL.
-	if st.AdminSessions, err = r.q.DeleteExpiredAdminSessions(ctx); err != nil {
+	// t_push_sends only feeds the 20 h / 7 d frequency caps.
+	if st.PushSends, err = purge(now.Add(-pushSendRetention), func(b time.Time) (int64, error) {
+		return r.q.PurgePushSends(ctx, PurgePushSendsParams{SentAt: b, Limit: purgeBatch})
+	}); err != nil {
+		return st, err
+	}
+	if st.NudgeDeliveries, err = purge(now.Add(-nudgeDeliveryRetention), func(b time.Time) (int64, error) {
+		u := b.UTC()
+		return r.q.PurgeNudgeDeliveries(ctx, PurgeNudgeDeliveriesParams{Before: dateParam(&u), RowLimit: purgeBatch})
+	}); err != nil {
 		return st, err
 	}
 

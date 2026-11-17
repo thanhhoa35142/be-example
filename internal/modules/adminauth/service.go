@@ -1,8 +1,8 @@
 package adminauth
 
 import (
-	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"time"
@@ -45,14 +45,17 @@ func (e *LockedError) RetryAfterDuration() time.Duration { return e.RetryAfter }
 type Service struct {
 	repo       Repository
 	challenges ChallengeStore
+	refreshes  RefreshStore
+	replays    ReplayStore
 	cipher     *Cipher
+	jwtKey     []byte
 	issuer     string
 	cfg        Config
 	now        func() time.Time
 	dummyHash  string
 }
 
-func NewService(repo Repository, challenges ChallengeStore, key []byte, cfg Config) (*Service, error) {
+func NewService(repo Repository, challenges ChallengeStore, refreshes RefreshStore, replays ReplayStore, key, jwtSecret []byte, cfg Config) (*Service, error) {
 	var c *Cipher
 	if len(key) > 0 {
 		var err error
@@ -65,10 +68,18 @@ func NewService(repo Repository, challenges ChallengeStore, key []byte, cfg Conf
 	if err != nil {
 		return nil, err
 	}
-	return &Service{repo: repo, challenges: challenges, cipher: c, issuer: "Pickhour", cfg: cfg, now: time.Now, dummyHash: dummy}, nil
+	// Prefer a dedicated JWT secret; fall back to a key derived from the
+	// admin secret key. No key at all (CLI bearer mode) means no access
+	// tokens can be issued or verified.
+	jwtKey := jwtSecret
+	if len(jwtKey) == 0 && len(key) > 0 {
+		jwtKey = accessKey(key)
+	}
+	return &Service{repo: repo, challenges: challenges, refreshes: refreshes, replays: replays, cipher: c, jwtKey: jwtKey, issuer: "Pickhour", cfg: cfg, now: time.Now, dummyHash: dummy}, nil
 }
 
-func (s *Service) SessionTTL() time.Duration { return s.cfg.SessionTTL }
+func (s *Service) AccessTTL() time.Duration  { return s.cfg.AccessTTL }
+func (s *Service) RefreshTTL() time.Duration { return s.cfg.RefreshTTL }
 
 var ErrKeyMissing = errors.New("admin auth key not configured")
 
@@ -216,18 +227,14 @@ func (s *Service) verifyTOTPStep(ctx context.Context, userID uuid.UUID, secretB3
 	if !ok {
 		return false
 	}
-	fresh, err := s.repo.TryUsedTOTP(ctx, userID, counter)
-	if err != nil || !fresh {
-		return false
-	}
-	_ = s.repo.PruneTOTPUsed(ctx)
-	return true
+	fresh, err := s.replays.TryUsedTOTP(ctx, userID, counter)
+	return err == nil && fresh
 }
 
-func (s *Service) ConfirmCode(ctx context.Context, challenge, code, userAgent, ip string) (*AuthResult, *Session, string, error) {
+func (s *Service) ConfirmCode(ctx context.Context, challenge, code, userAgent, ip string) (*AuthResult, *TokenPair, error) {
 	pc, user, err := s.challengeUser(ctx, challenge, ChallengeLogin)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, err
 	}
 
 	code = strings.TrimSpace(code)
@@ -235,85 +242,111 @@ func (s *Service) ConfirmCode(ctx context.Context, challenge, code, userAgent, i
 	if len(code) == totpDigits {
 		secret, err := s.openSecret(user.TotpSecret)
 		if err != nil {
-			return nil, nil, "", err
+			return nil, nil, err
 		}
 		ok = s.verifyTOTPStep(ctx, user.ID, secret, code)
 	} else {
 		ok, err = s.repo.ConsumeRecoveryCode(ctx, user.ID, HashRecoveryCode(code))
 		if err != nil {
-			return nil, nil, "", err
+			return nil, nil, err
 		}
 	}
 	if !ok {
 		_ = s.repo.RecordAuthFailure(ctx, user.ID, s.cfg.MaxFailures, s.cfg.Lockout)
-		return nil, nil, "", ErrInvalidCode
+		return nil, nil, ErrInvalidCode
 	}
 
 	// Consume the challenge: it is single-use, same as the enroll path.
 	_ = s.challenges.Delete(ctx, pc)
 
-	sess, raw, err := s.openSession(ctx, user, userAgent, ip)
+	pair, err := s.openSession(ctx, user, userAgent, ip)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, err
 	}
-	return &AuthResult{User: info(user)}, sess, raw, nil
+	return &AuthResult{User: info(user)}, pair, nil
 }
 
-func (s *Service) ConfirmEnroll(ctx context.Context, challenge, code, userAgent, ip string) (*AuthResult, *Session, string, error) {
+func (s *Service) ConfirmEnroll(ctx context.Context, challenge, code, userAgent, ip string) (*AuthResult, *TokenPair, error) {
 	pc, user, err := s.challengeUser(ctx, challenge, ChallengeEnroll)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, err
 	}
 	// Enrollment is single-shot: a stale enroll challenge must not overwrite
 	// an already-confirmed TOTP secret or wipe the recovery codes.
 	if user.TotpConfirmedAt != nil {
-		return nil, nil, "", ErrInvalidChallenge
+		return nil, nil, ErrInvalidChallenge
 	}
 	cipher, err := s.requireCipher()
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, err
 	}
 	secret, err := cipher.Open(pc.TotpSecret)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, err
 	}
 	if !s.verifyTOTPStep(ctx, user.ID, string(secret), strings.TrimSpace(code)) {
 		_ = s.repo.RecordAuthFailure(ctx, user.ID, s.cfg.MaxFailures, s.cfg.Lockout)
-		return nil, nil, "", ErrInvalidCode
+		return nil, nil, ErrInvalidCode
 	}
 
 	codes, hashes, err := GenerateRecoveryCodes()
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, err
 	}
 	if err := s.repo.ConfirmTOTP(ctx, user.ID, pc.TotpSecret); err != nil {
-		return nil, nil, "", err
+		return nil, nil, err
 	}
 	if err := s.repo.ReplaceRecoveryCodes(ctx, user.ID, hashes); err != nil {
-		return nil, nil, "", err
+		return nil, nil, err
 	}
 	_ = s.challenges.Delete(ctx, pc)
 	_ = s.repo.ResetAuthFailures(ctx, user.ID)
 
-	sess, raw, err := s.openSession(ctx, user, userAgent, ip)
+	pair, err := s.openSession(ctx, user, userAgent, ip)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, err
 	}
-	return &AuthResult{User: info(user), RecoveryCodes: codes}, sess, raw, nil
+	return &AuthResult{User: info(user), RecoveryCodes: codes}, pair, nil
 }
 
-func (s *Service) openSession(ctx context.Context, user *User, userAgent, ip string) (*Session, string, error) {
-	token, hash, err := NewSessionToken()
+// issueSession mints a new access JWT + single-use refresh token and stores
+// the refresh entry. sid stays stable across rotations of the same login.
+func (s *Service) issueSession(ctx context.Context, user *User, sid uuid.UUID, userAgent, ip string, createdAt time.Time) (*TokenPair, error) {
+	access, err := s.signAccess(user, sid)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
-	sess, err := s.repo.CreateSession(ctx, hash, user.ID, userAgent, ip, s.now().Add(s.cfg.SessionTTL))
+	refresh, hash, err := NewSessionToken()
 	if err != nil {
-		return nil, "", err
+		return nil, err
+	}
+	expiresAt := createdAt.Add(s.cfg.RefreshTTL).UTC()
+	entry := &RefreshEntry{
+		ID:        sid,
+		UserID:    user.ID,
+		Email:     user.Email,
+		UserAgent: userAgent,
+		IP:        ip,
+		Hash:      hex.EncodeToString(hash),
+		CreatedAt: createdAt.UTC(),
+		ExpiresAt: expiresAt,
+	}
+	// Refresh TTL is absolute from the original login (createdAt is carried
+	// across rotations), so the store TTL is the remaining lifetime.
+	if err := s.refreshes.Put(ctx, hash, entry, expiresAt.Sub(s.now())); err != nil {
+		return nil, err
+	}
+	return &TokenPair{Access: access, Refresh: refresh}, nil
+}
+
+func (s *Service) openSession(ctx context.Context, user *User, userAgent, ip string) (*TokenPair, error) {
+	pair, err := s.issueSession(ctx, user, uuid.New(), userAgent, ip, s.now())
+	if err != nil {
+		return nil, err
 	}
 	_ = s.repo.TouchLastLogin(ctx, user.ID)
 	_ = s.repo.ResetAuthFailures(ctx, user.ID)
-	return sess, token, nil
+	return pair, nil
 }
 
 func (s *Service) openSecret(sealed []byte) (string, error) {
@@ -328,54 +361,126 @@ func (s *Service) openSecret(sealed []byte) (string, error) {
 	return string(plain), nil
 }
 
+// Authenticate verifies a stateless access JWT and loads the user so a
+// disabled account is cut off within the access TTL. Session revocation
+// happens on the refresh path.
 func (s *Service) Authenticate(ctx context.Context, token string) (*Session, *User, error) {
 	if token == "" {
 		return nil, nil, ErrInvalidSession
 	}
-	sess, user, err := s.repo.SessionByToken(ctx, HashToken(token))
+	claims, err := s.parseAccess(token)
+	if err != nil {
+		return nil, nil, err
+	}
+	uid, err := uuid.Parse(claims.Subject)
+	if err != nil {
+		return nil, nil, ErrInvalidSession
+	}
+	sid, _ := uuid.Parse(claims.SID)
+	user, err := s.repo.UserByID(ctx, uid)
 	if err != nil {
 		if isNotFound(err) {
 			return nil, nil, ErrInvalidSession
 		}
 		return nil, nil, err
 	}
-	now := s.now()
-	if user.DisabledAt != nil || !sess.ExpiresAt.After(now) || !sess.LastSeenAt.Add(s.cfg.IdleTTL).After(now) {
+	if user.DisabledAt != nil || claims.Epoch != user.AuthEpoch {
 		return nil, nil, ErrInvalidSession
 	}
-	_ = s.repo.TouchSession(ctx, sess.ID)
-	return sess, user, nil
+	return &Session{ID: sid, UserID: user.ID}, user, nil
 }
 
-func (s *Service) Logout(ctx context.Context, token string) error {
-	if token == "" {
+// RefreshSession rotates a refresh token: the old token is consumed
+// atomically (single-use), then a fresh access+refresh pair is issued under
+// the same session id. Replays and concurrent refreshes fail.
+func (s *Service) RefreshSession(ctx context.Context, refreshToken, userAgent, ip string) (*TokenPair, *User, error) {
+	if refreshToken == "" {
+		return nil, nil, ErrInvalidSession
+	}
+	entry, err := s.refreshes.Consume(ctx, HashToken(refreshToken))
+	if err != nil {
+		if isNotFound(err) {
+			return nil, nil, ErrInvalidSession
+		}
+		return nil, nil, err
+	}
+	user, err := s.repo.UserByID(ctx, entry.UserID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if user.DisabledAt != nil {
+		// Disabled account: kill the whole session family, not just this token.
+		_ = s.refreshes.DeleteOthers(ctx, user.ID, "")
+		return nil, nil, ErrInvalidSession
+	}
+	pair, err := s.issueSession(ctx, user, entry.ID, userAgent, ip, entry.CreatedAt)
+	if err != nil {
+		return nil, nil, err
+	}
+	return pair, user, nil
+}
+
+// Logout revokes the refresh session. The access JWT stays valid until its
+// short expiry — it is stateless by design.
+func (s *Service) Logout(ctx context.Context, refreshToken string) error {
+	if refreshToken == "" {
 		return nil
 	}
-	return s.repo.DeleteSession(ctx, HashToken(token))
+	return s.refreshes.Delete(ctx, HashToken(refreshToken))
 }
 
 func (s *Service) Me(ctx context.Context, token string) (*Session, *User, error) {
 	return s.Authenticate(ctx, token)
 }
 
-func (s *Service) Sessions(ctx context.Context, token string) ([]SessionInfo, error) {
-	sess, user, err := s.Authenticate(ctx, token)
+// Sessions lists refresh-backed login sessions for the user that owns the
+// presented refresh token.
+func (s *Service) Sessions(ctx context.Context, refreshToken string) ([]SessionInfo, error) {
+	_, user, err := s.sessionEntry(ctx, refreshToken)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.repo.ListSessions(ctx, user.ID)
+	rows, err := s.refreshes.ListByUser(ctx, user.ID)
 	if err != nil {
 		return nil, err
 	}
+	currentHash := HashToken(refreshToken)
 	out := make([]SessionInfo, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, SessionInfo{
-			ID: r.ID, CreatedAt: r.CreatedAt, ExpiresAt: r.ExpiresAt,
-			LastSeenAt: r.LastSeenAt, UserAgent: r.UserAgent, IP: r.IP,
-			Current: bytes.Equal(r.TokenHash, sess.TokenHash),
+			ID:         r.ID,
+			CreatedAt:  r.CreatedAt,
+			ExpiresAt:  r.ExpiresAt,
+			LastSeenAt: r.CreatedAt, // no per-request touch; refresh rotates instead
+			UserAgent:  r.UserAgent,
+			IP:         r.IP,
+			Current:    r.Hash == hex.EncodeToString(currentHash),
 		})
 	}
 	return out, nil
+}
+
+// sessionEntry validates a refresh token without consuming it and returns
+// its entry plus the owning user.
+func (s *Service) sessionEntry(ctx context.Context, refreshToken string) (*RefreshEntry, *User, error) {
+	if refreshToken == "" {
+		return nil, nil, ErrInvalidSession
+	}
+	entry, err := s.refreshes.Get(ctx, HashToken(refreshToken))
+	if err != nil {
+		if isNotFound(err) {
+			return nil, nil, ErrInvalidSession
+		}
+		return nil, nil, err
+	}
+	user, err := s.repo.UserByID(ctx, entry.UserID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if user.DisabledAt != nil {
+		return nil, nil, ErrInvalidSession
+	}
+	return entry, user, nil
 }
 
 func (s *Service) RegenerateRecoveryCodes(ctx context.Context, token string) ([]string, error) {
@@ -393,16 +498,20 @@ func (s *Service) RegenerateRecoveryCodes(ctx context.Context, token string) ([]
 	return codes, nil
 }
 
-func (s *Service) RevokeOtherSessions(ctx context.Context, token string) error {
-	sess, _, err := s.Authenticate(ctx, token)
+func (s *Service) RevokeOtherSessions(ctx context.Context, refreshToken string) error {
+	_, user, err := s.sessionEntry(ctx, refreshToken)
 	if err != nil {
 		return err
 	}
-	return s.repo.RevokeOtherSessions(ctx, sess.UserID, sess.TokenHash)
+	return s.refreshes.DeleteOthers(ctx, user.ID, hex.EncodeToString(HashToken(refreshToken)))
 }
 
-func (s *Service) ChangePassword(ctx context.Context, token, current, next string) error {
-	sess, sessUser, err := s.Authenticate(ctx, token)
+func (s *Service) revokeAllSessions(ctx context.Context, userID uuid.UUID) error {
+	return s.refreshes.DeleteOthers(ctx, userID, "")
+}
+
+func (s *Service) ChangePassword(ctx context.Context, accessToken, refreshToken, current, next string) error {
+	_, sessUser, err := s.Authenticate(ctx, accessToken)
 	if err != nil {
 		return err
 	}
@@ -431,7 +540,11 @@ func (s *Service) ChangePassword(ctx context.Context, token, current, next strin
 	if err := s.repo.SetPassword(ctx, user.ID, hash); err != nil {
 		return err
 	}
-	if err := s.repo.RevokeOtherSessions(ctx, user.ID, sess.TokenHash); err != nil {
+	var keep string
+	if refreshToken != "" {
+		keep = hex.EncodeToString(HashToken(refreshToken))
+	}
+	if err := s.refreshes.DeleteOthers(ctx, user.ID, keep); err != nil {
 		return err
 	}
 	return s.challenges.DeleteForUser(ctx, user.ID)
@@ -476,7 +589,7 @@ func (s *Service) SetPassword(ctx context.Context, email, password string) error
 	if err := s.repo.SetPassword(ctx, user.ID, hash); err != nil {
 		return err
 	}
-	if err := s.repo.RevokeOtherSessions(ctx, user.ID, nil); err != nil {
+	if err := s.revokeAllSessions(ctx, user.ID); err != nil {
 		return err
 	}
 	return s.challenges.DeleteForUser(ctx, user.ID)
@@ -493,7 +606,7 @@ func (s *Service) Reset2FA(ctx context.Context, email string) error {
 	if err := s.repo.ReplaceRecoveryCodes(ctx, user.ID, nil); err != nil {
 		return err
 	}
-	if err := s.repo.DeleteTOTPUsed(ctx, user.ID); err != nil {
+	if err := s.replays.DeleteForUser(ctx, user.ID); err != nil {
 		return err
 	}
 	return s.challenges.DeleteForUser(ctx, user.ID)
@@ -509,7 +622,7 @@ func (s *Service) SetDisabled(ctx context.Context, email string, disabled bool) 
 	}
 	if disabled {
 
-		return s.repo.RevokeOtherSessions(ctx, user.ID, nil)
+		return s.revokeAllSessions(ctx, user.ID)
 	}
 	return nil
 }

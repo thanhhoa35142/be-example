@@ -16,6 +16,8 @@ const (
 	CodeInvalidBBox   = "invalid_bbox"
 	CodeBboxTooLarge  = "bbox_too_large"
 	CodeInvalidWhen   = "invalid_when"
+	CodeInvalidStart  = "invalid_start"
+	CodeInvalidRange  = "invalid_range"
 	CodeInvalidQuery  = "invalid_query"
 	CodeInvalidBody   = "invalid_body"
 	CodeInvalidReport = "invalid_report"
