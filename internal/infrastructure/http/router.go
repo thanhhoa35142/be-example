@@ -35,6 +35,7 @@ const (
 type Handlers struct {
 	Spots           *SpotsHandler
 	Recommendations *RecommendationsHandler
+	Getaways        *GetawaysHandler
 	Devices         *DevicesHandler
 	DeviceSvc       *devices.Service
 	Reports         *ReportsHandler
@@ -46,6 +47,7 @@ type Handlers struct {
 	Traffic         *TrafficHandler
 	Events          *EventsHandler
 	Digest          *DigestHandler
+	Nudge           *NudgeHandler
 	Share           *ShareHandler
 	Weather         *WeatherHandler
 }
@@ -131,6 +133,10 @@ func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error
 		if h.Recommendations != nil {
 			v1.GET("/recommendations", cacheGet(10*time.Minute, true, RecNormalize), h.Recommendations.List)
 		}
+		if h.Getaways != nil {
+			// Tier runs before the cache so Free and Plus never share an entry.
+			v1.GET("/getaways", h.Getaways.Tier, cacheGet(30*time.Minute, true, GetawaysNormalize), h.Getaways.List)
+		}
 		if h.Weather != nil {
 			v1.GET("/weather/nearby", cacheGet(15*time.Minute, false, NearbyNormalize), h.Weather.Nearby)
 		}
@@ -178,6 +184,18 @@ func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error
 				v1.PUT("/devices/:id/digest", h.Digest.Put)
 				v1.GET("/devices/:id/digest", h.Digest.Get)
 				v1.DELETE("/devices/:id/digest", h.Digest.Delete)
+			}
+		}
+		if h.Nudge != nil {
+			if h.DeviceSvc != nil {
+				auth := deviceAuthParam(h.DeviceSvc)
+				v1.PUT("/devices/:id/nudge", auth, h.Nudge.Put)
+				v1.GET("/devices/:id/nudge", auth, h.Nudge.Get)
+				v1.DELETE("/devices/:id/nudge", auth, h.Nudge.Delete)
+			} else {
+				v1.PUT("/devices/:id/nudge", h.Nudge.Put)
+				v1.GET("/devices/:id/nudge", h.Nudge.Get)
+				v1.DELETE("/devices/:id/nudge", h.Nudge.Delete)
 			}
 		}
 		if h.Events != nil {

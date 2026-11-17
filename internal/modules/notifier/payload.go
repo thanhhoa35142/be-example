@@ -1,10 +1,33 @@
 package notifier
 
 import (
-	"fmt"
+	"strconv"
+	"time"
 
 	"github.com/thanhhoa35142/be-example/internal/modules/alerts"
 )
+
+// Push copy is localized on the device: the payload carries APNs
+// title-loc-key / loc-key / loc-args and the app resolves them from its
+// bundle (docs/GOOD_DAY_PUSH_SPEC.md §3). loc-args are only names and
+// numbers, never server-formatted times or dates.
+
+const (
+	locAlertTitle = "push.alert.title"
+	locAlertBody  = "push.alert.body"
+
+	locDigestTitle   = "push.digest.title"
+	locDigestSatBody = "push.digest.sat.body"
+	locDigestSunBody = "push.digest.sun.body"
+
+	locGoodDayTitle        = "push.goodday.title"
+	locGoodDayTodayBody    = "push.goodday.today.body"
+	locGoodDayWeekendTitle = "push.goodday.weekend.title"
+	locGoodDaySatBody      = "push.goodday.sat.body"
+	locGoodDaySunBody      = "push.goodday.sun.body"
+)
+
+const rfc3339 = "2006-01-02T15:04:05Z07:00"
 
 type Payload struct {
 	APS         APSBody `json:"aps"`
@@ -18,55 +41,48 @@ type Payload struct {
 type APSBody struct {
 	Alert AlertContent `json:"alert"`
 	Sound string       `json:"sound"`
+
+	// Optional delivery hints; only the good-day nudge sets them.
+	InterruptionLevel string   `json:"interruption-level,omitempty"`
+	ThreadID          string   `json:"thread-id,omitempty"`
+	RelevanceScore    *float64 `json:"relevance-score,omitempty"`
 }
 
 type AlertContent struct {
-	Title string `json:"title"`
-	Body  string `json:"body"`
+	TitleLocKey string   `json:"title-loc-key"`
+	LocKey      string   `json:"loc-key"`
+	LocArgs     []string `json:"loc-args"`
 }
 
-func buildPayload(d alerts.Delivery, locale string) Payload {
-	title, body := alertCopy(locale, d)
+func buildPayload(d alerts.Delivery) Payload {
 	return Payload{
 		APS: APSBody{
-			Alert: AlertContent{Title: title, Body: body},
+			Alert: AlertContent{
+				TitleLocKey: locAlertTitle,
+				LocKey:      locAlertBody,
+				LocArgs:     []string{d.SpotName, strconv.Itoa(d.Score)},
+			},
 			Sound: "default",
 		},
 		Kind:        "alert.window",
 		SpotID:      d.SpotID.String(),
 		RuleID:      d.RuleID.String(),
 		Score:       d.Score,
-		WindowStart: d.WindowStart.UTC().Format("2006-01-02T15:04:05Z07:00"),
+		WindowStart: d.WindowStart.UTC().Format(rfc3339),
 	}
 }
 
-func alertCopy(locale string, d alerts.Delivery) (title, body string) {
-	switch baseLang(locale) {
-	case "nl":
-		return "Goed moment voor een picknick",
-			fmt.Sprintf("%s scoort %d — perfect moment om op pad te gaan.", d.SpotName, d.Score)
-	default:
-		return "Good window for a picnic",
-			fmt.Sprintf("%s scores %d — perfect timing to head out.", d.SpotName, d.Score)
+// weekendDayKey picks the Saturday or Sunday variant of a key by the window
+// start in the spot's time zone, so no weekday is formatted on the server.
+// Anything that is not a Sunday (including an unknown zone falling back to
+// UTC) maps to the Saturday key.
+func weekendDayKey(start time.Time, tz, satKey, sunKey string) string {
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		loc = time.UTC
 	}
-}
-
-func baseLang(locale string) string {
-	for i, r := range locale {
-		if r == '-' || r == '_' {
-			locale = locale[:i]
-			break
-		}
+	if start.In(loc).Weekday() == time.Sunday {
+		return sunKey
 	}
-	if locale == "" {
-		return "en"
-	}
-
-	b := []byte(locale)
-	for i, c := range b {
-		if c >= 'A' && c <= 'Z' {
-			b[i] = c + 32
-		}
-	}
-	return string(b)
+	return satKey
 }

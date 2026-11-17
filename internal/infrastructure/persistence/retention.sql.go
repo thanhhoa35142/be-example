@@ -8,6 +8,8 @@ package persistence
 import (
 	"context"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const purgeAlertDeliveries = `-- name: PurgeAlertDeliveries :execrows
@@ -88,6 +90,51 @@ type PurgeJobRunsParams struct {
 
 func (q *Queries) PurgeJobRuns(ctx context.Context, arg PurgeJobRunsParams) (int64, error) {
 	result, err := q.db.Exec(ctx, purgeJobRuns, arg.StartedAt, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const purgeNudgeDeliveries = `-- name: PurgeNudgeDeliveries :execrows
+DELETE FROM t_nudge_deliveries
+WHERE ctid IN (
+    SELECT ctid FROM t_nudge_deliveries AS d
+    WHERE d.local_date < $1::date LIMIT $2
+)
+`
+
+type PurgeNudgeDeliveriesParams struct {
+	Before   pgtype.Date `json:"before"`
+	RowLimit int32       `json:"row_limit"`
+}
+
+// Each row names a spot near a device's home, so it must not live forever.
+// Eligibility only looks at the latest delivery and at this ISO week's sent
+// weekend nudge, i.e. at most ~8 days back.
+func (q *Queries) PurgeNudgeDeliveries(ctx context.Context, arg PurgeNudgeDeliveriesParams) (int64, error) {
+	result, err := q.db.Exec(ctx, purgeNudgeDeliveries, arg.Before, arg.RowLimit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const purgePushSends = `-- name: PurgePushSends :execrows
+DELETE FROM t_push_sends
+WHERE ctid IN (
+    SELECT ctid FROM t_push_sends AS p
+    WHERE p.sent_at < $1 LIMIT $2
+)
+`
+
+type PurgePushSendsParams struct {
+	SentAt time.Time `json:"sent_at"`
+	Limit  int32     `json:"limit"`
+}
+
+func (q *Queries) PurgePushSends(ctx context.Context, arg PurgePushSendsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, purgePushSends, arg.SentAt, arg.Limit)
 	if err != nil {
 		return 0, err
 	}

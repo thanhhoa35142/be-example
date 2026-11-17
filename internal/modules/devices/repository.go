@@ -11,6 +11,13 @@ type UpsertResult struct {
 	SecretHash string
 }
 
+// Toucher is implemented by repositories that record device activity
+// (t_devices.last_seen_at). It is optional so that tests with a minimal fake
+// repository keep working.
+type Toucher interface {
+	Touch(ctx context.Context, id uuid.UUID) error
+}
+
 type Repository interface {
 	Upsert(ctx context.Context, in RegisterInput) (UpsertResult, error)
 

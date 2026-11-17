@@ -41,6 +41,23 @@ WHERE ctid IN (
     WHERE p.window_start < $1 LIMIT $2
 );
 
+-- name: PurgePushSends :execrows
+DELETE FROM t_push_sends
+WHERE ctid IN (
+    SELECT ctid FROM t_push_sends AS p
+    WHERE p.sent_at < $1 LIMIT $2
+);
+
+-- name: PurgeNudgeDeliveries :execrows
+-- Each row names a spot near a device's home, so it must not live forever.
+-- Eligibility only looks at the latest delivery and at this ISO week's sent
+-- weekend nudge, i.e. at most ~8 days back.
+DELETE FROM t_nudge_deliveries
+WHERE ctid IN (
+    SELECT ctid FROM t_nudge_deliveries AS d
+    WHERE d.local_date < sqlc.arg(before)::date LIMIT sqlc.arg(row_limit)
+);
+
 -- name: ScrubAppleNotificationPayloads :execrows
 -- Keep the audit row but drop the (large) JWS payload after $1.
 UPDATE t_apple_notifications

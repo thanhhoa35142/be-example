@@ -70,6 +70,18 @@ type Config struct {
 	DBMaxConns               int32
 	DBJIT                    string
 	MCPStatementTimeout      string
+
+	// Good-day push (docs/GOOD_DAY_PUSH_SPEC.md). Off by default: the worker
+	// only registers nudge.goodday when NudgeEnabled is true.
+	NudgeEnabled  bool
+	NudgeMinScore int
+	NudgeRadiusM  int
+
+	// Getaways (docs/GETAWAYS_SPEC.md). GoodScore is the weather score from
+	// which an hour counts as good (window selection, goodHours). HintScore is
+	// read by the app only (Best Now hint); the server does not use it.
+	GetawaysGoodScore int
+	GetawaysHintScore int
 }
 
 func Load() (Config, error) {
@@ -152,6 +164,13 @@ func Load() (Config, error) {
 		DBMaxConns:               int32(getEnvInt("DB_MAX_CONNS", 0)),
 		DBJIT:                    getEnv("DB_JIT", "off"),
 		MCPStatementTimeout:      getEnv("MCP_STATEMENT_TIMEOUT", "30s"),
+
+		NudgeEnabled:  getEnv("NUDGE_ENABLED", "false") == "true",
+		NudgeMinScore: getEnvInt("NUDGE_MIN_SCORE", 80),
+		NudgeRadiusM:  getEnvInt("NUDGE_RADIUS_M", 5000),
+
+		GetawaysGoodScore: getEnvInt("GETAWAYS_GOOD_SCORE", 65),
+		GetawaysHintScore: getEnvInt("GETAWAYS_HINT_SCORE", 80),
 	}
 	if cfg.MaxBodyBytes <= 0 {
 		return Config{}, fmt.Errorf("BODY_MAX_BYTES must be > 0")
@@ -164,6 +183,18 @@ func Load() (Config, error) {
 	}
 	if cfg.MFAMaxFailures < 1 {
 		return Config{}, fmt.Errorf("MFA_MAX_FAILURES must be >= 1, got %d", cfg.MFAMaxFailures)
+	}
+	if cfg.NudgeMinScore < 0 || cfg.NudgeMinScore > 100 {
+		return Config{}, fmt.Errorf("NUDGE_MIN_SCORE must be 0-100, got %d", cfg.NudgeMinScore)
+	}
+	if cfg.NudgeRadiusM < 500 || cfg.NudgeRadiusM > 50000 {
+		return Config{}, fmt.Errorf("NUDGE_RADIUS_M must be 500-50000, got %d", cfg.NudgeRadiusM)
+	}
+	if cfg.GetawaysGoodScore < 1 || cfg.GetawaysGoodScore > 100 {
+		return Config{}, fmt.Errorf("GETAWAYS_GOOD_SCORE must be 1-100, got %d", cfg.GetawaysGoodScore)
+	}
+	if cfg.GetawaysHintScore < 1 || cfg.GetawaysHintScore > 100 {
+		return Config{}, fmt.Errorf("GETAWAYS_HINT_SCORE must be 1-100, got %d", cfg.GetawaysHintScore)
 	}
 	return cfg, nil
 }

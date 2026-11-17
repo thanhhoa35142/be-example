@@ -25,8 +25,10 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/modules/entitlement"
 	"github.com/thanhhoa35142/be-example/internal/modules/events"
 	"github.com/thanhhoa35142/be-example/internal/modules/geo"
+	"github.com/thanhhoa35142/be-example/internal/modules/getaways"
 	"github.com/thanhhoa35142/be-example/internal/modules/goauth"
 	"github.com/thanhhoa35142/be-example/internal/modules/notifier"
+	"github.com/thanhhoa35142/be-example/internal/modules/nudge"
 	"github.com/thanhhoa35142/be-example/internal/modules/recommendations"
 	"github.com/thanhhoa35142/be-example/internal/modules/reports"
 	"github.com/thanhhoa35142/be-example/internal/modules/spots"
@@ -87,6 +89,11 @@ func main() {
 	keysSvc := apikeys.NewService(persistence.NewAPIKeysRepo(queries, pool))
 	eventsSvc := events.NewService(persistence.NewEventsRepo(queries))
 	digestSvc := digest.NewService(persistence.NewDigestRepo(queries), entitlementSvc, nil, logger)
+	nudgeSvc := nudge.NewService(persistence.NewNudgeRepo(queries, pool), nil, nil, logger, nudge.Config{})
+	getawaysSvc := getaways.NewService(
+		persistence.NewGetawaysRepo(queries, pool), logger,
+		getaways.Config{GoodScore: cfg.GetawaysGoodScore, HintScore: cfg.GetawaysHintScore},
+	)
 
 	cfg.ConfigureGinMode(gin.SetMode)
 
@@ -198,6 +205,7 @@ func main() {
 	router, err := infrahttp.NewRouter(pool, infrahttp.Handlers{
 		Spots:           infrahttp.NewSpotsHandler(spotsSvc),
 		Recommendations: infrahttp.NewRecommendationsHandler(recSvc),
+		Getaways:        infrahttp.NewGetawaysHandler(getawaysSvc, devicesSvc, entitlementSvc),
 		Devices:         infrahttp.NewDevicesHandler(devicesSvc),
 		DeviceSvc:       devicesSvc,
 		Reports:         infrahttp.NewReportsHandler(reportsSvc),
@@ -209,6 +217,7 @@ func main() {
 		Traffic:         infrahttp.NewTrafficHandler(trafficSvc),
 		Events:          infrahttp.NewEventsHandler(eventsSvc),
 		Digest:          infrahttp.NewDigestHandler(digestSvc),
+		Nudge:           infrahttp.NewNudgeHandler(nudgeSvc),
 		Share: infrahttp.NewShareHandler(spotsSvc, infrahttp.ShareOptions{
 			AppleAppIDs:   cfg.AppleAppIDs,
 			AppStoreAppID: cfg.AppStoreAppID,

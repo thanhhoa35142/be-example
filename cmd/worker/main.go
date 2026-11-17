@@ -26,11 +26,13 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/modules/digest"
 	"github.com/thanhhoa35142/be-example/internal/modules/entitlement"
 	"github.com/thanhhoa35142/be-example/internal/modules/geo"
+	"github.com/thanhhoa35142/be-example/internal/modules/getaways"
 	"github.com/thanhhoa35142/be-example/internal/modules/goauth"
 	"github.com/thanhhoa35142/be-example/internal/modules/holidays"
 	"github.com/thanhhoa35142/be-example/internal/modules/ingest"
 	"github.com/thanhhoa35142/be-example/internal/modules/ingest/osm"
 	"github.com/thanhhoa35142/be-example/internal/modules/notifier"
+	"github.com/thanhhoa35142/be-example/internal/modules/nudge"
 	"github.com/thanhhoa35142/be-example/internal/modules/scoring"
 	"github.com/thanhhoa35142/be-example/internal/modules/traffic"
 	"github.com/thanhhoa35142/be-example/internal/modules/weather"
@@ -261,6 +263,14 @@ func main() {
 		logger,
 	)
 
+	nudgeSvc := nudge.NewService(
+		persistence.NewNudgeRepo(queries, pool),
+		notifier.NewNudgeSender(notifier.NewSender(logger, alertsRepo, apnsClient)),
+		entitlementSvc,
+		logger,
+		nudge.Config{MinScore: cfg.NudgeMinScore, RadiusM: cfg.NudgeRadiusM},
+	)
+
 	var osmiumSrc *osm.OsmiumSource
 
 	ingestRepo := persistence.NewIngestRepo(pool)
@@ -407,6 +417,62 @@ func main() {
 		return errors.Join(errs...)
 	}
 
+	nudgeJob := job{
+		// Good-day push: every tick handles only the devices whose local
+		// time is their send hour (or Friday 18:00). Registered only with
+		// NUDGE_ENABLED=true so prod stays silent until launch.
+		name:         "nudge.goodday",
+		initialDelay: 3 * time.Minute,
+		fn: func(ctx context.Context) error {
+			stats, err := nudgeSvc.Run(ctx, time.Now())
+			if bag, ok := ctx.Value(jobStatsKey{}).(*jobStatsBag); ok {
+				bag.set("candidates", stats.Candidates)
+				bag.set("due", stats.Due)
+				bag.set("groups", stats.Groups)
+				bag.set("no_window", stats.NoWindow)
+				bag.set("sent", stats.Sent)
+				bag.set("skipped", stats.Skipped)
+				bag.set("failed", stats.Failed)
+			}
+			if err != nil {
+				return err
+			}
+			logger.Info("nudge done", "candidates", stats.Candidates, "due", stats.Due, "groups", stats.Groups,
+				"no_window", stats.NoWindow, "sent", stats.Sent, "skipped", stats.Skipped, "failed", stats.Failed)
+			return nil
+		},
+	}
+
+	getawaysSvc := getaways.NewService(
+		persistence.NewGetawaysRepo(queries, pool), logger,
+		getaways.Config{GoodScore: cfg.GetawaysGoodScore, HintScore: cfg.GetawaysHintScore},
+	)
+	// getaways.refresh condenses the freshly scored hours into the city outlook
+	// (docs/GETAWAYS_SPEC.md). It runs on its own schedule and right after a
+	// scoring.recompute that wrote rows (see below). Go-live order:
+	// weather.refresh, scoring.recompute, getaways.refresh.
+	getawaysJob := job{
+		name:         "getaways.refresh",
+		initialDelay: 330 * time.Second,
+		fn: bumpCache(func(ctx context.Context) error {
+			stats, err := getawaysSvc.Refresh(ctx, time.Now())
+			if bag, ok := ctx.Value(jobStatsKey{}).(*jobStatsBag); ok {
+				bag.set("packs", stats.Packs)
+				bag.set("eligible", stats.Eligible)
+				bag.set("refreshed", stats.Refreshed)
+				bag.set("written", stats.Written)
+				bag.set("days_dropped", stats.DaysDropped)
+				bag.set("failed", stats.Failed)
+			}
+			if stats.Written > 0 {
+				touchCache(ctx)
+			}
+			logger.Info("getaways done", "packs", stats.Packs, "eligible", stats.Eligible, "ineligible", stats.Ineligible,
+				"refreshed", stats.Refreshed, "written", stats.Written, "days_dropped", stats.DaysDropped, "failed", stats.Failed)
+			return err
+		}),
+	}
+
 	registry := []job{
 		{
 			name:         "weather.refresh",
@@ -483,9 +549,17 @@ func main() {
 					touchCache(ctx)
 				}
 				logger.Info("scoring done", "spots", stats.Spots, "hours", stats.Hours, "written", stats.Written, "unchanged", stats.Hours-stats.Written, "skipped", stats.Skipped)
+				if stats.Written > 0 {
+					// Chain the city outlook onto fresh scores. It takes its own
+					// lock and job-run row; its failure must not fail scoring.
+					if _, gerr := executeJob(ctx, pool, logger, adminSvc, getawaysJob); gerr != nil {
+						logger.Error("getaways chained refresh failed", "error", gerr)
+					}
+				}
 				return nil
 			}),
 		},
+		getawaysJob,
 		{
 			name:         "alerts.evaluate",
 			initialDelay: time.Minute,
@@ -585,10 +659,15 @@ func main() {
 					"weather", stats.WeatherForecasts, "scores", stats.SpotScores,
 					"events", stats.Events, "crowd_reports", stats.CrowdReports,
 					"job_runs", stats.JobRuns, "deliveries", stats.AlertDeliveries,
-					"payloads_scrubbed", stats.PayloadsScrubbed)
+					"push_sends", stats.PushSends, "nudge_deliveries", stats.NudgeDeliveries, "payloads_scrubbed", stats.PayloadsScrubbed)
 				return nil
 			},
 		},
+	}
+	if cfg.NudgeEnabled {
+		registry = append(registry, nudgeJob)
+	} else {
+		logger.Info("good-day push disabled (NUDGE_ENABLED is not true)")
 	}
 
 	if len(registry) == 0 {

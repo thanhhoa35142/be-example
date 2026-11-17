@@ -86,6 +86,15 @@ func (s *Service) Authenticate(ctx context.Context, id uuid.UUID, secret string)
 	return SecretMatches(secret, stored), nil
 }
 
+// Touch records that the device was just active (throttled to once per hour in
+// SQL). Best effort: callers log the error and carry on.
+func (s *Service) Touch(ctx context.Context, id uuid.UUID) error {
+	if t, ok := s.repo.(Toucher); ok {
+		return t.Touch(ctx, id)
+	}
+	return nil
+}
+
 func (s *Service) Delete(ctx context.Context, id uuid.UUID) (bool, error) {
 	return s.repo.Delete(ctx, id)
 }

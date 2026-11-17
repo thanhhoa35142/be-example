@@ -120,6 +120,19 @@ type TAppleNotification struct {
 	ProcessedAt           pgtype.Timestamptz `json:"processed_at"`
 }
 
+type TCityHourOutlook struct {
+	PackID        uuid.UUID   `json:"pack_id"`
+	TsHour        time.Time   `json:"ts_hour"`
+	LocalDate     pgtype.Date `json:"local_date"`
+	WeatherScore  int16       `json:"weather_score"`
+	RainShare     float32     `json:"rain_share"`
+	SpotsN        int32       `json:"spots_n"`
+	TopSpotID     pgtype.UUID `json:"top_spot_id"`
+	TopSpotScore  pgtype.Int2 `json:"top_spot_score"`
+	ConfigVersion int16       `json:"config_version"`
+	ComputedAt    time.Time   `json:"computed_at"`
+}
+
 type TCityPack struct {
 	ID               uuid.UUID          `json:"id"`
 	Slug             string             `json:"slug"`
@@ -246,6 +259,36 @@ type TJobRun struct {
 	Stats        []byte             `json:"stats"`
 }
 
+type TNudgeDelivery struct {
+	DeviceID    uuid.UUID          `json:"device_id"`
+	LocalDate   pgtype.Date        `json:"local_date"`
+	Slot        string             `json:"slot"`
+	TargetDate  pgtype.Date        `json:"target_date"`
+	SpotID      uuid.UUID          `json:"spot_id"`
+	WindowStart time.Time          `json:"window_start"`
+	WindowEnd   time.Time          `json:"window_end"`
+	Score       int16              `json:"score"`
+	Status      string             `json:"status"`
+	Attempts    int16              `json:"attempts"`
+	ClaimedAt   time.Time          `json:"claimed_at"`
+	SentAt      pgtype.Timestamptz `json:"sent_at"`
+	ApnsStatus  pgtype.Int4        `json:"apns_status"`
+	LastError   pgtype.Text        `json:"last_error"`
+}
+
+type TNudgeSubscription struct {
+	DeviceID      uuid.UUID          `json:"device_id"`
+	Enabled       bool               `json:"enabled"`
+	HomeCell      pgtype.Int8        `json:"home_cell"`
+	HomeSource    pgtype.Text        `json:"home_source"`
+	HomeUpdatedAt pgtype.Timestamptz `json:"home_updated_at"`
+	SendHour      int16              `json:"send_hour"`
+	Consent       string             `json:"consent"`
+	IgnoredStreak int16              `json:"ignored_streak"`
+	LastSentAt    pgtype.Timestamptz `json:"last_sent_at"`
+	CreatedAt     time.Time          `json:"created_at"`
+}
+
 type TPlanLimit struct {
 	Plan       string      `json:"plan"`
 	Feature    string      `json:"feature"`
@@ -257,6 +300,12 @@ type TProviderQuota struct {
 	Day       pgtype.Date `json:"day"`
 	Used      int32       `json:"used"`
 	UpdatedAt time.Time   `json:"updated_at"`
+}
+
+type TPushSend struct {
+	DeviceID uuid.UUID `json:"device_id"`
+	Kind     string    `json:"kind"`
+	SentAt   time.Time `json:"sent_at"`
 }
 
 type TScoreFeedback struct {
