@@ -114,7 +114,11 @@ func spotKind(tags map[string]string) string {
 		return "park"
 	case tags["natural"] == "beach":
 		return "beach"
-	case tags["tourism"] == "picnic_site" || tags["tourism"] == "camp_site":
+	// tourism=camp_site is not a picnic spot: campsites are mostly paid,
+	// bookable or customers-only, and are chosen for overnight stays. They
+	// are not fetched at all (osmium/overpass filters); a camping kind would
+	// need its own scoring (overnight window, no darkness cap) and data.
+	case tags["tourism"] == "picnic_site":
 		return "site"
 	case tags["leisure"] == "picnic_table":
 		return "table"

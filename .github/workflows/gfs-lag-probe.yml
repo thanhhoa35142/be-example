@@ -5,12 +5,11 @@ name: gfs-lag-probe
 # 00/06/12/18 UTC; the lag between cycle start and Last-Modified is what
 # determines the weather-refresh cron (docs/WEATHER_SELFHOST_PROPOSAL.md).
 #
-# Safe to delete once the schedule is chosen — it exists only to collect
-# ~24-48h of lag samples across several cycles.
+# The weather-refresh cron was chosen from these samples (2026-11-15/16),
+# so the schedule is off; run it by hand to re-measure after an upstream
+# change.
 
 on:
-  schedule:
-    - cron: "*/30 * * * *"
   workflow_dispatch:
 
 permissions: {}

@@ -35,7 +35,6 @@ var filterExpressions = []string{
 	"nwr/leisure=garden",
 	"nwr/natural=beach",
 	"nwr/tourism=picnic_site",
-	"nwr/tourism=camp_site",
 	"nwr/amenity=toilets",
 	"nwr/amenity=drinking_water",
 	"nwr/amenity=bbq",
