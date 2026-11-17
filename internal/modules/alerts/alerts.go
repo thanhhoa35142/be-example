@@ -112,11 +112,6 @@ type parsedRule struct {
 	start, end time.Duration
 }
 
-func normalize(in RuleInput) (RuleInput, error) {
-	n, err := validate(in)
-	return n.RuleInput, err
-}
-
 func validate(in RuleInput) (parsedRule, error) {
 	out, err := normalizeShape(in)
 	if err != nil {

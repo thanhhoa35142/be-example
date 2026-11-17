@@ -267,7 +267,7 @@ func registerDBQueryTool(s *mcp.Server, keysSvc *apikeys.Service, pool *pgxpool.
 		columns := make([]string, 0, len(fields))
 		seen := map[string]int{}
 		for _, f := range fields {
-			base := string(f.Name)
+			base := f.Name
 			seen[base]++
 			name := base
 			if seen[base] > 1 {
