@@ -73,7 +73,9 @@ type Delivery struct {
 	WindowStart time.Time
 	SpotID      uuid.UUID
 	SpotName    string
-	Score       int
+	// SpotKind (park, beach, site, table) names an unnamed spot in a push.
+	SpotKind string
+	Score    int
 }
 
 type Stats struct {
@@ -110,11 +112,6 @@ func validTZ(tz string) bool {
 type parsedRule struct {
 	RuleInput
 	start, end time.Duration
-}
-
-func normalize(in RuleInput) (RuleInput, error) {
-	n, err := validate(in)
-	return n.RuleInput, err
 }
 
 func validate(in RuleInput) (parsedRule, error) {

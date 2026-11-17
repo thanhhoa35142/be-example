@@ -49,6 +49,20 @@ type Config struct {
 	RateDevicePerHour  int
 	RateDeviceBurst    int
 	RateAuthFailPerMin int
+	// Extra per-IP limit on share-token routes (/p/, shared-plans,
+	// plan-follows) on top of Read/Write: slows token guessing.
+	RateTokenPerMin int
+	RateTokenBurst  int
+
+	// Plan evaluation thresholds (plans.Config).
+	PlanBadBelow       int
+	PlanWorseDrop      int
+	PlanBadCaps        []string
+	PlanNotifyHorizonH int
+	PlanQuietStart     int
+	PlanQuietEnd       int
+	PlanConfirmFrom    int
+	PlanAltRadiusM     int
 
 	MFASecretKeys       string
 	MFASecretKeysCLI    string
@@ -143,6 +157,17 @@ func Load() (Config, error) {
 		RateDevicePerHour:  getEnvInt("RATE_DEVICE_PER_HOUR", 30),
 		RateDeviceBurst:    getEnvInt("RATE_DEVICE_BURST", 10),
 		RateAuthFailPerMin: getEnvInt("RATE_AUTH_FAIL_PER_MIN", 10),
+		RateTokenPerMin:    getEnvInt("RATE_TOKEN_PER_MIN", 30),
+		RateTokenBurst:     getEnvInt("RATE_TOKEN_BURST", 10),
+
+		PlanBadBelow:       getEnvInt("PLAN_BAD_BELOW", 60),
+		PlanWorseDrop:      getEnvInt("PLAN_WORSE_DROP", 15),
+		PlanBadCaps:        splitList(getEnv("PLAN_BAD_CAPS", "rain,heat,cold")),
+		PlanNotifyHorizonH: getEnvInt("PLAN_NOTIFY_HORIZON_HOURS", 72),
+		PlanQuietStart:     getEnvInt("PLAN_QUIET_START_HOUR", 22),
+		PlanQuietEnd:       getEnvInt("PLAN_QUIET_END_HOUR", 7),
+		PlanConfirmFrom:    getEnvInt("PLAN_CONFIRM_FROM_HOUR", 18),
+		PlanAltRadiusM:     getEnvInt("PLAN_ALT_RADIUS_M", 5000),
 
 		MFASecretKeys:       os.Getenv("MFA_SECRET_KEYS"),
 		MFASecretKeysCLI:    os.Getenv("MFA_SECRET_KEYS_CLI"),
@@ -180,6 +205,14 @@ func Load() (Config, error) {
 	}
 	if cfg.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("DATABASE_URL is required")
+	}
+	if cfg.PlanQuietStart < 0 || cfg.PlanQuietStart > 23 || cfg.PlanQuietEnd < 0 || cfg.PlanQuietEnd > 23 ||
+		cfg.PlanConfirmFrom < 0 || cfg.PlanConfirmFrom > 23 {
+		return Config{}, fmt.Errorf("PLAN_*_HOUR values must be 0-23")
+	}
+	if cfg.PlanNotifyHorizonH < 1 || cfg.PlanBadBelow < 0 || cfg.PlanBadBelow > 100 ||
+		cfg.PlanWorseDrop < 1 || cfg.PlanAltRadiusM < 1 {
+		return Config{}, fmt.Errorf("invalid PLAN_* threshold")
 	}
 	if cfg.MFAMaxFailures < 1 {
 		return Config{}, fmt.Errorf("MFA_MAX_FAILURES must be >= 1, got %d", cfg.MFAMaxFailures)

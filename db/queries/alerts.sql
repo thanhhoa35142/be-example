@@ -51,7 +51,7 @@ FROM t_alert_rules
 WHERE enabled;
 
 -- name: SpotScoreAt :one
-SELECT s.id, s.name, ss.score
+SELECT s.id, s.name, s.kind, ss.score
 FROM t_spots s
 JOIN t_spot_scores ss ON ss.spot_id = s.id AND ss.ts_hour = $2
 WHERE s.id = $1;
@@ -59,7 +59,7 @@ WHERE s.id = $1;
 -- name: BestScoredSpotNear :one
 -- Best-scoring active spot within radius_m of a point at one hour; ties go to
 -- the nearest, then the lowest id (deterministic).
-SELECT s.id, s.name, ss.score
+SELECT s.id, s.name, s.kind, ss.score
 FROM t_spots s
 JOIN t_spot_scores ss ON ss.spot_id = s.id AND ss.ts_hour = sqlc.arg(ts_hour)
 WHERE s.status = 'active'

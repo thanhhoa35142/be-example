@@ -25,6 +25,7 @@ type PurgeStats struct {
 	PushSends        int64
 	NudgeDeliveries  int64
 	PayloadsScrubbed int64
+	Plans            int64
 }
 
 var (
@@ -39,6 +40,9 @@ var (
 	// weekend nudge); 30 days keeps the same window as the push ledger.
 	nudgeDeliveryRetention = 30 * 24 * time.Hour
 	notificationMaxAge     = 90 * 24 * time.Hour
+	// Plans (and their followers) are kept 30 days after the window ended or
+	// the plan was canceled, whichever came first.
+	planRetention = 30 * 24 * time.Hour
 )
 
 func (r *RetentionRepo) Purge(ctx context.Context) (PurgeStats, error) {
@@ -99,6 +103,11 @@ func (r *RetentionRepo) Purge(ctx context.Context) (PurgeStats, error) {
 	if st.NudgeDeliveries, err = purge(now.Add(-nudgeDeliveryRetention), func(b time.Time) (int64, error) {
 		u := b.UTC()
 		return r.q.PurgeNudgeDeliveries(ctx, PurgeNudgeDeliveriesParams{Before: dateParam(&u), RowLimit: purgeBatch})
+	}); err != nil {
+		return st, err
+	}
+	if st.Plans, err = purge(now.Add(-planRetention), func(b time.Time) (int64, error) {
+		return r.q.PurgePlans(ctx, PurgePlansParams{Before: b, Batch: purgeBatch})
 	}); err != nil {
 		return st, err
 	}

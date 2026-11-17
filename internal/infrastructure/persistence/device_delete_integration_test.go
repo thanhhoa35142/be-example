@@ -57,6 +57,34 @@ func TestDeleteDeviceRemovesPersonalData(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Plans (C2): one owned by dev, and dev following another device's plan.
+	var other uuid.UUID
+	if err := pool.QueryRow(ctx, `INSERT INTO t_devices (push_status) VALUES ('none') RETURNING id`).Scan(&other); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM t_devices WHERE id=$1`, other) })
+	var ownPlan, otherPlan uuid.UUID
+	if err := pool.QueryRow(ctx, `INSERT INTO t_plans (share_token, device_id, spot_id, start_ts, end_ts, tz)
+		VALUES ('AAAAAAAAAAAAAAAAAAAA'||substr(md5(random()::text),1,2), $1, $2, now()+interval '1 day', now()+interval '26 hours', 'UTC') RETURNING id`,
+		dev, spot).Scan(&ownPlan); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO t_plans (share_token, device_id, spot_id, start_ts, end_ts, tz)
+		VALUES ('BBBBBBBBBBBBBBBBBBBB'||substr(md5(random()::text),1,2), $1, $2, now()+interval '1 day', now()+interval '26 hours', 'UTC') RETURNING id`,
+		other, spot).Scan(&otherPlan); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO t_plan_followers (plan_id, device_id) VALUES ($1, $2), ($3, $4)`,
+		otherPlan, dev, ownPlan, other); err != nil {
+		t.Fatal(err)
+	}
+	// Plan pushes: dev's push for the plan it follows, other's for dev's plan.
+	if _, err := pool.Exec(ctx, `INSERT INTO t_plan_deliveries (plan_id, device_id, local_date, kind, payload)
+		VALUES ($1, $2, current_date, 'plan.changed', '{}'), ($3, $4, current_date, 'plan.changed', '{}')`,
+		otherPlan, dev, ownPlan, other); err != nil {
+		t.Fatal(err)
+	}
+
 	ok, err := persistence.NewDevicesRepo(persistence.New(pool), pool).Delete(ctx, dev)
 	if err != nil || !ok {
 		t.Fatalf("delete: ok=%v err=%v", ok, err)
@@ -80,6 +108,18 @@ func TestDeleteDeviceRemovesPersonalData(t *testing.T) {
 	}
 	if n := count(`SELECT count(*) FROM t_events WHERE device_id=$1`, dev); n != 0 {
 		t.Errorf("events left: %d", n)
+	}
+	if n := count(`SELECT count(*) FROM t_plans WHERE device_id=$1`, dev); n != 0 {
+		t.Errorf("owned plans left: %d", n)
+	}
+	if n := count(`SELECT count(*) FROM t_plan_followers WHERE device_id=$1 OR plan_id=$2`, dev, ownPlan); n != 0 {
+		t.Errorf("plan follows left: %d", n)
+	}
+	if n := count(`SELECT count(*) FROM t_plan_deliveries WHERE device_id=$1 OR plan_id=$2`, dev, ownPlan); n != 0 {
+		t.Errorf("plan pushes left: %d", n)
+	}
+	if n := count(`SELECT count(*) FROM t_plans WHERE id=$1`, otherPlan); n != 1 {
+		t.Errorf("another device's plan must remain: %d", n)
 	}
 	if n := count(`SELECT count(*) FROM t_device_subscriptions WHERE device_id=$1`, dev); n != 0 {
 		t.Errorf("subscription links left: %d", n)

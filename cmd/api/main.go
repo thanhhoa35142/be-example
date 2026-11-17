@@ -29,6 +29,7 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/modules/goauth"
 	"github.com/thanhhoa35142/be-example/internal/modules/notifier"
 	"github.com/thanhhoa35142/be-example/internal/modules/nudge"
+	"github.com/thanhhoa35142/be-example/internal/modules/plans"
 	"github.com/thanhhoa35142/be-example/internal/modules/recommendations"
 	"github.com/thanhhoa35142/be-example/internal/modules/reports"
 	"github.com/thanhhoa35142/be-example/internal/modules/spots"
@@ -94,6 +95,7 @@ func main() {
 		persistence.NewGetawaysRepo(queries, pool), logger,
 		getaways.Config{GoodScore: cfg.GetawaysGoodScore, HintScore: cfg.GetawaysHintScore},
 	)
+	plansSvc := plans.NewService(persistence.NewPlansRepo(queries, pool), entitlementSvc, plans.ConfigFrom(cfg))
 
 	cfg.ConfigureGinMode(gin.SetMode)
 
@@ -103,6 +105,7 @@ func main() {
 		Device: ratelimit.PerMinute(float64(cfg.RateDevicePerHour)/60, cfg.RateDeviceBurst),
 	}
 	authFail := ratelimit.PerMinute(float64(cfg.RateAuthFailPerMin), cfg.RateAuthFailPerMin)
+	tokenLimit := ratelimit.PerMinute(float64(cfg.RateTokenPerMin), cfg.RateTokenBurst)
 
 	var rdb *redis.Client
 	redisHealthy := false
@@ -218,9 +221,11 @@ func main() {
 		Events:          infrahttp.NewEventsHandler(eventsSvc),
 		Digest:          infrahttp.NewDigestHandler(digestSvc),
 		Nudge:           infrahttp.NewNudgeHandler(nudgeSvc),
+		Plans:           infrahttp.NewPlansHandler(plansSvc),
 		Share: infrahttp.NewShareHandler(spotsSvc, infrahttp.ShareOptions{
 			AppleAppIDs:   cfg.AppleAppIDs,
 			AppStoreAppID: cfg.AppStoreAppID,
+			Plans:         plansSvc,
 		}),
 		// Near-me forecasts call the weather provider live; OPEN_METEO_URL
 		// selects public API vs self-host, empty = public default.
@@ -236,6 +241,7 @@ func main() {
 		AdminFailed:         &authFail,
 		LimiterFor:          limiterFor,
 		Cache:               rdb,
+		TokenLimit:          &tokenLimit,
 	})
 	if err != nil {
 		log.Fatalf("router: %v", err)

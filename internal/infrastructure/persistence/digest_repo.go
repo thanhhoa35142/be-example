@@ -118,7 +118,7 @@ func (r *DigestRepo) Spots(ctx context.Context, ids []uuid.UUID) ([]digest.SpotI
 	}
 	out := make([]digest.SpotInfo, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, digest.SpotInfo{ID: row.ID, Name: row.Name.String, TZ: row.Tz})
+		out = append(out, digest.SpotInfo{ID: row.ID, Name: row.Name.String, Kind: row.Kind, TZ: row.Tz})
 	}
 	return out, nil
 }
