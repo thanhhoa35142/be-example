@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/thanhhoa35142/be-example/internal/modules/plans"
 	"github.com/thanhhoa35142/be-example/internal/modules/spots"
 	"github.com/thanhhoa35142/be-example/internal/platform/httpx"
 )
@@ -20,6 +21,9 @@ type ShareOptions struct {
 	AppleAppIDs []string
 
 	AppStoreAppID string
+
+	// Plans backs /p/:token; nil serves 404 there.
+	Plans *plans.Service
 }
 
 type ShareHandler struct {
@@ -203,7 +207,7 @@ func (h *ShareHandler) AppleAppSiteAssociation(c *gin.Context) {
 		"applinks": gin.H{
 			"details": []gin.H{{
 				"appIDs":     h.opts.AppleAppIDs,
-				"components": []gin.H{{"/": "/s/*"}},
+				"components": []gin.H{{"/": "/s/*"}, {"/": "/p/*"}},
 			}},
 		},
 	})

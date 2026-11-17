@@ -73,7 +73,9 @@ type Delivery struct {
 	WindowStart time.Time
 	SpotID      uuid.UUID
 	SpotName    string
-	Score       int
+	// SpotKind (park, beach, site, table) names an unnamed spot in a push.
+	SpotKind string
+	Score    int
 }
 
 type Stats struct {

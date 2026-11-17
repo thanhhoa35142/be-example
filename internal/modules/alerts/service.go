@@ -231,7 +231,7 @@ func (s *Service) match(ctx context.Context, r Rule, now, tsHour time.Time) (*De
 		if spot.Score < r.MinScore {
 			return nil, time.Time{}, false
 		}
-		d = &Delivery{SpotID: spot.ID, SpotName: spot.Name, Score: spot.Score}
+		d = &Delivery{SpotID: spot.ID, SpotName: spot.Name, SpotKind: spot.Kind, Score: spot.Score}
 	} else if r.H3Cell != nil {
 		lat, lon, err := geo.CellCenter(int64(*r.H3Cell))
 		if err != nil {

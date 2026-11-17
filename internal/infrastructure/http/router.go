@@ -23,6 +23,9 @@ type Options struct {
 	AdminFailed         *ratelimit.Rule
 	LimiterFor          func(ratelimit.Rule, string) ratelimit.Checker
 	Cache               *redis.Client
+	// TokenLimit is the extra per-IP rule on share-token routes (default
+	// 30/min, burst 10).
+	TokenLimit *ratelimit.Rule
 }
 
 const (
@@ -50,6 +53,7 @@ type Handlers struct {
 	Nudge           *NudgeHandler
 	Share           *ShareHandler
 	Weather         *WeatherHandler
+	Plans           *PlansHandler
 }
 
 func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error) {
@@ -68,6 +72,13 @@ func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error
 	if limiterFor == nil {
 		limiterFor = func(r ratelimit.Rule, _ string) ratelimit.Checker { return ratelimit.New(r) }
 	}
+	tokenRule := ratelimit.PerMinute(30, 10)
+	if opts.TokenLimit != nil {
+		tokenRule = *opts.TokenLimit
+	}
+	// One limiter shared by every share-token route (/p/, shared-plans,
+	// plan-follows): token guessing spread over routes still counts once.
+	tokenLimit := TokenRateLimit(limiterFor(tokenRule, "token"))
 
 	r := gin.New()
 
@@ -95,6 +106,7 @@ func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error
 
 	if h.Share != nil {
 		r.GET("/s/:id", h.Share.Spot)
+		r.GET("/p/:token", tokenLimit, h.Share.PlanPage)
 		r.GET("/.well-known/apple-app-site-association", h.Share.AppleAppSiteAssociation)
 	}
 
@@ -214,6 +226,18 @@ func NewRouter(pool *pgxpool.Pool, h Handlers, opts Options) (*gin.Engine, error
 				v1.POST("/entitlement/link", h.Entitlement.Link)
 			}
 			v1.POST("/appstore/notifications", h.Entitlement.AppStoreNotification)
+		}
+		if h.Plans != nil {
+			auth := func(c *gin.Context) { c.Next() }
+			if h.DeviceSvc != nil {
+				auth = deviceAuthHeader(h.DeviceSvc)
+			}
+			v1.POST("/plans", auth, h.Plans.Create)
+			v1.GET("/plans", auth, h.Plans.List)
+			v1.DELETE("/plans/:id", auth, h.Plans.Cancel)
+			v1.POST("/plan-follows/:token", tokenLimit, auth, h.Plans.Follow)
+			v1.DELETE("/plan-follows/:token", tokenLimit, auth, h.Plans.Unfollow)
+			v1.GET("/shared-plans/:token", tokenLimit, h.Plans.Shared)
 		}
 
 	}

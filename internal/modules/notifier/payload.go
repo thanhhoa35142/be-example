@@ -48,10 +48,16 @@ type APSBody struct {
 	RelevanceScore    *float64 `json:"relevance-score,omitempty"`
 }
 
+// AlertContent is an APNs alert made only of localization keys and
+// language-neutral arguments; the app resolves every key from its own
+// Localizable strings (docs/PUSH_KEYS.md). The server writes no sentence.
 type AlertContent struct {
-	TitleLocKey string   `json:"title-loc-key"`
-	LocKey      string   `json:"loc-key"`
-	LocArgs     []string `json:"loc-args"`
+	TitleLocKey     string   `json:"title-loc-key"`
+	TitleLocArgs    []string `json:"title-loc-args,omitempty"`
+	SubtitleLocKey  string   `json:"subtitle-loc-key,omitempty"`
+	SubtitleLocArgs []string `json:"subtitle-loc-args,omitempty"`
+	LocKey          string   `json:"loc-key"`
+	LocArgs         []string `json:"loc-args"`
 }
 
 func buildPayload(d alerts.Delivery) Payload {
@@ -64,7 +70,7 @@ func buildPayload(d alerts.Delivery) Payload {
 			},
 			Sound: "default",
 		},
-		Kind:        "alert.window",
+		Kind:        alertKind,
 		SpotID:      d.SpotID.String(),
 		RuleID:      d.RuleID.String(),
 		Score:       d.Score,

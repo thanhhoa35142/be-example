@@ -33,6 +33,7 @@ import (
 	"github.com/thanhhoa35142/be-example/internal/modules/ingest/osm"
 	"github.com/thanhhoa35142/be-example/internal/modules/notifier"
 	"github.com/thanhhoa35142/be-example/internal/modules/nudge"
+	"github.com/thanhhoa35142/be-example/internal/modules/plans"
 	"github.com/thanhhoa35142/be-example/internal/modules/scoring"
 	"github.com/thanhhoa35142/be-example/internal/modules/traffic"
 	"github.com/thanhhoa35142/be-example/internal/modules/weather"
@@ -269,6 +270,13 @@ func main() {
 		entitlementSvc,
 		logger,
 		nudge.Config{MinScore: cfg.NudgeMinScore, RadiusM: cfg.NudgeRadiusM},
+	)
+
+	planEvaluator := plans.NewEvaluator(
+		persistence.NewPlansRepo(queries, pool),
+		notifier.NewPlanSender(notifier.NewSender(logger, alertsRepo, apnsClient)),
+		plans.ConfigFrom(cfg),
+		logger,
 	)
 
 	var osmiumSrc *osm.OsmiumSource
@@ -574,6 +582,29 @@ func main() {
 			},
 		},
 		{
+			name:         "plans.evaluate",
+			initialDelay: 6 * time.Minute,
+			fn: func(ctx context.Context) error {
+				stats, err := planEvaluator.Evaluate(ctx)
+				if bag, ok := ctx.Value(jobStatsKey{}).(*jobStatsBag); ok {
+					bag.set("plans", stats.Plans)
+					bag.set("changed", stats.Changed)
+					bag.set("confirmed", stats.Confirmed)
+					bag.set("deferred", stats.Deferred)
+					bag.set("sent", stats.Sent)
+					bag.set("failed", stats.Failed)
+					bag.set("dead", stats.Dead)
+				}
+				if err != nil {
+					return err
+				}
+				logger.Info("plans done", "plans", stats.Plans, "no_scores", stats.NoScores,
+					"changed", stats.Changed, "confirmed", stats.Confirmed, "deferred", stats.Deferred,
+					"queued", stats.Queued, "held", stats.Held, "sent", stats.Sent, "failed", stats.Failed, "dead", stats.Dead)
+				return nil
+			},
+		},
+		{
 
 			name:         "digest.weekly",
 			initialDelay: 5 * time.Minute,
@@ -659,7 +690,8 @@ func main() {
 					"weather", stats.WeatherForecasts, "scores", stats.SpotScores,
 					"events", stats.Events, "crowd_reports", stats.CrowdReports,
 					"job_runs", stats.JobRuns, "deliveries", stats.AlertDeliveries,
-					"push_sends", stats.PushSends, "nudge_deliveries", stats.NudgeDeliveries, "payloads_scrubbed", stats.PayloadsScrubbed)
+					"push_sends", stats.PushSends, "nudge_deliveries", stats.NudgeDeliveries,
+					"plans", stats.Plans, "payloads_scrubbed", stats.PayloadsScrubbed)
 				return nil
 			},
 		},

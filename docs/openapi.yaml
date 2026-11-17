@@ -694,8 +694,142 @@ paths:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
 
+  /v1/plans:
+    get:
+      summary: Owned and followed plans (until 1 day after end)
+      parameters:
+        - $ref: "#/components/parameters/DeviceIdHeader"
+      responses:
+        "200":
+          description: Plans
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/Plan" }
+    post:
+      summary: Create a plan (Free 1 / Plus 20 active)
+      parameters:
+        - $ref: "#/components/parameters/DeviceIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PlanRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Plan" }
+        "400":
+          description: invalid_body, plan_start_past, plan_window_invalid (1-12 h), plan_beyond_horizon (7 days), invalid_tz
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "403":
+          description: plan_limit
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "404":
+          description: spotId is not an active spot
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /v1/plans/{id}:
+    delete:
+      summary: Cancel an owned plan (idempotent, sends no push)
+      parameters:
+        - $ref: "#/components/parameters/SpotId"
+        - $ref: "#/components/parameters/DeviceIdHeader"
+      responses:
+        "204": { description: Canceled }
+        "404":
+          description: Not the caller's plan
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /v1/plan-follows/{token}:
+    parameters:
+      - $ref: "#/components/parameters/ShareToken"
+    post:
+      summary: Follow a plan by share token (idempotent)
+      parameters:
+        - $ref: "#/components/parameters/DeviceIdHeader"
+      responses:
+        "200":
+          description: Followed (role follower)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Plan" }
+        "403":
+          description: follow_limit (50 active followed plans)
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "404":
+          description: Unknown, malformed, canceled or ended token
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "409":
+          description: own_plan, follower_limit (20)
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+    delete:
+      summary: Unfollow (idempotent, always 204)
+      parameters:
+        - $ref: "#/components/parameters/DeviceIdHeader"
+      responses:
+        "204": { description: Not following }
+
+  /v1/shared-plans/{token}:
+    get:
+      summary: Anonymous read of one plan window (no device data)
+      description: >-
+        Cache-Control private, max-age=60; X-Robots-Tag noindex. Unknown,
+        malformed, canceled and ended tokens return the same 404.
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/ShareToken"
+      responses:
+        "200":
+          description: Window
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/SharedPlan" }
+        "404":
+          description: not_found
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
 components:
   parameters:
+    ShareToken:
+      name: token
+      in: path
+      required: true
+      schema: { type: string, pattern: "^[A-Za-z0-9_-]{22}$" }
     DeviceIdHeader:
       name: X-Device-ID
       in: header
@@ -716,7 +850,7 @@ components:
         type: { type: string, example: "about:blank" }
         code:
           type: string
-          enum: [bad_request, invalid_id, invalid_bbox, bbox_too_large, invalid_when, invalid_start, invalid_range, invalid_query, invalid_body, invalid_report, not_found, merged_spot, conflict, rate_limited, plan_limit, payload_too_large, unauthorized, device_limit, account_mismatch, service_unavailable, internal_error]
+          enum: [bad_request, invalid_id, invalid_bbox, bbox_too_large, invalid_when, invalid_start, invalid_range, invalid_query, invalid_body, invalid_report, not_found, merged_spot, conflict, rate_limited, plan_limit, payload_too_large, unauthorized, device_limit, account_mismatch, service_unavailable, timeout, follower_limit, follow_limit, own_plan, plan_start_past, plan_window_invalid, plan_beyond_horizon, invalid_tz, internal_error]
         title: { type: string }
         status: { type: integer }
         detail: { type: string }
@@ -1004,6 +1138,69 @@ components:
           required: [status]
           properties:
             status: { type: string, enum: [accepted, duplicate] }
+
+    PlanRequest:
+      type: object
+      required: [spotId, start, end]
+      properties:
+        spotId: { type: string, format: uuid }
+        start: { type: string, format: date-time }
+        end: { type: string, format: date-time }
+        tz: { type: string, description: "IANA zone; default the spot's timezone" }
+
+    PlanSpot:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        kind: { type: string }
+
+    PlanAlternative:
+      type: object
+      nullable: true
+      required: [type]
+      properties:
+        type: { type: string, enum: [time, spot, none] }
+        start: { type: string, format: date-time }
+        end: { type: string, format: date-time }
+        spotId: { type: string, format: uuid }
+        spotName: { type: string }
+        spotKind: { type: string }
+        score: { type: integer }
+
+    Plan:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        role: { type: string, enum: [owner, follower] }
+        status: { type: string, enum: [upcoming, started, ended, canceled] }
+        shareToken: { type: string }
+        spot: { $ref: "#/components/schemas/PlanSpot" }
+        start: { type: string, format: date-time }
+        end: { type: string, format: date-time }
+        tz: { type: string }
+        state: { type: string, nullable: true, enum: [ok, worse, bad, null] }
+        score: { type: integer, nullable: true }
+        capReason: { type: string, nullable: true }
+        alternative: { $ref: "#/components/schemas/PlanAlternative" }
+        createdAt: { type: string, format: date-time }
+        baselineScore: { type: integer, nullable: true, description: owner only }
+        followerCount: { type: integer, description: owner only }
+
+    SharedPlan:
+      type: object
+      properties:
+        spot: { $ref: "#/components/schemas/PlanSpot" }
+        start: { type: string, format: date-time }
+        end: { type: string, format: date-time }
+        tz: { type: string }
+        state: { type: string, nullable: true, enum: [ok, worse, bad, null] }
+        score: { type: integer, nullable: true }
+        capReason: { type: string, nullable: true }
+        reasons:
+          type: array
+          maxItems: 3
+          items: { $ref: "#/components/schemas/Reason" }
 
     AlertRule:
       type: object

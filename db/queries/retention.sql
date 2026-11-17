@@ -58,6 +58,15 @@ WHERE ctid IN (
     WHERE d.local_date < sqlc.arg(before)::date LIMIT sqlc.arg(row_limit)
 );
 
+-- name: PurgePlans :execrows
+-- Plans whose end (or cancellation) is older than $1; followers (and the
+-- push outbox) cascade.
+DELETE FROM t_plans
+WHERE ctid IN (
+    SELECT ctid FROM t_plans AS p
+    WHERE LEAST(p.end_ts, COALESCE(p.canceled_at, p.end_ts)) < sqlc.arg(before) LIMIT sqlc.arg(batch)
+);
+
 -- name: ScrubAppleNotificationPayloads :execrows
 -- Keep the audit row but drop the (large) JWS payload after $1.
 UPDATE t_apple_notifications

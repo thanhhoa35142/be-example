@@ -80,6 +80,18 @@ func RateLimit(l RateLimits, mk ...func(ratelimit.Rule, string) ratelimit.Checke
 	}
 }
 
+// TokenRateLimit is an extra per-IP limiter for routes keyed by a share
+// token, on top of the global Read/Write rules.
+func TokenRateLimit(lim ratelimit.Checker) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if ok, retry := lim.Allow(c.ClientIP()); !ok {
+			tooManyRequests(c, retry, "too many requests, slow down")
+			return
+		}
+		c.Next()
+	}
+}
+
 func BodyLimit(def int64, overrides map[string]int64) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c.Request.Body == nil || c.Request.Body == http.NoBody {

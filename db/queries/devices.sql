@@ -72,7 +72,9 @@ WHERE id = $1 AND deleted_at IS NULL;
 -- aggregates referencing it stay valid) while everything personal goes in the
 -- same statement: weekly digest, good-day push subscription/deliveries/send ledger, alert
 -- rules (t_alert_deliveries cascade from the rules), analytics events (t_events, device_id-keyed), subscription links
--- (t_device_subscriptions), and the push token / attestation key / locale / tz /
+-- (t_device_subscriptions), picnic plans it owns (their followers cascade),
+-- the plans it follows (t_plan_followers), its plan pushes (t_plan_deliveries),
+-- and the push token / attestation key / locale / tz /
 -- app version / prefs on the device row.
 -- Soft delete never fires the device FK cascades, hence the explicit deletes.
 -- Spot reports, crowd reports and score feedback stay keyed by device_id on
@@ -94,6 +96,12 @@ WITH digest AS (
     DELETE FROM t_nudge_deliveries WHERE device_id = $1
 ), push_sends AS (
     DELETE FROM t_push_sends WHERE device_id = $1
+), plans AS (
+    DELETE FROM t_plans WHERE device_id = $1
+), follows AS (
+    DELETE FROM t_plan_followers WHERE device_id = $1
+), plan_pushes AS (
+    DELETE FROM t_plan_deliveries WHERE device_id = $1
 )
 UPDATE t_devices SET
     deleted_at    = now(),
