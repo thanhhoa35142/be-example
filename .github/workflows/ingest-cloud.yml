@@ -248,10 +248,12 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.B2_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_APPLICATION_KEY }}
           AWS_DEFAULT_REGION: us-west-005
-        run: >-
-          aws s3 cp pickhour-cloud.dump
-          "s3://${{ secrets.B2_BUCKET_NAME }}/pickhour-cloud.dump"
-          --endpoint-url "${{ secrets.B2_ENDPOINT }}"
+        run: |
+          endpoint="${{ secrets.B2_ENDPOINT }}"
+          case "$endpoint" in http://*|https://*) ;; *) endpoint="https://$endpoint";; esac
+          aws s3 cp pickhour-cloud.dump \
+            "s3://${{ secrets.B2_BUCKET_NAME }}/pickhour-cloud.dump" \
+            --endpoint-url "$endpoint"
 
       - uses: actions/upload-artifact@v4
         with:
