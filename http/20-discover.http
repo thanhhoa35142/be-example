@@ -1,0 +1,12 @@
+### Discovery endpoints — public, không cần auth
+@baseUrl = http://localhost:8080
+
+### Recommendations quanh vị trí
+### lat/lon bắt buộc; radius (m), when (RFC3339), limit, kinds, amenities, minScore optional
+GET {{baseUrl}}/v1/recommendations?lat=10.77&lon=106.70&radius=5000&limit=10
+
+### Getaways (đi chơi xa) — tier-aware
+GET {{baseUrl}}/v1/getaways?days=7&limit=10
+
+### Weather tại điểm bất kỳ
+GET {{baseUrl}}/v1/weather/nearby?lat=10.77&lng=106.70

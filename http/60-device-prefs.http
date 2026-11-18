@@ -1,0 +1,101 @@
+### Device prefs — digest / nudge / entitlement / events / plans
+### Tất cả cần device auth (X-Device-ID + X-Device-Token)
+@baseUrl = http://localhost:8080
+@deviceId =
+@deviceToken =
+@planId = REPLACE_WITH_PLAN_UUID
+@followToken = REPLACE_WITH_FOLLOW_TOKEN
+@spotId = REPLACE_WITH_SPOT_UUID
+
+### --- Weekly digest ---
+### spotIds: các spot muốn nhận digest tuần
+PUT {{baseUrl}}/v1/devices/{{deviceId}}/digest
+X-Device-ID: {{deviceId}}
+X-Device-Token: {{deviceToken}}
+Content-Type: application/json
+
+{
+  "spotIds": ["{{spotId}}"],
+  "enabled": true
+}
+
+GET {{baseUrl}}/v1/devices/{{deviceId}}/digest
+X-Device-ID: {{deviceId}}
+X-Device-Token: {{deviceToken}}
+
+DELETE {{baseUrl}}/v1/devices/{{deviceId}}/digest
+X-Device-ID: {{deviceId}}
+X-Device-Token: {{deviceToken}}
+
+### --- Good-day nudge (push "hôm nay đẹp trời đi picnic") ---
+PUT {{baseUrl}}/v1/devices/{{deviceId}}/nudge
+X-Device-ID: {{deviceId}}
+X-Device-Token: {{deviceToken}}
+Content-Type: application/json
+
+{
+  "enabled": true,
+  "consent": "granted",
+  "sendHour": 8,
+  "home": { "lat": 10.77, "lng": 106.70, "source": "manual" }
+}
+
+GET {{baseUrl}}/v1/devices/{{deviceId}}/nudge
+X-Device-ID: {{deviceId}}
+X-Device-Token: {{deviceToken}}
+
+### --- Entitlement (Free/Plus) ---
+GET {{baseUrl}}/v1/devices/{{deviceId}}/entitlement
+X-Device-ID: {{deviceId}}
+X-Device-Token: {{deviceToken}}
+
+### Link giao dịch App Store (signedTransaction từ StoreKit)
+POST {{baseUrl}}/v1/entitlement/link
+X-Device-ID: {{deviceId}}
+X-Device-Token: {{deviceToken}}
+Content-Type: application/json
+
+{
+  "signedTransaction": "REPLACE_WITH_JWS"
+}
+
+### --- Analytics events ---
+POST {{baseUrl}}/v1/events
+X-Device-ID: {{deviceId}}
+X-Device-Token: {{deviceToken}}
+Content-Type: application/json
+
+{
+  "events": [
+    { "name": "spot_view", "props": { "spotId": "{{spotId}}" } }
+  ]
+}
+
+### --- Plans (lịch hẹn picnic, server-stored) ---
+POST {{baseUrl}}/v1/plans
+X-Device-ID: {{deviceId}}
+X-Device-Token: {{deviceToken}}
+Content-Type: application/json
+
+{
+  "spotId": "{{spotId}}",
+  "start": "2026-11-21T09:00:00+07:00",
+  "end": "2026-11-21T12:00:00+07:00",
+  "tz": "Asia/Ho_Chi_Minh"
+}
+
+GET {{baseUrl}}/v1/plans
+X-Device-ID: {{deviceId}}
+X-Device-Token: {{deviceToken}}
+
+DELETE {{baseUrl}}/v1/plans/{{planId}}
+X-Device-ID: {{deviceId}}
+X-Device-Token: {{deviceToken}}
+
+### Follow plan của người khác bằng token (share link /p/:token)
+POST {{baseUrl}}/v1/plan-follows/{{followToken}}
+X-Device-ID: {{deviceId}}
+X-Device-Token: {{deviceToken}}
+
+### Public: xem plan được share (không cần auth)
+GET {{baseUrl}}/v1/shared-plans/{{followToken}}

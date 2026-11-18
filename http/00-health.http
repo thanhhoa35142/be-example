@@ -1,0 +1,8 @@
+### Health & readiness — không cần auth
+@baseUrl = http://localhost:8080
+
+### GET /healthz — liveness
+GET {{baseUrl}}/healthz
+
+### GET /readyz — readiness (check DB/Redis)
+GET {{baseUrl}}/readyz

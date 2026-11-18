@@ -1,0 +1,26 @@
+### Spots — public, không cần auth
+### Đổi baseUrl sang prod khi cần: https://<domain>
+@baseUrl = http://localhost:8080
+@spotId = REPLACE_WITH_SPOT_UUID
+
+### List spots trong bbox (west,south,east,north — WGS84 degrees)
+### bbox bắt buộc HOẶC ids, không được cả hai
+GET {{baseUrl}}/v1/spots?bbox=106.60,10.70,106.80,10.90&hours=24
+
+### List theo ids (tối đa 50, comma-separated)
+GET {{baseUrl}}/v1/spots?ids=UUID1,UUID2&hours=24
+
+### Thêm include=area để lấy polygon khu vực
+GET {{baseUrl}}/v1/spots?bbox=106.60,10.70,106.80,10.90&hours=24&include=area
+
+### Chấm điểm tại thời điểm cụ thể (RFC3339) thay vì now
+GET {{baseUrl}}/v1/spots?bbox=106.60,10.70,106.80,10.90&when=2026-11-20T10:00:00%2B07:00
+
+### Spot detail
+GET {{baseUrl}}/v1/spots/{{spotId}}
+
+### Forecast 7 ngày theo giờ của spot
+GET {{baseUrl}}/v1/spots/{{spotId}}/forecast
+
+### Danh sách city packs đã ingest
+GET {{baseUrl}}/v1/packs

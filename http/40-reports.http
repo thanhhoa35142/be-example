@@ -1,0 +1,41 @@
+### Reports — cần device auth
+### Điền @deviceId + @deviceToken sau khi register (xem 30-devices.http)
+@baseUrl = http://localhost:8080
+@deviceId =
+@deviceToken =
+@spotId = REPLACE_WITH_SPOT_UUID
+
+### Báo spot — type: confirm | missing | closed | issue
+### issue chỉ dùng với type=issue, issueCode tuỳ chọn (vd "closed-gate", "construction")
+POST {{baseUrl}}/v1/spots/{{spotId}}/reports
+X-Device-ID: {{deviceId}}
+X-Device-Token: {{deviceToken}}
+Content-Type: application/json
+
+{
+  "type": "issue",
+  "issueCode": "closed-gate"
+}
+
+### Báo crowd level tại spot — level: 1 quiet | 2 moderate | 3 busy
+POST {{baseUrl}}/v1/spots/{{spotId}}/crowd-reports
+X-Device-ID: {{deviceId}}
+X-Device-Token: {{deviceToken}}
+Content-Type: application/json
+
+{
+  "level": 2
+}
+
+### Feedback điểm số — verdict: 1 = hay | 0 = bình thường | -1 = dở
+### tsHour phải trong quá khứ ≤72h hoặc tương lai ≤7 ngày (RFC3339)
+POST {{baseUrl}}/v1/scores/feedback
+X-Device-ID: {{deviceId}}
+X-Device-Token: {{deviceToken}}
+Content-Type: application/json
+
+{
+  "spotId": "{{spotId}}",
+  "tsHour": "2026-11-18T10:00:00+07:00",
+  "verdict": 1
+}

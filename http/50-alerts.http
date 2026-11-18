@@ -1,0 +1,44 @@
+### Alerts — cần device auth
+@baseUrl = http://localhost:8080
+@deviceId =
+@deviceToken =
+@alertId = REPLACE_WITH_ALERT_UUID
+
+### List alerts của device
+GET {{baseUrl}}/v1/alerts
+X-Device-ID: {{deviceId}}
+X-Device-Token: {{deviceToken}}
+
+### Tạo alert — chọn MỘT trong: spotId | h3Cell | area{lat,lon}
+### daysMask: bitmask thứ trong tuần (1=Mon..64=Sun, vd 31 = T2-T6)
+### startLocal/endLocal: "HH:MM" giờ địa phương theo tz
+POST {{baseUrl}}/v1/alerts
+X-Device-ID: {{deviceId}}
+X-Device-Token: {{deviceToken}}
+Content-Type: application/json
+
+{
+  "spotId": "3f6b1f9e-8c2a-4f3e-9d1b-2a5c7e9f0b1d",
+  "minScore": 80,
+  "daysMask": 31,
+  "startLocal": "09:00",
+  "endLocal": "17:00",
+  "tz": "Asia/Ho_Chi_Minh",
+  "enabled": true
+}
+
+### Sửa alert
+PUT {{baseUrl}}/v1/alerts/{{alertId}}
+X-Device-ID: {{deviceId}}
+X-Device-Token: {{deviceToken}}
+Content-Type: application/json
+
+{
+  "minScore": 90,
+  "enabled": false
+}
+
+### Xoá alert
+DELETE {{baseUrl}}/v1/alerts/{{alertId}}
+X-Device-ID: {{deviceId}}
+X-Device-Token: {{deviceToken}}

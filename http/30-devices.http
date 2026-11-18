@@ -1,0 +1,26 @@
+### Devices — register / xoá
+@baseUrl = http://localhost:8080
+### Điền sau khi register: id + deviceSecret trả về trong response
+@deviceId =
+@deviceToken =
+
+### Register device — trả về { data: { id, deviceSecret } }
+### deviceSecret CHỈ hiện 1 lần — lưu lại, dùng làm X-Device-Token cho mọi request sau
+### Gọi lại với cùng id + X-Device-Token để re-register (update apnsToken, prefs...)
+POST {{baseUrl}}/v1/devices
+Content-Type: application/json
+
+{
+  "id": "3f6b1f9e-8c2a-4f3e-9d1b-2a5c7e9f0b1d",
+  "apnsToken": "optional-apns-device-token",
+  "apnsEnv": "production",
+  "locale": "vi-VN",
+  "tz": "Asia/Ho_Chi_Minh",
+  "appVersion": "1.0.0",
+  "prefs": {}
+}
+
+### Xoá device (cần X-Device-ID + X-Device-Token của device đó)
+DELETE {{baseUrl}}/v1/devices/{{deviceId}}
+X-Device-ID: {{deviceId}}
+X-Device-Token: {{deviceToken}}
