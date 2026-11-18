@@ -150,9 +150,6 @@ func main() {
 				return err
 			}
 			if rdb != nil && (dirty.data.Load() || dirty.weather.Load()) {
-				// Retry once — a transient Redis blip shouldn't leave the API
-				// serving stale cached responses silently. If it still fails,
-				// fail the job so the miss is visible in t_job_runs.
 				var bumpErr error
 				for attempt := 0; attempt < 2; attempt++ {
 					bctx, cancel := context.WithTimeout(ctx, 2*time.Second)
@@ -219,10 +216,6 @@ func main() {
 	crowdSvc := crowd.NewService(persistence.NewCrowdRepo(queries))
 	holidaysSvc := holidays.NewService(persistence.NewHolidaysRepo(queries))
 	adminSvc := admin.NewService(persistence.NewAdminRepo(queries, pool))
-
-	// Google traffic sync needs the OAuth link config + the sealing key.
-	// Without it the job still registers (so the schedule row resolves) but
-	// Sync() is a no-op.
 	var trafficSvc *traffic.Service
 	if cfg.GoogleClientID != "" && cfg.GoogleClientSecret != "" &&
 		cfg.GoogleRedirectURI != "" && cfg.MFASecretKeys != "" {
@@ -322,9 +315,6 @@ func main() {
 		if err != nil {
 			return err
 		}
-
-		// An admin "run this pack" request (POST /v1/admin/ingest/packs/:slug/run)
-		// arrives via the job schedule claim and overrides the -pack flag.
 		slugFilter := *packSlug
 		if requested := requestedPackSlug(ctx); requested != "" {
 			slugFilter = requested
@@ -354,9 +344,6 @@ func main() {
 				}
 				seen[e] = true
 				if osmiumSrc.ArtifactsReady(e) {
-					// Extract already on disk (restored or placed manually)
-					// but extract_fetched_at may be NULL — record it so the
-					// pack doesn't re-ingest on every run forever.
 					if err := ingestRepo.MarkExtractFetched(ctx, e, time.Now().UTC()); err != nil {
 						failedExtract[e] = err
 					}
@@ -426,9 +413,6 @@ func main() {
 	}
 
 	nudgeJob := job{
-		// Good-day push: every tick handles only the devices whose local
-		// time is their send hour (or Friday 18:00). Registered only with
-		// NUDGE_ENABLED=true so prod stays silent until launch.
 		name:         "nudge.goodday",
 		initialDelay: 3 * time.Minute,
 		fn: func(ctx context.Context) error {
@@ -455,10 +439,7 @@ func main() {
 		persistence.NewGetawaysRepo(queries, pool), logger,
 		getaways.Config{GoodScore: cfg.GetawaysGoodScore, HintScore: cfg.GetawaysHintScore},
 	)
-	// getaways.refresh condenses the freshly scored hours into the city outlook
-	// (docs/GETAWAYS_SPEC.md). It runs on its own schedule and right after a
-	// scoring.recompute that wrote rows (see below). Go-live order:
-	// weather.refresh, scoring.recompute, getaways.refresh.
+
 	getawaysJob := job{
 		name:         "getaways.refresh",
 		initialDelay: 330 * time.Second,
@@ -732,8 +713,6 @@ func main() {
 	logger.Info("worker stopped")
 }
 
-// requestedPackKey carries the per-pack ingest slug claimed from the job
-// schedule into the job function's context.
 type requestedPackKey struct{}
 
 func requestedPackSlug(ctx context.Context) string {
@@ -799,9 +778,6 @@ func runJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, adminS
 		enabled = schedule.Enabled
 		nextInterval := time.Duration(schedule.IntervalSeconds) * time.Second
 		if timer == nil {
-			// First successful load must always arm the timer — returning early
-			// on an unchanged interval would leave timerC nil forever and the
-			// job would never run on schedule again.
 			if nextInterval <= 0 {
 				return
 			}
@@ -865,8 +841,6 @@ func runJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, adminS
 	}
 }
 
-// runJobFunc invokes a job function with panic recovery: a panic becomes a
-// recorded job failure instead of crashing the whole worker process.
 func runJobFunc(ctx context.Context, fn func(context.Context) error) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -876,12 +850,8 @@ func runJobFunc(ctx context.Context, fn func(context.Context) error) (err error)
 	return fn(ctx)
 }
 
-// executeJob runs one job under its advisory lock. It reports whether the
-// lock was acquired and the job actually ran — callers that trigger runs
-// indirectly (ingest notify) use this to re-arm instead of dropping work.
 func executeJob(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, adminSvc *admin.Service, j job) (ran bool, jobErr error) {
-	// Top-level recovery: panics in job bookkeeping (not just j.fn) must not
-	// kill the worker process. Registered first so it runs after release().
+
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Error("job panicked", "job", j.name, "panic", r, "stack", string(debug.Stack()))
@@ -957,10 +927,6 @@ func listenIngestDone(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logg
 		}
 	}()
 
-	// The LISTEN connection can drop on any Postgres restart or network blip.
-	// Reconnect with backoff instead of dying silently — pg_notify is not
-	// persistent, so notifications during the gap are lost, but the listener
-	// must come back.
 	backoff := time.Second
 	for ctx.Err() == nil {
 		conn, err := pool.Acquire(ctx)
@@ -998,10 +964,6 @@ func listenIngestDone(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logg
 	}
 }
 
-// listenSession consumes notifications on an established LISTEN connection
-// until it dies or ctx is canceled. It returns true when ctx ended. The
-// pending/timer state is shared across reconnects so a notification received
-// just before a disconnect still triggers a recompute after reconnecting.
 func listenSession(
 	ctx context.Context,
 	pool *pgxpool.Pool,
@@ -1055,9 +1017,6 @@ func listenSession(
 					*pending = false
 					continue
 				}
-				// Lock held (scheduled run or previous trigger still going):
-				// keep pending and retry after the debounce window instead of
-				// dropping the request and leaving scores stale.
 				*timer = time.NewTimer(ingestDebounce)
 				*timerC = (*timer).C
 			}

@@ -27,41 +27,26 @@ import (
 )
 
 type CacheOptions struct {
-	TTL time.Duration
-
-	Versioned bool
-
-	// VersionKey overrides the version counter read for cache keys. Empty
-	// uses the global data version; admin aggregates pass their own so a
-	// manual refresh does not invalidate the public caches.
-	VersionKey string
-
-	// BypassOnAuth skips the cache for requests carrying an Authorization
-	// header. Only meaningful for admin routes (bearer-token scripts want
-	// fresh data); public endpoints have no bearer auth, so honoring it
-	// there would let anyone bypass the cache with a junk header.
-	BypassOnAuth bool
-
+	TTL              time.Duration
+	Versioned        bool
+	VersionKey       string
+	BypassOnAuth     bool
 	WeatherVersioned bool
-
-	Normalize func(v url.Values)
-
-	Stats *CacheStats
+	Normalize        func(v url.Values)
+	Stats            *CacheStats
 }
 
 const (
 	cacheTimeout = 300 * time.Millisecond
 
-	cacheWriteTimeout = 500 * time.Millisecond
-	maxCacheEntry     = 1 << 20
-	cacheKeyPrefix    = "pic:resp:"
-
+	cacheWriteTimeout    = 500 * time.Millisecond
+	maxCacheEntry        = 1 << 20
+	cacheKeyPrefix       = "pic:resp:"
 	cacheHeaderHit       = "HIT"
 	cacheHeaderMiss      = "MISS"
 	cacheHeaderBypass    = "BYPASS"
 	cacheHeaderCoalesced = "COALESCED"
-
-	cacheCooldown = 5 * time.Second
+	cacheCooldown        = 5 * time.Second
 )
 
 type cachedEntry struct {
