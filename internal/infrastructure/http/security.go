@@ -16,16 +16,28 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/thanhhoa35142/be-example/internal/modules/admin"
 	"github.com/thanhhoa35142/be-example/internal/modules/adminauth"
 	"github.com/thanhhoa35142/be-example/internal/platform/httpx"
 	"github.com/thanhhoa35142/be-example/internal/platform/ratelimit"
 )
 
+// RateLimits: Read/Write/Device apply per app install when the request
+// names one (a valid X-Device-ID), else per client IP. The IP* rules are a
+// ceiling per client IP on top of the per-install ones: many installs share
+// one IP behind a carrier NAT or office Wi-Fi, so per-IP rules sized for one
+// phone throttled everyone behind it, while the ceiling still bounds a
+// client that rotates X-Device-ID. A zero IP* rule defaults to 10x its
+// per-install rule.
 type RateLimits struct {
 	Read   ratelimit.Rule
 	Write  ratelimit.Rule
 	Device ratelimit.Rule
+
+	IPRead   ratelimit.Rule
+	IPWrite  ratelimit.Rule
+	IPDevice ratelimit.Rule
 }
 
 func DefaultRateLimits() RateLimits {
@@ -34,6 +46,26 @@ func DefaultRateLimits() RateLimits {
 		Write:  ratelimit.PerMinute(60, 30),
 		Device: ratelimit.PerMinute(30.0/60, 10),
 	}
+}
+
+// ipCeiling returns rule, or 10x per (rate and burst) when rule is unset.
+func ipCeiling(rule, per ratelimit.Rule) ratelimit.Rule {
+	if rule.Limit > 0 {
+		return rule
+	}
+	return ratelimit.Rule{Limit: per.Limit * 10, Burst: per.Burst * 10}
+}
+
+// rateLimitDeviceKey is the install a request is counted against: the
+// X-Device-ID header when it is a UUID, else "" (count by IP). Unverified on
+// purpose — the limiter runs before auth; a forged id only spends that id's
+// own budget, and the IP ceiling still applies.
+func rateLimitDeviceKey(c *gin.Context) string {
+	id, err := uuid.Parse(c.GetHeader(DeviceIDHeader))
+	if err != nil || id == uuid.Nil {
+		return ""
+	}
+	return "d:" + id.String()
 }
 
 func isHealthPath(p string) bool { return p == "/healthz" || p == "/readyz" }
@@ -60,19 +92,33 @@ func RateLimit(l RateLimits, mk ...func(ratelimit.Rule, string) ratelimit.Checke
 		return ratelimit.New(r)
 	}
 	read, write, device := newLim(l.Read, "read"), newLim(l.Write, "write"), newLim(l.Device, "device")
+	ipRead := newLim(ipCeiling(l.IPRead, l.Read), "ip-read")
+	ipWrite := newLim(ipCeiling(l.IPWrite, l.Write), "ip-write")
+	ipDevice := newLim(ipCeiling(l.IPDevice, l.Device), "ip-device")
 	return func(c *gin.Context) {
 		if isHealthPath(c.Request.URL.Path) {
 			c.Next()
 			return
 		}
-		lim := write
+		lim, ceiling := write, ipWrite
 		switch {
 		case isSafeMethod(c.Request.Method):
-			lim = read
+			lim, ceiling = read, ipRead
 		case c.Request.Method == http.MethodPost && c.Request.URL.Path == "/v1/devices":
-			lim = device
+			lim, ceiling = device, ipDevice
 		}
-		if ok, retry := lim.Allow(c.ClientIP()); !ok {
+		ip := c.ClientIP()
+		if key := rateLimitDeviceKey(c); key != "" {
+			// Ceiling first: a request it refuses spends no install budget.
+			if ok, retry := ceiling.Allow(ip); !ok {
+				tooManyRequests(c, retry, "too many requests, slow down")
+				return
+			}
+			if ok, retry := lim.Allow(key); !ok {
+				tooManyRequests(c, retry, "too many requests, slow down")
+				return
+			}
+		} else if ok, retry := lim.Allow(ip); !ok {
 			tooManyRequests(c, retry, "too many requests, slow down")
 			return
 		}

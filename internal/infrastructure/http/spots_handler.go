@@ -76,6 +76,9 @@ func (h *SpotsHandler) Forecast(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
+	// Scores move hourly at most; lets the app's URLCache answer repeat
+	// views (week plan, plan status, spot detail) without a request.
+	c.Header("Cache-Control", "private, max-age=300")
 	c.JSON(http.StatusOK, gin.H{"data": points})
 }
 
