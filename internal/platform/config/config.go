@@ -42,13 +42,20 @@ type Config struct {
 	TrustedProxies []string
 	MaxBodyBytes   int64
 
-	RateReadPerMin     int
-	RateReadBurst      int
-	RateWritePerMin    int
-	RateWriteBurst     int
-	RateDevicePerHour  int
-	RateDeviceBurst    int
-	RateAuthFailPerMin int
+	RateReadPerMin    int
+	RateReadBurst     int
+	RateWritePerMin   int
+	RateWriteBurst    int
+	RateDevicePerHour int
+	RateDeviceBurst   int
+	// Per-client-IP ceilings over the per-install limits (0 = 10x those).
+	RateIPReadPerMin    int
+	RateIPReadBurst     int
+	RateIPWritePerMin   int
+	RateIPWriteBurst    int
+	RateIPDevicePerHour int
+	RateIPDeviceBurst   int
+	RateAuthFailPerMin  int
 	// Extra per-IP limit on share-token routes (/p/, shared-plans,
 	// plan-follows) on top of Read/Write: slows token guessing.
 	RateTokenPerMin int
@@ -150,15 +157,21 @@ func Load() (Config, error) {
 		TrustedProxies: splitList(os.Getenv("TRUSTED_PROXIES")),
 		MaxBodyBytes:   int64(getEnvInt("BODY_MAX_BYTES", 64<<10)),
 
-		RateReadPerMin:     getEnvInt("RATE_READ_PER_MIN", 600),
-		RateReadBurst:      getEnvInt("RATE_READ_BURST", 120),
-		RateWritePerMin:    getEnvInt("RATE_WRITE_PER_MIN", 60),
-		RateWriteBurst:     getEnvInt("RATE_WRITE_BURST", 30),
-		RateDevicePerHour:  getEnvInt("RATE_DEVICE_PER_HOUR", 30),
-		RateDeviceBurst:    getEnvInt("RATE_DEVICE_BURST", 10),
-		RateAuthFailPerMin: getEnvInt("RATE_AUTH_FAIL_PER_MIN", 10),
-		RateTokenPerMin:    getEnvInt("RATE_TOKEN_PER_MIN", 30),
-		RateTokenBurst:     getEnvInt("RATE_TOKEN_BURST", 10),
+		RateReadPerMin:      getEnvInt("RATE_READ_PER_MIN", 600),
+		RateReadBurst:       getEnvInt("RATE_READ_BURST", 120),
+		RateWritePerMin:     getEnvInt("RATE_WRITE_PER_MIN", 60),
+		RateWriteBurst:      getEnvInt("RATE_WRITE_BURST", 30),
+		RateDevicePerHour:   getEnvInt("RATE_DEVICE_PER_HOUR", 30),
+		RateDeviceBurst:     getEnvInt("RATE_DEVICE_BURST", 10),
+		RateIPReadPerMin:    getEnvInt("RATE_IP_READ_PER_MIN", 6000),
+		RateIPReadBurst:     getEnvInt("RATE_IP_READ_BURST", 1200),
+		RateIPWritePerMin:   getEnvInt("RATE_IP_WRITE_PER_MIN", 600),
+		RateIPWriteBurst:    getEnvInt("RATE_IP_WRITE_BURST", 300),
+		RateIPDevicePerHour: getEnvInt("RATE_IP_DEVICE_PER_HOUR", 300),
+		RateIPDeviceBurst:   getEnvInt("RATE_IP_DEVICE_BURST", 60),
+		RateAuthFailPerMin:  getEnvInt("RATE_AUTH_FAIL_PER_MIN", 10),
+		RateTokenPerMin:     getEnvInt("RATE_TOKEN_PER_MIN", 30),
+		RateTokenBurst:      getEnvInt("RATE_TOKEN_BURST", 10),
 
 		PlanBadBelow:       getEnvInt("PLAN_BAD_BELOW", 60),
 		PlanWorseDrop:      getEnvInt("PLAN_WORSE_DROP", 15),

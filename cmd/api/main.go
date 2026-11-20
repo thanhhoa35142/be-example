@@ -103,6 +103,10 @@ func main() {
 		Read:   ratelimit.PerMinute(float64(cfg.RateReadPerMin), cfg.RateReadBurst),
 		Write:  ratelimit.PerMinute(float64(cfg.RateWritePerMin), cfg.RateWriteBurst),
 		Device: ratelimit.PerMinute(float64(cfg.RateDevicePerHour)/60, cfg.RateDeviceBurst),
+
+		IPRead:   ratelimit.PerMinute(float64(cfg.RateIPReadPerMin), cfg.RateIPReadBurst),
+		IPWrite:  ratelimit.PerMinute(float64(cfg.RateIPWritePerMin), cfg.RateIPWriteBurst),
+		IPDevice: ratelimit.PerMinute(float64(cfg.RateIPDevicePerHour)/60, cfg.RateIPDeviceBurst),
 	}
 	authFail := ratelimit.PerMinute(float64(cfg.RateAuthFailPerMin), cfg.RateAuthFailPerMin)
 	tokenLimit := ratelimit.PerMinute(float64(cfg.RateTokenPerMin), cfg.RateTokenBurst)
