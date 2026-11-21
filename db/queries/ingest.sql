@@ -350,14 +350,66 @@ SET geom = ST_CollectionExtract(ST_MakeValid(geom),
 WHERE pack_id = $1 AND role = 'excluded' AND exclude_reason LIKE 'layer\_%'
   AND NOT ST_IsValid(geom);
 
--- name: DemoteSmallWater :execrows
--- Lake polygons under @pond_max_m2 (0.2 ha) are ponds: recorded, but never
--- make a spot "waterside".
+-- name: AnnotateWaterLayers :execrows
+-- Classifies each water row once, so the per-spot queries only compare:
+--   tags.areaM2  polygon area in m2 (absent for lines)
+--   tags.major   true for a real waterfront: the sea; a river (line or
+--                riverbank polygon); a lake polygon of at least @lake_min_m2
+--                (5 ha); a canal that is a polygon of at least @canal_min_m2
+--                (2 ha) or a line mapped with width >= @canal_width_m (20 m).
+-- Standing water below the lake limit becomes kind 'pond' (recorded, never
+-- waterside); a canal that is not major keeps its kind but is not major.
+UPDATE t_ingest_features f
+SET kind = CASE WHEN f.kind = 'lake' AND a.m2 IS NOT NULL
+                     AND a.m2 < sqlc.arg('lake_min_m2')::float8 THEN 'pond' ELSE f.kind END,
+    tags = f.tags || jsonb_build_object(
+        'areaM2', round(a.m2),
+        'major', CASE
+            WHEN f.kind IN ('sea', 'river') THEN true
+            WHEN f.kind = 'lake' THEN a.m2 IS NULL OR a.m2 >= sqlc.arg('lake_min_m2')::float8
+            WHEN f.kind = 'canal' THEN
+                 CASE WHEN a.m2 IS NOT NULL THEN a.m2 >= sqlc.arg('canal_min_m2')::float8
+                      ELSE COALESCE(substring(f.tags->>'width' FROM '^[0-9]+(?:\.[0-9]+)?')::float8, 0)
+                           >= sqlc.arg('canal_width_m')::float8 END
+            ELSE false END)
+FROM (SELECT source, source_id,
+             CASE WHEN ST_Dimension(geom) = 2 THEN ST_Area(geom::geography) END AS m2
+      FROM t_ingest_features
+      WHERE pack_id = @pack_id AND exclude_reason = 'layer_water') a
+WHERE f.pack_id = @pack_id AND f.source = a.source AND f.source_id = a.source_id
+  AND f.exclude_reason = 'layer_water';
+
+-- name: AnnotateProtectedLayers :execrows
+-- tags.areaM2 of each protected polygon: the smallest containing area wins.
 UPDATE t_ingest_features
-SET kind = 'pond'
-WHERE pack_id = @pack_id AND role = 'excluded' AND exclude_reason = 'layer_water'
-  AND kind = 'lake' AND ST_Dimension(geom) = 2
-  AND ST_Area(geom::geography) < @pond_max_m2::float8;
+SET tags = tags || jsonb_build_object('areaM2', round(ST_Area(geom::geography)))
+WHERE pack_id = $1 AND exclude_reason = 'layer_protected' AND ST_Dimension(geom) = 2;
+
+-- name: SubdivideLayers :execrows
+-- Splits every large water/wood/protected geometry (over @max_vertices
+-- points) into pieces of at most @piece_vertices points, stored as extra
+-- layer rows (source_id '<id>#<n>', same tags) in place of the original.
+-- Each piece is small and GiST-indexed, so distance, containment and clipping
+-- touch only the few pieces near a spot instead of a whole forest, lake or
+-- coastline (ST_Union of full forests exceeded the statement timeout).
+WITH big AS (
+    SELECT t.* FROM t_ingest_features t
+    WHERE t.pack_id = @pack_id
+      AND t.exclude_reason IN ('layer_water', 'layer_wood', 'layer_protected')
+      AND ST_NPoints(t.geom) > @max_vertices::int
+), ins AS (
+    INSERT INTO t_ingest_features
+        (pack_id, source, source_id, role, kind, amenity, quality, exclude_reason,
+         version, tags, geom, content_hash, run_id)
+    SELECT b.pack_id, b.source, b.source_id || '#' || d.n, b.role, b.kind, b.amenity,
+           b.quality, b.exclude_reason, b.version, b.tags, d.g, b.content_hash, b.run_id
+    FROM big b
+    CROSS JOIN LATERAL ST_Subdivide(b.geom, @piece_vertices::int) WITH ORDINALITY AS d(g, n)
+    RETURNING 1
+)
+DELETE FROM t_ingest_features f
+USING big
+WHERE f.pack_id = big.pack_id AND f.source = big.source AND f.source_id = big.source_id;
 
 -- name: ExcludeCampsiteCandidates :many
 -- Candidates that sit inside a camp site / caravan site are not picnic
@@ -402,62 +454,97 @@ FROM hit
 WHERE f.pack_id = @pack_id AND f.source = hit.source AND f.source_id = hit.source_id
 RETURNING f.source, f.source_id;
 
--- name: UpdatePackEnvAttrs :execrows
--- Per-spot environment facts into t_spots.attrs (merge, never replace):
---   waterDistanceM int   metres from the spot footprint (area, else point)
---                        to the nearest water; only when <= @max_m
---   waterKind text       sea|river|canal|lake|pond of that water. A pond is
---                        used only when no other water is in range
---   waterside bool       true when waterDistanceM <= @waterside_m and the
---                        kind is not pond
---   treeCoverPct int     0-100 share of the spot AREA covered by wood/forest
---                        polygons (null for point-only spots)
---   protected bool       the spot's own source is a protected area/nature
---                        reserve, or its anchor lies inside one
---   protectedFee text    yes|no from the smallest containing protected area
---   protectedOperator    operator of that area
--- Distance pattern follows AssignPackAmenities: degree-radius ST_DWithin
--- prefilter on the GiST index, geography distance only inside it.
--- Only active/pending spots; curated spots are included because only the
--- env keys are touched. Rows already holding the same values are skipped.
+-- name: UpdatePackWaterAttrs :execrows
+-- Per-spot water facts into t_spots.attrs (merge of the water keys only):
+--   waterDistanceM int   meters from the spot footprint (area, else point)
+--                        to the nearest water, only when <= @max_m
+--   waterKind text       sea|river|canal|lake|pond of that water
+--   waterBodyHa float    area of the water body when it is a polygon
+--   waterside bool       true when that water is a real waterfront (see
+--                        AnnotateWaterLayers: tags.major) within @waterside_m
+-- The nearest major water wins; non-major water (small lakes = ponds, narrow
+-- canals) is reported only when no major water is in range, ponds last.
+-- Prefilter on the GiST index in degrees, geography distance only inside it;
+-- the spot's geography is built once per spot.
+-- Only active/pending spots; curated spots included (only env keys change).
 WITH sp AS (
     SELECT s.id, COALESCE(s.area, s.geom::geometry) AS fp,
-           s.geom::geometry AS pt, s.area
+           COALESCE(s.area, s.geom::geometry)::geography AS fpg
     FROM t_spots s
     WHERE s.city_pack_id = @pack_id AND s.status IN ('active','pending')
-), w AS (
-    SELECT sp.id, x.kind, round(x.dist)::int AS dist_m
+), calc AS (
+    SELECT sp.id,
+           jsonb_strip_nulls(jsonb_build_object(
+               'waterDistanceM', round(x.dist)::int,
+               'waterKind', x.kind,
+               'waterBodyHa', round((x.m2 / 10000.0)::numeric, 1),
+               'waterside', CASE WHEN x.major AND x.dist <= @waterside_m::float8 THEN true END)) AS env
     FROM sp
     CROSS JOIN LATERAL (
-        SELECT d.kind, d.dist
+        SELECT d.kind, d.dist, d.major, d.m2
         FROM (SELECT f.kind,
+                     COALESCE((f.tags->>'major')::bool, false) AS major,
+                     (f.tags->>'areaM2')::float8 AS m2,
                      CASE WHEN ST_Intersects(f.geom, sp.fp) THEN 0::float8
-                          ELSE ST_Distance(sp.fp::geography, f.geom::geography) END AS dist
+                          ELSE ST_Distance(sp.fpg, f.geom::geography) END AS dist
               FROM t_ingest_features f
               WHERE f.pack_id = @pack_id AND f.exclude_reason = 'layer_water'
                 AND ST_DWithin(f.geom, sp.fp, @radius_deg::float8)) d
         WHERE d.dist <= @max_m::float8
-        ORDER BY (d.kind = 'pond'), d.dist
+        ORDER BY (NOT d.major), (d.kind = 'pond'), d.dist
         LIMIT 1) x
-), t AS (
+)
+UPDATE t_spots s
+SET attrs = (s.attrs - @water_keys::text[]) || COALESCE(calc.env, '{}'::jsonb)
+FROM sp
+LEFT JOIN calc ON calc.id = sp.id
+WHERE sp.id = s.id
+  AND s.attrs IS DISTINCT FROM ((s.attrs - @water_keys::text[]) || COALESCE(calc.env, '{}'::jsonb));
+
+-- name: UpdatePackTreeAttrs :execrows
+-- treeCoverPct int: 0-100 share of the spot AREA under wood/forest polygons
+-- (null for point-only spots). Only the layer pieces that intersect the spot
+-- are clipped (pieces fully inside are taken whole) and the small clipped
+-- pieces are unioned, so overlapping forests count once.
+WITH sp AS (
+    SELECT s.id,
+           CASE WHEN ST_IsValid(s.area) THEN s.area ELSE ST_MakeValid(s.area) END AS a
+    FROM t_spots s
+    WHERE s.city_pack_id = @pack_id AND s.status IN ('active','pending') AND s.area IS NOT NULL
+), calc AS (
     SELECT sp.id,
-           COALESCE(LEAST(100, GREATEST(0, round(100 * ST_Area(ST_Intersection(
-               CASE WHEN ST_IsValid(sp.area) THEN sp.area ELSE ST_MakeValid(sp.area) END,
-               u.g)::geography) / NULLIF(ST_Area(sp.area::geography), 0)))), 0)::int AS pct
+           jsonb_build_object('treeCoverPct', COALESCE(LEAST(100, GREATEST(0, round(
+               100 * ST_Area(u.g::geography) / NULLIF(ST_Area(sp.a::geography), 0)))), 0)::int) AS env
     FROM sp
     LEFT JOIN LATERAL (
-        SELECT ST_Union(CASE WHEN ST_IsValid(f.geom) THEN f.geom ELSE ST_MakeValid(f.geom) END) AS g
+        SELECT ST_Union(CASE WHEN ST_Covers(sp.a, f.geom) THEN f.geom
+                             ELSE ST_CollectionExtract(ST_Intersection(sp.a, f.geom), 3) END) AS g
         FROM t_ingest_features f
-        WHERE f.pack_id = @pack_id AND f.geom && sp.area
+        WHERE f.pack_id = @pack_id AND f.geom && sp.a AND ST_Dimension(f.geom) = 2
           AND (f.exclude_reason = 'layer_wood'
                OR (f.role = 'candidate' AND (f.tags->>'natural' = 'wood' OR f.tags->>'landuse' = 'forest')))
-          AND ST_Dimension(f.geom) = 2 AND ST_Intersects(f.geom, sp.area)) u ON true
-    WHERE sp.area IS NOT NULL
-), p AS (
+          AND ST_Intersects(f.geom, sp.a)) u ON true
+)
+UPDATE t_spots s
+SET attrs = (s.attrs - 'treeCoverPct'::text) || calc.env
+FROM calc
+WHERE calc.id = s.id AND s.attrs IS DISTINCT FROM ((s.attrs - 'treeCoverPct'::text) || calc.env);
+
+-- name: UpdatePackProtectedAttrs :execrows
+--   protected bool       the spot's own source is a protected area/nature
+--                        reserve, or its anchor lies inside one
+--   protectedFee text    yes|no from the smallest containing protected area
+--   protectedOperator    operator of that area
+WITH sp AS (
+    SELECT s.id, s.geom::geometry AS pt
+    FROM t_spots s
+    WHERE s.city_pack_id = @pack_id AND s.status IN ('active','pending')
+), calc AS (
     SELECT sp.id,
-           (own.n > 0 OR pa.id IS NOT NULL) AS is_protected,
-           CASE WHEN pa.fee IN ('yes','no') THEN pa.fee END AS fee,
-           pa.operator
+           jsonb_strip_nulls(jsonb_build_object(
+               'protected', CASE WHEN own.n > 0 OR pa.hit THEN true END,
+               'protectedFee', CASE WHEN pa.fee IN ('yes','no') THEN pa.fee END,
+               'protectedOperator', pa.operator)) AS env
     FROM sp
     CROSS JOIN LATERAL (
         SELECT count(*) AS n
@@ -467,32 +554,32 @@ WITH sp AS (
         WHERE ss.spot_id = sp.id AND ss.via = 'primary'
           AND (f.tags->>'boundary' = 'protected_area' OR f.tags->>'leisure' = 'nature_reserve')) own
     LEFT JOIN LATERAL (
-        SELECT 1 AS id, f.tags->>'fee' AS fee, f.tags->>'operator' AS operator
+        SELECT true AS hit, f.tags->>'fee' AS fee, f.tags->>'operator' AS operator
         FROM t_ingest_features f
         WHERE f.pack_id = @pack_id AND f.exclude_reason = 'layer_protected'
-          AND ST_Dimension(f.geom) = 2 AND f.geom && sp.pt AND ST_Contains(f.geom, sp.pt)
-        ORDER BY ST_Area(f.geom)
+          AND ST_Dimension(f.geom) = 2 AND f.geom && sp.pt AND ST_Intersects(f.geom, sp.pt)
+        ORDER BY (f.tags->>'areaM2')::float8 NULLS LAST
         LIMIT 1) pa ON true
-), calc AS (
-    SELECT sp.id,
-           jsonb_strip_nulls(jsonb_build_object(
-               'waterDistanceM', w.dist_m,
-               'waterKind', w.kind,
-               'waterside', CASE WHEN w.dist_m <= @waterside_m::int AND w.kind <> 'pond' THEN true END,
-               'treeCoverPct', t.pct,
-               'protected', CASE WHEN p.is_protected THEN true END,
-               'protectedFee', p.fee,
-               'protectedOperator', p.operator)) AS env
-    FROM sp
-    LEFT JOIN w ON w.id = sp.id
-    LEFT JOIN t ON t.id = sp.id
-    LEFT JOIN p ON p.id = sp.id
 )
 UPDATE t_spots s
-SET attrs = (s.attrs - @env_keys::text[]) || calc.env
+SET attrs = (s.attrs - @protected_keys::text[]) || calc.env
 FROM calc
-WHERE calc.id = s.id
-  AND s.attrs IS DISTINCT FROM ((s.attrs - @env_keys::text[]) || calc.env);
+WHERE calc.id = s.id AND s.attrs IS DISTINCT FROM ((s.attrs - @protected_keys::text[]) || calc.env);
+
+-- name: EnvStepSavepoint :exec
+SAVEPOINT env_step;
+
+-- name: EnvStepRollback :exec
+ROLLBACK TO SAVEPOINT env_step;
+
+-- name: EnvStepRelease :exec
+RELEASE SAVEPOINT env_step;
+
+-- name: GetStatementTimeout :one
+SELECT current_setting('statement_timeout')::text;
+
+-- name: SetLocalStatementTimeout :exec
+SELECT set_config('statement_timeout', @timeout::text, true);
 
 -- name: PackEnvStats :one
 SELECT

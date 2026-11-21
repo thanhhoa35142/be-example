@@ -27,8 +27,20 @@ const (
 	// EnvWatersideM: a spot is "waterside" when water is within this many
 	// meters of its footprint (and the water is not a pond).
 	EnvWatersideM = 50
-	// EnvPondMaxM2: lake polygons under 0.2 ha are ponds.
-	EnvPondMaxM2 = 2000.0
+	// A real waterfront ("major" water) is the sea; a river (line or
+	// riverbank polygon); a lake polygon of at least EnvLakeMinM2 (5 ha); or
+	// a canal that is a polygon of at least EnvCanalMinM2 (2 ha) or a line
+	// mapped with width >= EnvCanalWidthM. Other standing water is a pond and
+	// a narrow canal is not major: both are recorded, never waterside. This
+	// keeps Dutch parks, which nearly all hold a vijver or touch a canal
+	// arm, from all becoming "by the lake".
+	EnvLakeMinM2   = 50000.0
+	EnvCanalMinM2  = 20000.0
+	EnvCanalWidthM = 20.0
+	// Layer geometries over EnvSubdivideAbove points are split into pieces
+	// of EnvPieceVertices points (see SubdivideLayers).
+	EnvSubdivideAbove = 256
+	EnvPieceVertices  = 128
 	// EnvCampParkCover: a park/beach is excluded as "inside a campsite"
 	// when a campsite covers this share of it (and holds its anchor).
 	EnvCampParkCover = 0.5
@@ -37,12 +49,21 @@ const (
 	EnvCampNodeRadiusM = 40.0
 )
 
+// EnvStepTimeout: each env group (water, tree cover, protected) runs under
+// this statement timeout inside a savepoint; a timeout leaves that group's
+// attrs unset and is reported in Stats.EnvFailed instead of failing the pack.
+// A variable so tests can force a timeout.
+var EnvStepTimeout = "40s"
+
 // EnvKeys are the t_spots.attrs keys owned by the env step; it rewrites
 // them on every run (stale values are removed).
-var EnvKeys = []string{
-	"waterDistanceM", "waterKind", "waterside", "treeCoverPct",
-	"protected", "protectedFee", "protectedOperator",
-}
+var EnvKeys = append(append(append([]string{}, EnvWaterKeys...), EnvTreeKeys...), EnvProtectedKeys...)
+
+var (
+	EnvWaterKeys     = []string{"waterDistanceM", "waterKind", "waterBodyHa", "waterside"}
+	EnvTreeKeys      = []string{"treeCoverPct"}
+	EnvProtectedKeys = []string{"protected", "protectedFee", "protectedOperator"}
+)
 
 type Stats struct {
 	FeaturesRead     int            `json:"features_read"`
@@ -73,6 +94,7 @@ type Stats struct {
 	Waterside        int            `json:"waterside"`    // water within EnvWatersideM, not a pond
 	WithTreeCover    int            `json:"with_tree_cover"`
 	ProtectedSpots   int            `json:"protected_spots"`
+	EnvFailed        []string       `json:"env_failed,omitempty"`
 	GuardTripped     bool           `json:"guard_tripped,omitempty"`
 	GuardForced      bool           `json:"guard_forced,omitempty"`
 
@@ -198,6 +220,9 @@ type LayerPrep struct {
 // EnvStats counts active/pending spots of the pack per environment fact.
 type EnvStats struct {
 	WaterNear, Waterside, WithTreeCover, Protected int
+	// Failed names the env groups (water, tree, protected) that hit the
+	// step timeout or an error; their attrs were left unset for this run.
+	Failed []string
 }
 
 type Store interface {
@@ -819,6 +844,7 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 			}
 			st.WaterNear, st.Waterside = env.WaterNear, env.Waterside
 			st.WithTreeCover, st.ProtectedSpots = env.WithTreeCover, env.Protected
+			st.EnvFailed = env.Failed
 			mark("env")
 		}
 

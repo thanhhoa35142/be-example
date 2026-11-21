@@ -449,8 +449,17 @@ func (s *ingestStore) PrepareLayers(ctx context.Context) (ingest.LayerPrep, erro
 	if _, err := s.q.ValidateLayerGeoms(ctx, s.packID); err != nil {
 		return prep, err
 	}
-	if _, err := s.q.DemoteSmallWater(ctx, DemoteSmallWaterParams{
-		PackID: s.packID, PondMaxM2: ingest.EnvPondMaxM2,
+	if _, err := s.q.AnnotateWaterLayers(ctx, AnnotateWaterLayersParams{
+		PackID: s.packID, LakeMinM2: ingest.EnvLakeMinM2,
+		CanalMinM2: ingest.EnvCanalMinM2, CanalWidthM: ingest.EnvCanalWidthM,
+	}); err != nil {
+		return prep, err
+	}
+	if _, err := s.q.AnnotateProtectedLayers(ctx, s.packID); err != nil {
+		return prep, err
+	}
+	if _, err := s.q.SubdivideLayers(ctx, SubdivideLayersParams{
+		PackID: s.packID, MaxVertices: ingest.EnvSubdivideAbove, PieceVertices: ingest.EnvPieceVertices,
 	}); err != nil {
 		return prep, err
 	}
@@ -469,24 +478,76 @@ func (s *ingestStore) PrepareLayers(ctx context.Context) (ingest.LayerPrep, erro
 	return prep, nil
 }
 
+// envGroup runs one env statement under its own savepoint and statement
+// timeout. A timeout (or any error in the group) is rolled back to the
+// savepoint and reported through the returned bool: the pack transaction
+// stays usable and the group's attrs are simply not written this run.
+func (s *ingestStore) envGroup(ctx context.Context, run func() error) (ok bool, err error) {
+	orig, err := s.q.GetStatementTimeout(ctx)
+	if err != nil {
+		return false, err
+	}
+	if err := s.q.EnvStepSavepoint(ctx); err != nil {
+		return false, err
+	}
+	if err := s.q.SetLocalStatementTimeout(ctx, ingest.EnvStepTimeout); err != nil {
+		return false, err
+	}
+	if runErr := run(); runErr != nil {
+		if rbErr := s.q.EnvStepRollback(ctx); rbErr != nil {
+			return false, rbErr
+		}
+		if err := s.q.SetLocalStatementTimeout(ctx, orig); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	if err := s.q.EnvStepRelease(ctx); err != nil {
+		return false, err
+	}
+	return true, s.q.SetLocalStatementTimeout(ctx, orig)
+}
+
 func (s *ingestStore) UpdateEnvAttrs(ctx context.Context, radiusDeg float64) (ingest.EnvStats, error) {
-	if _, err := s.q.UpdatePackEnvAttrs(ctx, UpdatePackEnvAttrsParams{
-		EnvKeys:    ingest.EnvKeys,
-		PackID:     s.packID,
-		RadiusDeg:  radiusDeg,
-		MaxM:       ingest.EnvWaterMaxM,
-		WatersideM: ingest.EnvWatersideM,
-	}); err != nil {
-		return ingest.EnvStats{}, err
+	var out ingest.EnvStats
+	groups := []struct {
+		name string
+		run  func() error
+	}{
+		{"water", func() error {
+			_, err := s.q.UpdatePackWaterAttrs(ctx, UpdatePackWaterAttrsParams{
+				PackID: s.packID, RadiusDeg: radiusDeg, MaxM: ingest.EnvWaterMaxM,
+				WatersideM: ingest.EnvWatersideM, WaterKeys: ingest.EnvWaterKeys,
+			})
+			return err
+		}},
+		{"tree", func() error {
+			_, err := s.q.UpdatePackTreeAttrs(ctx, s.packID)
+			return err
+		}},
+		{"protected", func() error {
+			_, err := s.q.UpdatePackProtectedAttrs(ctx, UpdatePackProtectedAttrsParams{
+				PackID: s.packID, ProtectedKeys: ingest.EnvProtectedKeys,
+			})
+			return err
+		}},
+	}
+	for _, g := range groups {
+		ok, err := s.envGroup(ctx, g.run)
+		if err != nil {
+			return out, err
+		}
+		if !ok {
+			out.Failed = append(out.Failed, g.name)
+		}
 	}
 	r, err := s.q.PackEnvStats(ctx, s.packID)
 	if err != nil {
-		return ingest.EnvStats{}, err
+		return out, err
 	}
-	return ingest.EnvStats{
-		WaterNear: int(r.WaterNear), Waterside: int(r.Waterside),
-		WithTreeCover: int(r.WithTreeCover), Protected: int(r.Protected),
-	}, nil
+	out.WaterNear, out.Waterside = int(r.WaterNear), int(r.Waterside)
+	out.WithTreeCover, out.Protected = int(r.WithTreeCover), int(r.Protected)
+	return out, nil
 }
 
 func (s *ingestStore) TouchImport(ctx context.Context) error {

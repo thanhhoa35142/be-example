@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -121,6 +122,9 @@ func TestEnvFacts(t *testing.T) {
 		if park["waterKind"] != "lake" || d < 10 || d > 35 || park["waterside"] != true {
 			t.Fatalf("park should be waterside by a lake ~20 m away: %v", park)
 		}
+		if ha, _ := park["waterBodyHa"].(float64); ha < 8 || ha > 14 {
+			t.Fatalf("waterBodyHa should be the ~11 ha lake: %v", park)
+		}
 		tc, _ := park["treeCoverPct"].(float64)
 		if tc < 45 || tc > 55 {
 			t.Fatalf("expected ~50%% tree cover (overlap counted once), got %v", park["treeCoverPct"])
@@ -154,6 +158,56 @@ func TestEnvFacts(t *testing.T) {
 		}
 		if again := spotAttrs(t, pool, pack.ID, "Lakeside Park"); again["waterside"] != true || again["treeCoverPct"] == nil {
 			t.Fatalf("env attrs lost on rerun: %v", again)
+		}
+	})
+
+	t.Run("waterfront_definition", func(t *testing.T) {
+		// Each park has one kind of water 20 m away.
+		type tc struct {
+			name  string
+			tags  map[string]string
+			geom  func(lon, lat float64) []byte
+			kind  string
+			water bool
+		}
+		cases := []tc{
+			// 1 ha "lake": a Dutch vijver, not a waterfront
+			{"small-lake", map[string]string{"natural": "water", "water": "lake"},
+				func(lon, lat float64) []byte { return rect(lon+0.0023, lat, lon+0.0038, lat+0.0015) }, "pond", false},
+			// 11 ha lake: a waterfront
+			{"big-lake", map[string]string{"natural": "water", "water": "lake"},
+				func(lon, lat float64) []byte { return rect(lon+0.0023, lat-0.002, lon+0.006, lat+0.002) }, "lake", true},
+			{"river-line", map[string]string{"waterway": "river"},
+				func(lon, lat float64) []byte { return line(lon+0.0023, lat-0.01, lon+0.0023, lat+0.01) }, "river", true},
+			{"narrow-canal-line", map[string]string{"waterway": "canal"},
+				func(lon, lat float64) []byte { return line(lon+0.0023, lat-0.01, lon+0.0023, lat+0.01) }, "canal", false},
+			{"wide-canal-line", map[string]string{"waterway": "canal", "width": "25 m"},
+				func(lon, lat float64) []byte { return line(lon+0.0023, lat-0.01, lon+0.0023, lat+0.01) }, "canal", true},
+			{"canal-polygon-small", map[string]string{"natural": "water", "water": "canal"},
+				func(lon, lat float64) []byte { return rect(lon+0.0023, lat-0.002, lon+0.0027, lat+0.002) }, "canal", false},
+			{"coast", map[string]string{"natural": "coastline"},
+				func(lon, lat float64) []byte { return line(lon+0.0023, lat-0.01, lon+0.0023, lat+0.01) }, "sea", true},
+		}
+		for i, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				slug := "env-wf-" + c.name
+				pack := seedGoldenPack(t, pool, slug)
+				plon := 5.10 + float64(i)*0.0 // one pack per case, same place
+				src := &fixtureSource{features: []osm.RawFeature{
+					goldenFeature("w-park-"+slug, 1,
+						map[string]string{"leisure": "park", "name": "WF Park", "access": "yes"},
+						rect(plon-0.002, lat-0.002, plon+0.002, lat+0.002)),
+					goldenFeature("w-water-"+slug, 1, c.tags, c.geom(plon, lat)),
+				}}
+				runGolden(t, ctx, pool, src, pack, osm.Policy{})
+				a := spotAttrs(t, pool, pack.ID, "WF Park")
+				if a["waterKind"] != c.kind {
+					t.Fatalf("waterKind = %v, want %s (%v)", a["waterKind"], c.kind, a)
+				}
+				if got := a["waterside"] == true; got != c.water {
+					t.Fatalf("waterside = %v, want %v (%v)", got, c.water, a)
+				}
+			})
 		}
 	})
 
@@ -254,6 +308,77 @@ func TestEnvFacts(t *testing.T) {
 		st := runGolden(t, ctx, pool, src, pack, osm.Policy{})
 		if st.CampsiteSkipped != 1 || st.Created != 0 {
 			t.Fatalf("park inside campsite should be skipped: %+v", st)
+		}
+	})
+}
+
+// A big forest polygon (thousands of vertices) is subdivided into indexed
+// pieces and still gives the right share; a step timeout never fails the pack.
+func TestEnvBigGeometryAndTimeoutIsolation(t *testing.T) {
+	pool := goldenPool(t)
+	ctx := context.Background()
+	const lon, lat = 5.30, 52.30
+
+	// A wavy 4000-vertex forest ring covering the western half of the park.
+	var ring string
+	const n = 2000
+	pt := func(x, y float64) string { return fmt.Sprintf("[%.6f,%.6f]", x, y) }
+	var pts []string
+	for i := 0; i <= n; i++ { // top edge east to west, wavy
+		x := lon + 0.0 - float64(i)/n*0.004
+		pts = append(pts, pt(x, lat+0.003+0.0002*float64(i%2)))
+	}
+	for i := 0; i <= n; i++ { // bottom edge west to east
+		x := lon - 0.004 + float64(i)/n*0.004
+		pts = append(pts, pt(x, lat-0.003-0.0002*float64(i%2)))
+	}
+	pts = append(pts, pts[0])
+	for i, p := range pts {
+		if i > 0 {
+			ring += ","
+		}
+		ring += p
+	}
+	forest := []byte(`{"type":"Polygon","coordinates":[[` + ring + `]]}`)
+
+	build := func(slug string) *fixtureSource {
+		return &fixtureSource{features: []osm.RawFeature{
+			goldenFeature("w-park-"+slug, 1,
+				map[string]string{"leisure": "park", "name": "Big Forest Park", "access": "yes"},
+				rect(lon-0.002, lat-0.002, lon+0.002, lat+0.002)),
+			goldenFeature("w-forest-"+slug, 1, map[string]string{"natural": "wood"}, forest),
+		}}
+	}
+
+	t.Run("subdivided_forest_gives_right_share", func(t *testing.T) {
+		slug := "env-bigforest"
+		pack := seedGoldenPack(t, pool, slug)
+		runGolden(t, ctx, pool, build(slug), pack, osm.Policy{})
+		if n := goldenCount(t, pool, `SELECT count(*) FROM t_ingest_features WHERE pack_id=$1 AND source_id LIKE 'w-forest-%#%'`, pack.ID); n < 10 {
+			t.Fatalf("forest should be split into pieces, got %d rows", n)
+		}
+		a := spotAttrs(t, pool, pack.ID, "Big Forest Park")
+		if tc, _ := a["treeCoverPct"].(float64); tc < 45 || tc > 55 {
+			t.Fatalf("expected ~50%% tree cover, got %v", a)
+		}
+	})
+
+	t.Run("step_timeout_skips_env_but_keeps_the_pack", func(t *testing.T) {
+		slug := "env-timeout"
+		pack := seedGoldenPack(t, pool, slug)
+		old := ingest.EnvStepTimeout
+		ingest.EnvStepTimeout = "1ms"
+		defer func() { ingest.EnvStepTimeout = old }()
+		st := runGolden(t, ctx, pool, build(slug), pack, osm.Policy{})
+		if len(st.EnvFailed) == 0 {
+			t.Fatalf("a 1ms step timeout must be reported: %+v", st)
+		}
+		if st.Created != 1 {
+			t.Fatalf("the pack must still import: %+v", st)
+		}
+		a := spotAttrs(t, pool, pack.ID, "Big Forest Park")
+		if _, has := a["treeCoverPct"]; has && slices.Contains(st.EnvFailed, "tree") {
+			t.Fatalf("a failed group writes nothing: %v", a)
 		}
 	})
 }
