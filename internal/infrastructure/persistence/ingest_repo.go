@@ -509,7 +509,7 @@ func (s *ingestStore) envGroup(ctx context.Context, run func() error) (ok bool, 
 }
 
 func (s *ingestStore) UpdateEnvAttrs(ctx context.Context, radiusDeg float64) (ingest.EnvStats, error) {
-	var out ingest.EnvStats
+	out := ingest.EnvStats{GroupMs: map[string]int64{}}
 	groups := []struct {
 		name string
 		run  func() error
@@ -533,7 +533,9 @@ func (s *ingestStore) UpdateEnvAttrs(ctx context.Context, radiusDeg float64) (in
 		}},
 	}
 	for _, g := range groups {
+		start := time.Now()
 		ok, err := s.envGroup(ctx, g.run)
+		out.GroupMs[g.name] = time.Since(start).Milliseconds()
 		if err != nil {
 			return out, err
 		}

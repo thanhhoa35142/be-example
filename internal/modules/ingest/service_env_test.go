@@ -456,6 +456,80 @@ func TestEnvDenseWaterStaysFast(t *testing.T) {
 	}
 }
 
+// Giant water bodies (the Zuidersee-like lake with islands, a long coastline)
+// must not make the water group slow: they are subdivided into small indexed
+// pieces and measured piece by piece. Real packs failed here (Amsterdam, Den
+// Haag, Zurich) while a fixture of many small pieces passed.
+func TestEnvGiantWaterBodies(t *testing.T) {
+	pool := goldenPool(t)
+	ctx := context.Background()
+	slug := "env-giant"
+	pack := seedGoldenPack(t, pool, slug)
+	const cx, cy = 5.10, 52.25
+
+	wavy := func(cx, cy, r float64, n int, amp float64, rev bool) string {
+		var b strings.Builder
+		b.WriteByte('[')
+		for i := 0; i <= n; i++ {
+			k := i % n
+			if rev {
+				k = (n - i%n) % n
+			}
+			a := 2 * math.Pi * float64(k) / float64(n)
+			rr := r + amp*math.Sin(float64(k)*0.37)
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			fmt.Fprintf(&b, "[%.6f,%.6f]", cx+rr*math.Cos(a)*1.6, cy+rr*math.Sin(a))
+		}
+		b.WriteByte(']')
+		return b.String()
+	}
+	// 20,000-vertex lake (radius ~0.05 deg, wavy shore) with 5 islands
+	rings := []string{wavy(cx, cy, 0.05, 20000, 0.0004, false)}
+	for k := range 5 {
+		rings = append(rings, wavy(cx+0.01*float64(k-2), cy+0.005, 0.003, 400, 0.0002, true))
+	}
+	lake := []byte(`{"type":"Polygon","coordinates":[` + strings.Join(rings, ",") + `]}`)
+
+	// very long coastline: 60,000 vertices along the north edge
+	var cl strings.Builder
+	for i := range 60000 {
+		if i > 0 {
+			cl.WriteByte(',')
+		}
+		fmt.Fprintf(&cl, "[%.6f,%.6f]", cx-0.3+float64(i)*0.00001, cy+0.12+0.0003*math.Sin(float64(i)/40))
+	}
+	coast := []byte(`{"type":"LineString","coordinates":[` + cl.String() + `]}`)
+
+	feats := []osm.RawFeature{
+		goldenFeature("w-lake-"+slug, 1, map[string]string{"natural": "water", "water": "lake"}, lake),
+		goldenFeature("w-coast-"+slug, 1, map[string]string{"natural": "coastline"}, coast),
+	}
+	// 100 parks around the shore (~30 m outside it) and 20 inland
+	for i := range 100 {
+		a := 2 * math.Pi * float64(i) / 100
+		x, y := cx+(0.0504+0.0006)*math.Cos(a)*1.6, cy+(0.0504+0.0006)*math.Sin(a)
+		feats = append(feats, goldenFeature(fmt.Sprintf("w-park%d-%s", i, slug), 1,
+			map[string]string{"leisure": "park", "name": fmt.Sprintf("Shore Park %d", i), "access": "yes"},
+			rect(x-0.0006, y-0.0006, x+0.0006, y+0.0006)))
+	}
+
+	old := ingest.EnvStepTimeout
+	ingest.EnvStepTimeout = "20s"
+	defer func() { ingest.EnvStepTimeout = old }()
+	st := runGolden(t, ctx, pool, &fixtureSource{features: feats}, pack, osm.Policy{})
+	if len(st.EnvFailed) != 0 {
+		t.Fatalf("water group failed on giant bodies: %v (stage_ms %v)", st.EnvFailed, st.StageMs)
+	}
+	if ms := st.EnvMs["water"]; ms > 2000 {
+		t.Fatalf("water group took %d ms with giant water bodies", ms)
+	}
+	if st.Waterside < 50 {
+		t.Fatalf("shore parks should be waterside by the lake: %+v", st)
+	}
+}
+
 // Missing polygons: osmium assembles a relation as a MultiPolygon, but an
 // Overpass run (or a dedup that kept the point) delivers only a point for the
 // same source id. An update must never drop an area that is already stored,

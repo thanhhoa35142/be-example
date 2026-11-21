@@ -85,18 +85,19 @@ type Stats struct {
 	OrphanSites      int            `json:"orphan_sites"`
 	ForeignOwned     int            `json:"foreign_owned"`
 	// Environment layers (INGEST_ENV_FACTS_PLAN).
-	Layers           map[string]int `json:"layers,omitempty"` // features read per layer_* reason
-	CampsiteSkipped  int            `json:"campsite_skipped"` // candidates inside a campsite, excluded
-	CampsiteHidden   int            `json:"campsite_hidden"`  // existing spots hidden because of it
-	PolygonRecovered int            `json:"polygon_recovered"`
-	PolygonKept      int            `json:"polygon_kept"` // update would have dropped an existing area
-	WaterNear        int            `json:"water_near"`   // spots with water within EnvWaterMaxM
-	Waterside        int            `json:"waterside"`    // water within EnvWatersideM, not a pond
-	WithTreeCover    int            `json:"with_tree_cover"`
-	ProtectedSpots   int            `json:"protected_spots"`
-	EnvFailed        []string       `json:"env_failed,omitempty"`
-	GuardTripped     bool           `json:"guard_tripped,omitempty"`
-	GuardForced      bool           `json:"guard_forced,omitempty"`
+	Layers           map[string]int   `json:"layers,omitempty"` // features read per layer_* reason
+	CampsiteSkipped  int              `json:"campsite_skipped"` // candidates inside a campsite, excluded
+	CampsiteHidden   int              `json:"campsite_hidden"`  // existing spots hidden because of it
+	PolygonRecovered int              `json:"polygon_recovered"`
+	PolygonKept      int              `json:"polygon_kept"` // update would have dropped an existing area
+	WaterNear        int              `json:"water_near"`   // spots with water within EnvWaterMaxM
+	Waterside        int              `json:"waterside"`    // water within EnvWatersideM, not a pond
+	WithTreeCover    int              `json:"with_tree_cover"`
+	ProtectedSpots   int              `json:"protected_spots"`
+	EnvFailed        []string         `json:"env_failed,omitempty"`
+	EnvMs            map[string]int64 `json:"env_ms,omitempty"`
+	GuardTripped     bool             `json:"guard_tripped,omitempty"`
+	GuardForced      bool             `json:"guard_forced,omitempty"`
 
 	StageMs map[string]int64 `json:"stage_ms,omitempty"`
 }
@@ -223,6 +224,8 @@ type EnvStats struct {
 	// Failed names the env groups (water, tree, protected) that hit the
 	// step timeout or an error; their attrs were left unset for this run.
 	Failed []string
+	// GroupMs is the time of each env group (water, tree, protected).
+	GroupMs map[string]int64
 }
 
 type Store interface {
@@ -844,7 +847,7 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 			}
 			st.WaterNear, st.Waterside = env.WaterNear, env.Waterside
 			st.WithTreeCover, st.ProtectedSpots = env.WithTreeCover, env.Protected
-			st.EnvFailed = env.Failed
+			st.EnvFailed, st.EnvMs = env.Failed, env.GroupMs
 			mark("env")
 		}
 

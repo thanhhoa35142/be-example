@@ -474,6 +474,9 @@ RETURNING f.source, f.source_id;
 -- simplified to about 3 m for the candidate search; the exact distance of the
 -- winners uses the same simplified footprint (error below 3 m against a 50 m
 -- threshold).
+-- Every stage is MATERIALIZED: left inlined, the planner (which estimates one
+-- row for these CTEs) re-ran the window per spot and evaluated the geography
+-- distance inside nested-loop join filters (5 s for 100 spots on a giant lake).
 -- Only active/pending spots; curated spots included (only env keys change).
 WITH sp AS (
     SELECT s.id, g.fp, g.fp::geography AS fpg, ST_Expand(g.fp, @radius_deg::float8) AS box
@@ -489,7 +492,7 @@ WITH sp AS (
     FROM sp
     JOIN t_ingest_features f
       ON f.pack_id = @pack_id AND f.exclude_reason = 'layer_water' AND f.geom && sp.box
-), ranked AS (
+), ranked AS MATERIALIZED (
     SELECT c.*,
            CASE WHEN c.major THEN 0 WHEN c.kind <> 'pond' THEN 1 ELSE 2 END AS cls,
            row_number() OVER (
@@ -498,7 +501,7 @@ WITH sp AS (
                ORDER BY c.dd) AS rn
     FROM cand c
     WHERE c.dd <= @radius_deg::float8
-), exact AS (
+), exact AS MATERIALIZED (
     SELECT r.id, r.kind, r.major, r.m2, r.cls,
            CASE WHEN r.dd = 0 THEN 0::float8
                 ELSE ST_Distance(sp.fpg, f.geom::geography) END AS dist
@@ -506,12 +509,12 @@ WITH sp AS (
     JOIN sp ON sp.id = r.id
     JOIN t_ingest_features f ON f.pack_id = @pack_id AND f.source = r.source AND f.source_id = r.source_id
     WHERE r.rn <= 2
-), best AS (
+), best AS MATERIALIZED (
     SELECT DISTINCT ON (e.id) e.id, e.kind, e.major, e.m2, e.dist
     FROM exact e
     WHERE e.dist <= @max_m::float8
     ORDER BY e.id, e.cls, e.dist
-), calc AS (
+), calc AS MATERIALIZED (
     SELECT b.id,
            jsonb_strip_nulls(jsonb_build_object(
                'waterDistanceM', round(b.dist)::int,
