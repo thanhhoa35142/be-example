@@ -53,7 +53,7 @@ const (
 // this statement timeout inside a savepoint; a timeout leaves that group's
 // attrs unset and is reported in Stats.EnvFailed instead of failing the pack.
 // A variable so tests can force a timeout.
-var EnvStepTimeout = "40s"
+var EnvStepTimeout = "20s"
 
 // EnvKeys are the t_spots.attrs keys owned by the env step; it rewrites
 // them on every run (stale values are removed).

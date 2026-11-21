@@ -464,35 +464,61 @@ RETURNING f.source, f.source_id;
 --                        AnnotateWaterLayers: tags.major) within @waterside_m
 -- The nearest major water wins; non-major water (small lakes = ponds, narrow
 -- canals) is reported only when no major water is in range, ponds last.
--- Prefilter on the GiST index in degrees, geography distance only inside it;
--- the spot's geography is built once per spot.
+--
+-- Cost model (a dense NL pack has ~250 water pieces within 500 m of EVERY
+-- spot): the exact geography distance is the expensive part (a sphere
+-- computation per pair, no index), so it is evaluated only for the two
+-- planar-nearest pieces of each class (major / other / pond) per spot, not
+-- for every candidate. Candidates come from the GiST index on the expanded
+-- spot box; their planar distance in degrees is cheap. The spot footprint is
+-- simplified to about 3 m for the candidate search; the exact distance of the
+-- winners uses the same simplified footprint (error below 3 m against a 50 m
+-- threshold).
 -- Only active/pending spots; curated spots included (only env keys change).
 WITH sp AS (
-    SELECT s.id, COALESCE(s.area, s.geom::geometry) AS fp,
-           COALESCE(s.area, s.geom::geometry)::geography AS fpg
+    SELECT s.id, g.fp, g.fp::geography AS fpg, ST_Expand(g.fp, @radius_deg::float8) AS box
     FROM t_spots s
-    WHERE s.city_pack_id = @pack_id AND s.status IN ('active','pending')
-), calc AS (
-    SELECT sp.id,
-           jsonb_strip_nulls(jsonb_build_object(
-               'waterDistanceM', round(x.dist)::int,
-               'waterKind', x.kind,
-               'waterBodyHa', round((x.m2 / 10000.0)::numeric, 1),
-               'waterside', CASE WHEN x.major AND x.dist <= @waterside_m::float8 THEN true END)) AS env
-    FROM sp
     CROSS JOIN LATERAL (
-        SELECT d.kind, d.dist, d.major, d.m2
-        FROM (SELECT f.kind,
-                     COALESCE((f.tags->>'major')::bool, false) AS major,
-                     (f.tags->>'areaM2')::float8 AS m2,
-                     CASE WHEN ST_Intersects(f.geom, sp.fp) THEN 0::float8
-                          ELSE ST_Distance(sp.fpg, f.geom::geography) END AS dist
-              FROM t_ingest_features f
-              WHERE f.pack_id = @pack_id AND f.exclude_reason = 'layer_water'
-                AND ST_DWithin(f.geom, sp.fp, @radius_deg::float8)) d
-        WHERE d.dist <= @max_m::float8
-        ORDER BY (NOT d.major), (d.kind = 'pond'), d.dist
-        LIMIT 1) x
+        SELECT ST_SimplifyPreserveTopology(COALESCE(s.area, s.geom::geometry), 0.00003) AS fp) g
+    WHERE s.city_pack_id = @pack_id AND s.status IN ('active','pending')
+), cand AS MATERIALIZED (
+    SELECT sp.id, f.source, f.source_id, f.kind,
+           COALESCE((f.tags->>'major')::bool, false) AS major,
+           (f.tags->>'areaM2')::float8 AS m2,
+           ST_Distance(f.geom, sp.fp) AS dd -- geometry is not carried: keeps the window sort narrow
+    FROM sp
+    JOIN t_ingest_features f
+      ON f.pack_id = @pack_id AND f.exclude_reason = 'layer_water' AND f.geom && sp.box
+), ranked AS (
+    SELECT c.*,
+           CASE WHEN c.major THEN 0 WHEN c.kind <> 'pond' THEN 1 ELSE 2 END AS cls,
+           row_number() OVER (
+               PARTITION BY c.id,
+                            CASE WHEN c.major THEN 0 WHEN c.kind <> 'pond' THEN 1 ELSE 2 END
+               ORDER BY c.dd) AS rn
+    FROM cand c
+    WHERE c.dd <= @radius_deg::float8
+), exact AS (
+    SELECT r.id, r.kind, r.major, r.m2, r.cls,
+           CASE WHEN r.dd = 0 THEN 0::float8
+                ELSE ST_Distance(sp.fpg, f.geom::geography) END AS dist
+    FROM ranked r
+    JOIN sp ON sp.id = r.id
+    JOIN t_ingest_features f ON f.pack_id = @pack_id AND f.source = r.source AND f.source_id = r.source_id
+    WHERE r.rn <= 2
+), best AS (
+    SELECT DISTINCT ON (e.id) e.id, e.kind, e.major, e.m2, e.dist
+    FROM exact e
+    WHERE e.dist <= @max_m::float8
+    ORDER BY e.id, e.cls, e.dist
+), calc AS (
+    SELECT b.id,
+           jsonb_strip_nulls(jsonb_build_object(
+               'waterDistanceM', round(b.dist)::int,
+               'waterKind', b.kind,
+               'waterBodyHa', round((b.m2 / 10000.0)::numeric, 1),
+               'waterside', CASE WHEN b.major AND b.dist <= @waterside_m::float8 THEN true END)) AS env
+    FROM best b
 )
 UPDATE t_spots s
 SET attrs = (s.attrs - @water_keys::text[]) || COALESCE(calc.env, '{}'::jsonb)

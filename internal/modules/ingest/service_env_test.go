@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
+	"math/rand"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -381,6 +384,76 @@ func TestEnvBigGeometryAndTimeoutIsolation(t *testing.T) {
 			t.Fatalf("a failed group writes nothing: %v", a)
 		}
 	})
+}
+
+// Dense water (a Dutch pack has hundreds of canal and pond pieces within
+// 500 m of every spot) must stay cheap: the exact geography distance is only
+// computed for the nearest pieces. Under the first env implementation this
+// fixture (about 40k spot/water pairs) took far over the 10 s step budget and
+// failed the water group on every real NL pack.
+func TestEnvDenseWaterStaysFast(t *testing.T) {
+	pool := goldenPool(t)
+	ctx := context.Background()
+	slug := "env-dense"
+	pack := seedGoldenPack(t, pool, slug)
+	rng := rand.New(rand.NewSource(7))
+	const lon0, lat0, span = 5.0, 52.2, 0.032
+
+	circle := func(cx, cy, r float64) []byte {
+		var b strings.Builder
+		const n = 100
+		for i := 0; i <= n; i++ {
+			a := 2 * math.Pi * float64(i%n) / n
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			fmt.Fprintf(&b, "[%.6f,%.6f]", cx+r*math.Cos(a), cy+r*math.Sin(a))
+		}
+		return []byte(`{"type":"Polygon","coordinates":[[` + b.String() + `]]}`)
+	}
+	var feats []osm.RawFeature
+	for i := range 8 {
+		for j := range 8 {
+			name := fmt.Sprintf("Dense Park %d-%d", i, j)
+			feats = append(feats, goldenFeature(fmt.Sprintf("w-p%d-%d-%s", i, j, slug), 1,
+				map[string]string{"leisure": "park", "name": name, "access": "yes"},
+				circle(lon0+float64(i)*0.004, lat0+float64(j)*0.004, 0.0012)))
+		}
+	}
+	for k := range 2000 { // narrow canals: 4-vertex wiggly lines
+		x, y := lon0+rng.Float64()*span, lat0+rng.Float64()*span
+		feats = append(feats, goldenFeature(fmt.Sprintf("w-c%d-%s", k, slug), 1,
+			map[string]string{"waterway": "canal"},
+			[]byte(fmt.Sprintf(`{"type":"LineString","coordinates":[[%.6f,%.6f],[%.6f,%.6f],[%.6f,%.6f],[%.6f,%.6f]]}`,
+				x, y, x+0.002, y+0.0005, x+0.003, y-0.001, x+0.005, y+0.0008))))
+	}
+	for k := range 1000 { // ponds
+		feats = append(feats, goldenFeature(fmt.Sprintf("w-o%d-%s", k, slug), 1,
+			map[string]string{"natural": "water", "water": "pond"},
+			circle(lon0+rng.Float64()*span, lat0+rng.Float64()*span, 0.0002)))
+	}
+	// one real river and one lake so the result is not all "pond"
+	feats = append(feats,
+		goldenFeature("w-river-"+slug, 1, map[string]string{"waterway": "river"},
+			line(lon0-0.005, lat0+0.0015, lon0+span, lat0+0.0015)),
+		goldenFeature("w-lake-"+slug, 1, map[string]string{"natural": "water", "water": "lake"},
+			rect(lon0+0.03, lat0-0.01, lon0+0.04, lat0+0.04)))
+
+	old := ingest.EnvStepTimeout
+	ingest.EnvStepTimeout = "10s"
+	defer func() { ingest.EnvStepTimeout = old }()
+	st := runGolden(t, ctx, pool, &fixtureSource{features: feats}, pack, osm.Policy{})
+	if len(st.EnvFailed) != 0 {
+		t.Fatalf("env groups hit the step budget on dense water: %v", st.EnvFailed)
+	}
+	if ms := st.StageMs["env"]; ms > 8000 {
+		t.Fatalf("env stage took %d ms on dense water", ms)
+	}
+	// park 0-0 sits on the river line (y = lat0+0.0015 within the park circle)
+	a := spotAttrs(t, pool, pack.ID, "Dense Park 0-0")
+	if a["waterKind"] != "river" || a["waterside"] != true {
+		t.Fatalf("river must win over hundreds of nearer-or-equal canals and ponds: %v", a)
+	}
 }
 
 // Missing polygons: osmium assembles a relation as a MultiPolygon, but an
