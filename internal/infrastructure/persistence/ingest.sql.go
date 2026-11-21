@@ -12,6 +12,18 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const analyzeIngestFeatures = `-- name: AnalyzeIngestFeatures :exec
+ANALYZE t_ingest_features
+`
+
+// Rows merged inside the current tx have no planner statistics yet; with the
+// environment layers the table holds ~10x more rows per pack and the
+// candidate/absorption joins pick seq-scan plans without this.
+func (q *Queries) AnalyzeIngestFeatures(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, analyzeIngestFeatures)
+	return err
+}
+
 const assignPackAmenities = `-- name: AssignPackAmenities :execrows
 INSERT INTO t_spot_amenities (spot_id, type, distance_m, source, count)
 SELECT m.spot_id, m.amenity,
@@ -230,6 +242,110 @@ func (q *Queries) CountRecentSpotConfirms(ctx context.Context, arg CountRecentSp
 	var count int64
 	err := row.Scan(&count)
 	return count, err
+}
+
+const demoteSmallWater = `-- name: DemoteSmallWater :execrows
+UPDATE t_ingest_features
+SET kind = 'pond'
+WHERE pack_id = $1 AND role = 'excluded' AND exclude_reason = 'layer_water'
+  AND kind = 'lake' AND ST_Dimension(geom) = 2
+  AND ST_Area(geom::geography) < $2::float8
+`
+
+type DemoteSmallWaterParams struct {
+	PackID    uuid.UUID `json:"pack_id"`
+	PondMaxM2 float64   `json:"pond_max_m2"`
+}
+
+// Lake polygons under @pond_max_m2 (0.2 ha) are ponds: recorded, but never
+// make a spot "waterside".
+func (q *Queries) DemoteSmallWater(ctx context.Context, arg DemoteSmallWaterParams) (int64, error) {
+	result, err := q.db.Exec(ctx, demoteSmallWater, arg.PackID, arg.PondMaxM2)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const excludeCampsiteCandidates = `-- name: ExcludeCampsiteCandidates :many
+WITH camp AS MATERIALIZED (
+    SELECT k.geom, ST_Dimension(k.geom) AS dim
+    FROM t_ingest_features k
+    WHERE k.pack_id = $1 AND k.exclude_reason = 'layer_campsite'
+), hit AS (
+    -- area campsites: the candidate's bbox must overlap (index probe on
+    -- c.geom), then its anchor must be inside
+    SELECT c.source, c.source_id
+    FROM camp k
+    JOIN t_ingest_features c
+      ON c.pack_id = $1 AND c.role = 'candidate' AND c.geom && k.geom
+    WHERE k.dim = 2
+      AND ST_Contains(k.geom, ST_PointOnSurface(c.geom))
+      AND CASE WHEN c.kind IN ('site','table') THEN true
+               WHEN NOT ST_IsValid(c.geom) THEN false
+               ELSE ST_Area(ST_Intersection(k.geom, c.geom)) / NULLIF(ST_Area(c.geom), 0)
+                    >= $2::float8 END
+    UNION
+    -- camp site nodes
+    SELECT c.source, c.source_id
+    FROM camp k
+    JOIN t_ingest_features c
+      ON c.pack_id = $1 AND c.role = 'candidate' AND c.kind IN ('site','table')
+     AND c.geom && ST_Expand(k.geom, $3::float8)
+    WHERE k.dim = 0
+      AND ST_Distance(k.geom::geography, ST_PointOnSurface(c.geom)::geography) <= $4::float8
+)
+UPDATE t_ingest_features f
+SET role = 'excluded', exclude_reason = 'inside_campsite'
+FROM hit
+WHERE f.pack_id = $1 AND f.source = hit.source AND f.source_id = hit.source_id
+RETURNING f.source, f.source_id
+`
+
+type ExcludeCampsiteCandidatesParams struct {
+	PackID        uuid.UUID `json:"pack_id"`
+	ParkCover     float64   `json:"park_cover"`
+	NodeRadiusDeg float64   `json:"node_radius_deg"`
+	NodeRadiusM   float64   `json:"node_radius_m"`
+}
+
+type ExcludeCampsiteCandidatesRow struct {
+	Source   string `json:"source"`
+	SourceID string `json:"source_id"`
+}
+
+// Candidates that sit inside a camp site / caravan site are not picnic
+// spots (typically a tourism=picnic_site mapped inside a campsite). They
+// are turned into excluded rows BEFORE the planner loads candidates, so
+// they never get a spot and never keep an old one alive. Containment is
+// tested on the candidate's point-on-surface, so a park that merely
+// touches a campsite is kept; parks/beaches are dropped only when the
+// campsite covers at least @park_cover (e.g. 0.5) of their area.
+// Camp site nodes (no area) only exclude site/table candidates within
+// @node_radius_m.
+func (q *Queries) ExcludeCampsiteCandidates(ctx context.Context, arg ExcludeCampsiteCandidatesParams) ([]ExcludeCampsiteCandidatesRow, error) {
+	rows, err := q.db.Query(ctx, excludeCampsiteCandidates,
+		arg.PackID,
+		arg.ParkCover,
+		arg.NodeRadiusDeg,
+		arg.NodeRadiusM,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ExcludeCampsiteCandidatesRow{}
+	for rows.Next() {
+		var i ExcludeCampsiteCandidatesRow
+		if err := rows.Scan(&i.Source, &i.SourceID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const insertIngestSpot = `-- name: InsertIngestSpot :one
@@ -939,6 +1055,35 @@ func (q *Queries) PackBBox(ctx context.Context, id uuid.UUID) (PackBBoxRow, erro
 	return i, err
 }
 
+const packEnvStats = `-- name: PackEnvStats :one
+SELECT
+    count(*) FILTER (WHERE attrs ? 'waterDistanceM')::int AS water_near,
+    count(*) FILTER (WHERE attrs->>'waterside' = 'true')::int AS waterside,
+    count(*) FILTER (WHERE attrs ? 'treeCoverPct')::int AS with_tree_cover,
+    count(*) FILTER (WHERE attrs->>'protected' = 'true')::int AS protected
+FROM t_spots
+WHERE city_pack_id = $1 AND status IN ('active','pending')
+`
+
+type PackEnvStatsRow struct {
+	WaterNear     int32 `json:"water_near"`
+	Waterside     int32 `json:"waterside"`
+	WithTreeCover int32 `json:"with_tree_cover"`
+	Protected     int32 `json:"protected"`
+}
+
+func (q *Queries) PackEnvStats(ctx context.Context, cityPackID uuid.UUID) (PackEnvStatsRow, error) {
+	row := q.db.QueryRow(ctx, packEnvStats, cityPackID)
+	var i PackEnvStatsRow
+	err := row.Scan(
+		&i.WaterNear,
+		&i.Waterside,
+		&i.WithTreeCover,
+		&i.Protected,
+	)
+	return i, err
+}
+
 const resetSourceSightings = `-- name: ResetSourceSightings :exec
 UPDATE t_spot_sources ss SET missing_runs = 0, last_seen_at = now()
 FROM t_spots sp
@@ -983,12 +1128,16 @@ func (q *Queries) TouchPackImport(ctx context.Context, id uuid.UUID) error {
 
 const updateIngestSpot = `-- name: UpdateIngestSpot :exec
 UPDATE t_spots SET
-    name = $2, names = $3::jsonb, attrs = $4::jsonb,
-    quality = $5, geom = ST_SetSRID(ST_MakePoint($6, $7), 4326)::geography,
-    area = CASE WHEN $8::text IS NOT NULL
-                THEN ST_Multi(ST_GeomFromGeoJSON($8)) ELSE NULL END,
+    name = $2, names = $3::jsonb,
+    -- Only the tag-derived keys are replaced; derived env facts
+    -- (waterDistanceM, treeCoverPct, protected, ...) and any non-ingest
+    -- keys survive until the env step recomputes them.
+    attrs = (attrs - $7::text[]) || $8::jsonb,
+    quality = $4, geom = ST_SetSRID(ST_MakePoint($5, $6), 4326)::geography,
+    area = CASE WHEN $9::text IS NOT NULL
+                THEN ST_Multi(ST_GeomFromGeoJSON($9)) ELSE NULL END,
     -- cell follows the anchor (weather/crowd lookups are by cell)
-    cell_id = $9,
+    cell_id = $10,
     updated_at = now()
 WHERE id = $1
 `
@@ -997,10 +1146,11 @@ type UpdateIngestSpotParams struct {
 	ID            uuid.UUID   `json:"id"`
 	Name          pgtype.Text `json:"name"`
 	Column3       []byte      `json:"column_3"`
-	Column4       []byte      `json:"column_4"`
 	Quality       pgtype.Int2 `json:"quality"`
 	StMakepoint   interface{} `json:"st_makepoint"`
 	StMakepoint_2 interface{} `json:"st_makepoint_2"`
+	OwnedKeys     []string    `json:"owned_keys"`
+	Attrs         []byte      `json:"attrs"`
 	Area          pgtype.Text `json:"area"`
 	CellID        int64       `json:"cell_id"`
 }
@@ -1010,14 +1160,132 @@ func (q *Queries) UpdateIngestSpot(ctx context.Context, arg UpdateIngestSpotPara
 		arg.ID,
 		arg.Name,
 		arg.Column3,
-		arg.Column4,
 		arg.Quality,
 		arg.StMakepoint,
 		arg.StMakepoint_2,
+		arg.OwnedKeys,
+		arg.Attrs,
 		arg.Area,
 		arg.CellID,
 	)
 	return err
+}
+
+const updatePackEnvAttrs = `-- name: UpdatePackEnvAttrs :execrows
+WITH sp AS (
+    SELECT s.id, COALESCE(s.area, s.geom::geometry) AS fp,
+           s.geom::geometry AS pt, s.area
+    FROM t_spots s
+    WHERE s.city_pack_id = $2 AND s.status IN ('active','pending')
+), w AS (
+    SELECT sp.id, x.kind, round(x.dist)::int AS dist_m
+    FROM sp
+    CROSS JOIN LATERAL (
+        SELECT d.kind, d.dist
+        FROM (SELECT f.kind,
+                     CASE WHEN ST_Intersects(f.geom, sp.fp) THEN 0::float8
+                          ELSE ST_Distance(sp.fp::geography, f.geom::geography) END AS dist
+              FROM t_ingest_features f
+              WHERE f.pack_id = $2 AND f.exclude_reason = 'layer_water'
+                AND ST_DWithin(f.geom, sp.fp, $3::float8)) d
+        WHERE d.dist <= $4::float8
+        ORDER BY (d.kind = 'pond'), d.dist
+        LIMIT 1) x
+), t AS (
+    SELECT sp.id,
+           COALESCE(LEAST(100, GREATEST(0, round(100 * ST_Area(ST_Intersection(
+               CASE WHEN ST_IsValid(sp.area) THEN sp.area ELSE ST_MakeValid(sp.area) END,
+               u.g)::geography) / NULLIF(ST_Area(sp.area::geography), 0)))), 0)::int AS pct
+    FROM sp
+    LEFT JOIN LATERAL (
+        SELECT ST_Union(CASE WHEN ST_IsValid(f.geom) THEN f.geom ELSE ST_MakeValid(f.geom) END) AS g
+        FROM t_ingest_features f
+        WHERE f.pack_id = $2 AND f.geom && sp.area
+          AND (f.exclude_reason = 'layer_wood'
+               OR (f.role = 'candidate' AND (f.tags->>'natural' = 'wood' OR f.tags->>'landuse' = 'forest')))
+          AND ST_Dimension(f.geom) = 2 AND ST_Intersects(f.geom, sp.area)) u ON true
+    WHERE sp.area IS NOT NULL
+), p AS (
+    SELECT sp.id,
+           (own.n > 0 OR pa.id IS NOT NULL) AS is_protected,
+           CASE WHEN pa.fee IN ('yes','no') THEN pa.fee END AS fee,
+           pa.operator
+    FROM sp
+    CROSS JOIN LATERAL (
+        SELECT count(*) AS n
+        FROM t_spot_sources ss
+        JOIN t_ingest_features f
+          ON f.pack_id = $2 AND f.source = ss.source AND f.source_id = ss.source_id
+        WHERE ss.spot_id = sp.id AND ss.via = 'primary'
+          AND (f.tags->>'boundary' = 'protected_area' OR f.tags->>'leisure' = 'nature_reserve')) own
+    LEFT JOIN LATERAL (
+        SELECT 1 AS id, f.tags->>'fee' AS fee, f.tags->>'operator' AS operator
+        FROM t_ingest_features f
+        WHERE f.pack_id = $2 AND f.exclude_reason = 'layer_protected'
+          AND ST_Dimension(f.geom) = 2 AND f.geom && sp.pt AND ST_Contains(f.geom, sp.pt)
+        ORDER BY ST_Area(f.geom)
+        LIMIT 1) pa ON true
+), calc AS (
+    SELECT sp.id,
+           jsonb_strip_nulls(jsonb_build_object(
+               'waterDistanceM', w.dist_m,
+               'waterKind', w.kind,
+               'waterside', CASE WHEN w.dist_m <= $5::int AND w.kind <> 'pond' THEN true END,
+               'treeCoverPct', t.pct,
+               'protected', CASE WHEN p.is_protected THEN true END,
+               'protectedFee', p.fee,
+               'protectedOperator', p.operator)) AS env
+    FROM sp
+    LEFT JOIN w ON w.id = sp.id
+    LEFT JOIN t ON t.id = sp.id
+    LEFT JOIN p ON p.id = sp.id
+)
+UPDATE t_spots s
+SET attrs = (s.attrs - $1::text[]) || calc.env
+FROM calc
+WHERE calc.id = s.id
+  AND s.attrs IS DISTINCT FROM ((s.attrs - $1::text[]) || calc.env)
+`
+
+type UpdatePackEnvAttrsParams struct {
+	EnvKeys    []string  `json:"env_keys"`
+	PackID     uuid.UUID `json:"pack_id"`
+	RadiusDeg  float64   `json:"radius_deg"`
+	MaxM       float64   `json:"max_m"`
+	WatersideM int32     `json:"waterside_m"`
+}
+
+// Per-spot environment facts into t_spots.attrs (merge, never replace):
+//
+//	waterDistanceM int   metres from the spot footprint (area, else point)
+//	                     to the nearest water; only when <= @max_m
+//	waterKind text       sea|river|canal|lake|pond of that water. A pond is
+//	                     used only when no other water is in range
+//	waterside bool       true when waterDistanceM <= @waterside_m and the
+//	                     kind is not pond
+//	treeCoverPct int     0-100 share of the spot AREA covered by wood/forest
+//	                     polygons (null for point-only spots)
+//	protected bool       the spot's own source is a protected area/nature
+//	                     reserve, or its anchor lies inside one
+//	protectedFee text    yes|no from the smallest containing protected area
+//	protectedOperator    operator of that area
+//
+// Distance pattern follows AssignPackAmenities: degree-radius ST_DWithin
+// prefilter on the GiST index, geography distance only inside it.
+// Only active/pending spots; curated spots are included because only the
+// env keys are touched. Rows already holding the same values are skipped.
+func (q *Queries) UpdatePackEnvAttrs(ctx context.Context, arg UpdatePackEnvAttrsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updatePackEnvAttrs,
+		arg.EnvKeys,
+		arg.PackID,
+		arg.RadiusDeg,
+		arg.MaxM,
+		arg.WatersideM,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const upsertSpotSources = `-- name: UpsertSpotSources :exec
@@ -1064,4 +1332,32 @@ func (q *Queries) UpsertSpotSources(ctx context.Context, arg UpsertSpotSourcesPa
 		arg.ContentHashes,
 	)
 	return err
+}
+
+const validateLayerGeoms = `-- name: ValidateLayerGeoms :execrows
+
+UPDATE t_ingest_features
+SET geom = ST_CollectionExtract(ST_MakeValid(geom),
+                                CASE WHEN ST_Dimension(geom) = 2 THEN 3
+                                     WHEN ST_Dimension(geom) = 1 THEN 2 ELSE 1 END)
+WHERE pack_id = $1 AND role = 'excluded' AND exclude_reason LIKE 'layer\_%'
+  AND NOT ST_IsValid(geom)
+`
+
+// ---------------------------------------------------------------------------
+// Environment layers (INGEST_ENV_FACTS_PLAN). Layer rows live in
+// t_ingest_features as role='excluded' with exclude_reason layer_water /
+// layer_wood / layer_campsite / layer_protected (no schema change: the role
+// CHECK only allows candidate|amenity|excluded). Water rows carry their kind
+// (sea|river|canal|lake|pond) in `kind`.
+// ---------------------------------------------------------------------------
+// One GEOS-validity pass over this pack's layer rows so the set operations
+// below never raise TopologyException (one bad OSM polygon would otherwise
+// fail the whole pack transaction).
+func (q *Queries) ValidateLayerGeoms(ctx context.Context, packID uuid.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, validateLayerGeoms, packID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

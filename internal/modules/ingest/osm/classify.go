@@ -150,12 +150,19 @@ func collectNames(tags map[string]string) (string, map[string]string) {
 	return name, names
 }
 
+// AttrKeys are the OSM tags copied verbatim into t_spots.attrs. Derived
+// environment facts (waterDistanceM, waterKind, waterside, treeCoverPct,
+// protected, protectedFee, protectedOperator) are written by the env step
+// and are never in this list.
+var AttrKeys = []string{
+	"access", "fee", "reservation", "nudism", "supervised",
+	"capacity", "description", "wikidata", "website",
+	"operator", "protection_title",
+}
+
 func collectAttrs(tags map[string]string) map[string]string {
 	attrs := map[string]string{}
-	for _, k := range []string{
-		"access", "fee", "reservation", "nudism", "supervised",
-		"capacity", "description", "wikidata", "website",
-	} {
+	for _, k := range AttrKeys {
 		if v, ok := tags[k]; ok {
 			attrs[k] = v
 		}
@@ -164,6 +171,87 @@ func collectAttrs(tags map[string]string) map[string]string {
 		return nil
 	}
 	return attrs
+}
+
+// Environment layer names (exclude_reason of the raw rows).
+const (
+	LayerWater     = "layer_water"
+	LayerWood      = "layer_wood"
+	LayerCampsite  = "layer_campsite"
+	LayerProtected = "layer_protected"
+)
+
+// Water kinds stored in t_ingest_features.kind for LayerWater rows. "lake"
+// is demoted to "pond" in SQL when the polygon is under PondMaxHa.
+const (
+	WaterSea   = "sea"
+	WaterRiver = "river"
+	WaterCanal = "canal"
+	WaterLake  = "lake"
+	WaterPond  = "pond"
+)
+
+// waterIgnored are natural=water subtypes that are not places to sit by:
+// man-made basins and ornamental or technical water.
+var waterIgnored = map[string]bool{
+	"fountain": true, "reflecting_pool": true, "swimming_pool": true,
+	"wastewater": true, "basin": true, "ditch": true, "drain": true,
+	"stream_pool": true, "lock": true,
+}
+
+// layerOf maps tags to an environment layer and (for water) its kind.
+// Priority when a feature carries several: campsite, water, protected, wood.
+func layerOf(tags map[string]string) (layer, kind string) {
+	if t := tags["tourism"]; t == "camp_site" || t == "caravan_site" {
+		return LayerCampsite, ""
+	}
+	if k := waterKind(tags); k != "" {
+		return LayerWater, k
+	}
+	if tags["boundary"] == "protected_area" || tags["leisure"] == "nature_reserve" {
+		return LayerProtected, ""
+	}
+	if tags["natural"] == "wood" || tags["landuse"] == "forest" {
+		return LayerWood, ""
+	}
+	return "", ""
+}
+
+func waterKind(tags map[string]string) string {
+	// Hidden or covered water: culverts and pipes are not visible from a
+	// picnic blanket.
+	if tags["covered"] == "yes" || tags["location"] == "underground" ||
+		tags["location"] == "underwater" || tags["intermittent"] == "yes" {
+		return ""
+	}
+	switch tags["tunnel"] {
+	case "yes", "culvert", "flooded", "building_passage":
+		return ""
+	}
+	switch {
+	case tags["natural"] == "coastline":
+		return WaterSea
+	case tags["waterway"] == "river" || tags["waterway"] == "riverbank":
+		return WaterRiver
+	case tags["waterway"] == "canal":
+		return WaterCanal
+	case tags["natural"] == "water":
+		switch w := tags["water"]; {
+		case waterIgnored[w]:
+			return ""
+		case w == "river" || w == "riverbank":
+			return WaterRiver
+		case w == "canal":
+			return WaterCanal
+		case w == "pond":
+			return WaterPond
+		case w == "stream":
+			return ""
+		default:
+			return WaterLake
+		}
+	}
+	return ""
 }
 
 func isArea(geojson []byte) bool {
@@ -175,6 +263,17 @@ func (c Classifier) Classify(f RawFeature) Classified {
 	qp := c.Policy
 	if qp == (QualityPolicy{}) {
 		qp = DefaultQualityPolicy
+	}
+
+	// Environment layers (water, wood, campsite, protected area) are not
+	// spots: they are stored as excluded rows with exclude_reason
+	// "layer_*" and read by the per-spot environment queries. They are
+	// checked before hardExcluded because a private campsite is still a
+	// campsite, but only for features that are not spots/amenities.
+	if amenityType(f.Tags) == "" && spotKind(f.Tags) == "" {
+		if layer, kind := layerOf(f.Tags); layer != "" {
+			return Classified{Role: RoleExcluded, Exclude: layer, Kind: kind}
+		}
 	}
 
 	if reason := hardExcluded(f.Tags); reason != "" {

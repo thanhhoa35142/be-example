@@ -43,7 +43,27 @@ var filterExpressions = []string{
 	"nwr/amenity=bicycle_parking",
 
 	"nwr/picnic_table=yes",
+
+	// Environment layers (INGEST_ENV_FACTS_PLAN). Read per spot in SQL for
+	// waterDistanceM/waterKind, treeCoverPct, campsite exclusion and the
+	// protected-area facts. natural=tree_row is deliberately NOT fetched:
+	// the tree-cover share only uses wood/forest polygons.
+	"wr/natural=water",
+	"wr/waterway=riverbank",
+	"w/waterway=river,canal",
+	"w/natural=coastline",
+	"wr/natural=wood",
+	"wr/landuse=forest",
+	"nwr/tourism=camp_site",
+	"nwr/tourism=caravan_site",
+	"wr/boundary=protected_area",
+	"wr/leisure=nature_reserve",
 }
+
+// EnvLayers reports that this source delivers the environment layers, so
+// the ingest may (re)compute the derived env attrs. Sources that cannot
+// (Overpass fallback) must not wipe previously computed values.
+func (s *OsmiumSource) EnvLayers() bool { return true }
 
 func (s *OsmiumSource) prefix() []string {
 	if len(s.Cmd) > 0 {

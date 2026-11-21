@@ -141,6 +141,10 @@ func (s *ingestStore) MergeRaw(ctx context.Context) (int64, error) {
 	return n, s.q.ClearIngestStaging(ctx, s.packID)
 }
 
+func (s *ingestStore) AnalyzeRaw(ctx context.Context) error {
+	return s.q.AnalyzeIngestFeatures(ctx)
+}
+
 func (s *ingestStore) Candidates(ctx context.Context) ([]ingest.CandidateRow, error) {
 	rows, err := s.q.ListCandidateFeatures(ctx, s.packID)
 	if err != nil {
@@ -348,7 +352,8 @@ func (s *ingestStore) UpdateSpot(ctx context.Context, id uuid.UUID, ns ingest.Ne
 		ID:            id,
 		Name:          textOrNull(ns.Name),
 		Column3:       ns.NamesJSON,
-		Column4:       ns.AttrsJSON,
+		OwnedKeys:     osm.AttrKeys,
+		Attrs:         ns.AttrsJSON,
 		Quality:       int2OrNull(ns.Quality),
 		StMakepoint:   ns.Lon,
 		StMakepoint_2: ns.Lat,
@@ -437,6 +442,51 @@ func (s *ingestStore) AssignAmenities(ctx context.Context, radiusDeg, radiusM fl
 		RadiusDeg: radiusDeg,
 		RadiusM:   radiusM,
 	})
+}
+
+func (s *ingestStore) PrepareLayers(ctx context.Context) (ingest.LayerPrep, error) {
+	var prep ingest.LayerPrep
+	if _, err := s.q.ValidateLayerGeoms(ctx, s.packID); err != nil {
+		return prep, err
+	}
+	if _, err := s.q.DemoteSmallWater(ctx, DemoteSmallWaterParams{
+		PackID: s.packID, PondMaxM2: ingest.EnvPondMaxM2,
+	}); err != nil {
+		return prep, err
+	}
+	rows, err := s.q.ExcludeCampsiteCandidates(ctx, ExcludeCampsiteCandidatesParams{
+		PackID:        s.packID,
+		ParkCover:     ingest.EnvCampParkCover,
+		NodeRadiusM:   ingest.EnvCampNodeRadiusM,
+		NodeRadiusDeg: ingest.EnvCampNodeRadiusM / 111320 * 2, // widened for latitude; exact test is geography
+	})
+	if err != nil {
+		return prep, err
+	}
+	for _, r := range rows {
+		prep.CampsiteExcluded = append(prep.CampsiteExcluded, [2]string{r.Source, r.SourceID})
+	}
+	return prep, nil
+}
+
+func (s *ingestStore) UpdateEnvAttrs(ctx context.Context, radiusDeg float64) (ingest.EnvStats, error) {
+	if _, err := s.q.UpdatePackEnvAttrs(ctx, UpdatePackEnvAttrsParams{
+		EnvKeys:    ingest.EnvKeys,
+		PackID:     s.packID,
+		RadiusDeg:  radiusDeg,
+		MaxM:       ingest.EnvWaterMaxM,
+		WatersideM: ingest.EnvWatersideM,
+	}); err != nil {
+		return ingest.EnvStats{}, err
+	}
+	r, err := s.q.PackEnvStats(ctx, s.packID)
+	if err != nil {
+		return ingest.EnvStats{}, err
+	}
+	return ingest.EnvStats{
+		WaterNear: int(r.WaterNear), Waterside: int(r.Waterside),
+		WithTreeCover: int(r.WithTreeCover), Protected: int(r.Protected),
+	}, nil
 }
 
 func (s *ingestStore) TouchImport(ctx context.Context) error {

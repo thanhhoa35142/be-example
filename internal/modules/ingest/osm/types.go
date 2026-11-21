@@ -42,3 +42,10 @@ type Snapshot interface {
 type FeatureSource interface {
 	Open(ctx context.Context, p Pack) (Snapshot, error)
 }
+
+// EnvLayerSource is implemented by feature sources that deliver the
+// environment layers (water, wood, campsite, protected area). The ingest
+// only recomputes the derived env attrs for such sources.
+type EnvLayerSource interface {
+	EnvLayers() bool
+}

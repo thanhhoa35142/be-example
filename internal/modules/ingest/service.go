@@ -20,6 +20,30 @@ var ErrGuardTripped = errors.New("ingest guard tripped")
 
 const fallbackRadiusM = 30.0
 
+// Environment-fact thresholds (documented in INGEST_ENV_FACTS_PLAN.md).
+const (
+	// EnvWaterMaxM: nearest water farther than this is not recorded.
+	EnvWaterMaxM = 500.0
+	// EnvWatersideM: a spot is "waterside" when water is within this many
+	// meters of its footprint (and the water is not a pond).
+	EnvWatersideM = 50
+	// EnvPondMaxM2: lake polygons under 0.2 ha are ponds.
+	EnvPondMaxM2 = 2000.0
+	// EnvCampParkCover: a park/beach is excluded as "inside a campsite"
+	// when a campsite covers this share of it (and holds its anchor).
+	EnvCampParkCover = 0.5
+	// EnvCampNodeRadiusM: a camp site node excludes site/table candidates
+	// within this distance.
+	EnvCampNodeRadiusM = 40.0
+)
+
+// EnvKeys are the t_spots.attrs keys owned by the env step; it rewrites
+// them on every run (stale values are removed).
+var EnvKeys = []string{
+	"waterDistanceM", "waterKind", "waterside", "treeCoverPct",
+	"protected", "protectedFee", "protectedOperator",
+}
+
 type Stats struct {
 	FeaturesRead     int            `json:"features_read"`
 	ExcludedByReason map[string]int `json:"excluded_by_reason,omitempty"`
@@ -39,6 +63,16 @@ type Stats struct {
 	AmenitiesLinked  int            `json:"amenities_linked"`
 	OrphanSites      int            `json:"orphan_sites"`
 	ForeignOwned     int            `json:"foreign_owned"`
+	// Environment layers (INGEST_ENV_FACTS_PLAN).
+	Layers           map[string]int `json:"layers,omitempty"` // features read per layer_* reason
+	CampsiteSkipped  int            `json:"campsite_skipped"` // candidates inside a campsite, excluded
+	CampsiteHidden   int            `json:"campsite_hidden"`  // existing spots hidden because of it
+	PolygonRecovered int            `json:"polygon_recovered"`
+	PolygonKept      int            `json:"polygon_kept"` // update would have dropped an existing area
+	WaterNear        int            `json:"water_near"`   // spots with water within EnvWaterMaxM
+	Waterside        int            `json:"waterside"`    // water within EnvWatersideM, not a pond
+	WithTreeCover    int            `json:"with_tree_cover"`
+	ProtectedSpots   int            `json:"protected_spots"`
 	GuardTripped     bool           `json:"guard_tripped,omitempty"`
 	GuardForced      bool           `json:"guard_forced,omitempty"`
 
@@ -155,16 +189,33 @@ type SourceUpsert struct {
 	ContentHash string
 }
 
+// LayerPrep is the outcome of validating the environment layers and
+// excluding campsite candidates (source keys are [source, source_id]).
+type LayerPrep struct {
+	CampsiteExcluded [][2]string
+}
+
+// EnvStats counts active/pending spots of the pack per environment fact.
+type EnvStats struct {
+	WaterNear, Waterside, WithTreeCover, Protected int
+}
+
 type Store interface {
 	ClearRaw(ctx context.Context) error
 
 	CopyRaw(ctx context.Context, rows []RawRow) error
 
 	MergeRaw(ctx context.Context) (int64, error)
+
+	AnalyzeRaw(ctx context.Context) error
 	Candidates(ctx context.Context) ([]CandidateRow, error)
 	Absorbed(ctx context.Context) ([]AbsorbedRow, error)
 
 	AmenityTypes(ctx context.Context) (map[[2]string]int, error)
+
+	PrepareLayers(ctx context.Context) (LayerPrep, error)
+
+	UpdateEnvAttrs(ctx context.Context, radiusDeg float64) (EnvStats, error)
 
 	OrphanTableClusters(ctx context.Context, epsMerc float64, minPts int) ([]TableCluster, error)
 	Spots(ctx context.Context) ([]SpotRow, error)
@@ -276,7 +327,12 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 			}
 			st.FeaturesRead++
 			c := clf.Classify(f)
-			if c.Role == osm.RoleExcluded {
+			if c.Role == osm.RoleExcluded && strings.HasPrefix(c.Exclude, "layer_") {
+				if st.Layers == nil {
+					st.Layers = map[string]int{}
+				}
+				st.Layers[c.Exclude]++
+			} else if c.Role == osm.RoleExcluded {
 				if st.ExcludedByReason == nil {
 					st.ExcludedByReason = map[string]int{}
 				}
@@ -312,7 +368,17 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 			st.ExcludedByReason["parse_error"] = pe.ParseErrors()
 		}
 
+		if err := store.AnalyzeRaw(ctx); err != nil {
+			return fmt.Errorf("analyze raw: %w", err)
+		}
 		mark("merge")
+
+		prep, err := store.PrepareLayers(ctx)
+		if err != nil {
+			return fmt.Errorf("prepare layers: %w", err)
+		}
+		st.CampsiteSkipped = len(prep.CampsiteExcluded)
+		mark("layers")
 
 		absorbed, err := store.Absorbed(ctx)
 		if err != nil {
@@ -358,6 +424,33 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 			}
 		}
 
+		// Campsite candidates were excluded from the raw layer; spots that
+		// already exist for them would otherwise stay active forever (an
+		// excluded row never resets sightings, and "missing" would take two
+		// runs and count against the close guard).
+		for _, k := range prep.CampsiteExcluded {
+			l := links[k]
+			if !l.Found || l.PackID != pack.ID || l.Via != "primary" {
+				continue
+			}
+			sp, ok := spotRow[l.SpotID]
+			if !ok || locked(sp) {
+				continue
+			}
+			if sp.Status != string(osm.StatusActive) && sp.Status != string(osm.StatusPending) {
+				continue
+			}
+			if err := store.SetStatus(ctx, sp.ID, string(osm.StatusHidden), osm.ReasonInsideCampsite); err != nil {
+				return err
+			}
+			if sp.Status == string(osm.StatusActive) {
+				activeCount--
+			}
+			sp.Status = string(osm.StatusHidden)
+			spotRow[sp.ID] = sp
+			st.CampsiteHidden++
+		}
+
 		var ups []SourceUpsert
 		upIdx := map[[2]string]int{}
 		queue := func(u SourceUpsert) {
@@ -388,6 +481,17 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 				SourcePresent:  true,
 			})
 			ns.Status = string(newStatus)
+			switch {
+			case ns.AreaGeoJSON == nil && sp.AreaGeoJSON != nil:
+				// A point-only candidate (an Overpass-collapsed relation, or
+				// a dedup that kept the point) must never wipe a polygon
+				// that an earlier run assembled: keep area and anchor.
+				ns.AreaGeoJSON = sp.AreaGeoJSON
+				ns.Lon, ns.Lat = sp.Lon, sp.Lat
+				st.PolygonKept++
+			case ns.AreaGeoJSON != nil && sp.AreaGeoJSON == nil:
+				st.PolygonRecovered++
+			}
 			if cell, err := geo.CellIDFromLatLng(ns.Lat, ns.Lon); err == nil {
 				ns.CellID = cell
 			}
@@ -708,6 +812,16 @@ func (s *Service) RunPack(ctx context.Context, pack osm.Pack, runID int64, dryRu
 		st.AmenitiesLinked = int(n)
 		mark("amenities")
 
+		if src, ok := s.Src.(osm.EnvLayerSource); ok && src.EnvLayers() {
+			env, err := store.UpdateEnvAttrs(ctx, EnvWaterMaxM/(111320*cosLat))
+			if err != nil {
+				return fmt.Errorf("env attrs: %w", err)
+			}
+			st.WaterNear, st.Waterside = env.WaterNear, env.Waterside
+			st.WithTreeCover, st.ProtectedSpots = env.WithTreeCover, env.Protected
+			mark("env")
+		}
+
 		if err := store.TouchImport(ctx); err != nil {
 			return err
 		}
@@ -734,6 +848,7 @@ func locked(sp SpotRow) bool {
 func sameSpot(sp SpotRow, ns NewSpot) bool {
 	const eps = 1e-7
 	return sp.Quality == ns.Quality && sp.Name == ns.Name &&
+		sameTagAttrs(sp.AttrsJSON, ns.AttrsJSON) &&
 		(ns.CellID == 0 || sp.CellID == ns.CellID) &&
 		math.Abs(sp.Lon-ns.Lon) < eps && math.Abs(sp.Lat-ns.Lat) < eps &&
 		(sp.AreaGeoJSON != nil) == (ns.AreaGeoJSON != nil)
@@ -744,17 +859,31 @@ func packCosLat(pack osm.Pack) float64 {
 	return math.Max(math.Cos(centerLat*math.Pi/180), 0.2)
 }
 
-var attrKeys = []string{"access", "fee", "reservation", "nudism", "supervised", "capacity", "description", "wikidata", "website"}
-
 func attrsJSON(tags map[string]string) []byte {
 	attrs := map[string]string{}
-	for _, k := range attrKeys {
+	for _, k := range osm.AttrKeys {
 		if v, ok := tags[k]; ok {
 			attrs[k] = v
 		}
 	}
 	b, _ := json.Marshal(attrs)
 	return b
+}
+
+// sameTagAttrs compares only the tag-derived attr keys: t_spots.attrs also
+// holds derived env facts that the planner does not own.
+func sameTagAttrs(have, want []byte) bool {
+	var h, w map[string]any
+	_ = json.Unmarshal(have, &h)
+	_ = json.Unmarshal(want, &w)
+	for _, k := range osm.AttrKeys {
+		hv, hok := h[k]
+		wv, wok := w[k]
+		if hok != wok || hv != wv {
+			return false
+		}
+	}
+	return true
 }
 
 func namesJSON(tags map[string]string) []byte {

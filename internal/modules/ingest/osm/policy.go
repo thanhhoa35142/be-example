@@ -57,11 +57,12 @@ const (
 	ReasonSourceReturned  = "source_returned"
 	ReasonClosedByReport  = "closed_by_report"
 	ReasonDuplicateMerged = "duplicate_osm_area"
+	ReasonInsideCampsite  = "inside_campsite"
 )
 
 func ImporterHiddenReason(r string) bool {
 	switch r {
-	case ReasonBelowFloor, ReasonVanished, ReasonSourcesMoved:
+	case ReasonBelowFloor, ReasonVanished, ReasonSourcesMoved, ReasonInsideCampsite:
 		return true
 	}
 	return false

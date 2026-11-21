@@ -35,17 +35,19 @@ type overpassElement struct {
 	Lon      float64           `json:"lon"`
 	Version  int               `json:"version"`
 	Tags     map[string]string `json:"tags"`
-	Geometry []struct {
-		Lat float64 `json:"lat"`
-		Lon float64 `json:"lon"`
-	} `json:"geometry"`
-	Members []struct {
-		Type     string `json:"type"`
-		Geometry []struct {
-			Lat float64 `json:"lat"`
-			Lon float64 `json:"lon"`
-		} `json:"geometry"`
-	} `json:"members"`
+	Geometry []ovPoint         `json:"geometry"`
+	Members  []overpassMember  `json:"members"`
+}
+
+type ovPoint struct {
+	Lat float64 `json:"lat"`
+	Lon float64 `json:"lon"`
+}
+
+type overpassMember struct {
+	Type     string    `json:"type"`
+	Role     string    `json:"role"`
+	Geometry []ovPoint `json:"geometry"`
 }
 
 type overpassResponse struct {
@@ -74,10 +76,7 @@ func sourceID(prefix string, id int64) string {
 	return fmt.Sprintf("%s%d", prefix, id)
 }
 
-func ringGeoJSON(pts []struct {
-	Lat float64 `json:"lat"`
-	Lon float64 `json:"lon"`
-}) []byte {
+func ringGeoJSON(pts []ovPoint) []byte {
 	var b bytes.Buffer
 	b.WriteString(`{"type":"Polygon","coordinates":[[`)
 	for i, p := range pts {
@@ -90,10 +89,7 @@ func ringGeoJSON(pts []struct {
 	return b.Bytes()
 }
 
-func lineGeoJSON(pts []struct {
-	Lat float64 `json:"lat"`
-	Lon float64 `json:"lon"`
-}) []byte {
+func lineGeoJSON(pts []ovPoint) []byte {
 	var b bytes.Buffer
 	b.WriteString(`{"type":"LineString","coordinates":[`)
 	for i, p := range pts {
@@ -110,10 +106,7 @@ func pointGeoJSON(lon, lat float64) []byte {
 	return []byte(fmt.Sprintf(`{"type":"Point","coordinates":[%f,%f]}`, lon, lat))
 }
 
-func closedRing(pts []struct {
-	Lat float64 `json:"lat"`
-	Lon float64 `json:"lon"`
-}) bool {
+func closedRing(pts []ovPoint) bool {
 	if len(pts) < 4 {
 		return false
 	}
@@ -134,7 +127,15 @@ func elementGeoJSON(e overpassElement) []byte {
 		}
 		return lineGeoJSON(e.Geometry)
 	case "relation":
-
+		// Multipolygon/boundary relations keep their real outline; the old
+		// vertex-mean Point made every large park a point-only spot (no
+		// area, every amenity "nearby"). Fall back to a point only when
+		// the rings cannot be closed from the member geometries.
+		if e.Tags["type"] == "multipolygon" || e.Tags["type"] == "boundary" {
+			if g := multipolygonGeoJSON(e.Members); g != nil {
+				return g
+			}
+		}
 		var sumLat, sumLon float64
 		n := 0
 		for _, m := range e.Members {
